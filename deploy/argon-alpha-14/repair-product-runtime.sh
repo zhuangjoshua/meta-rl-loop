@@ -28,6 +28,7 @@ removed_units=0
 if [[ "\$stop_core" == "1" ]]; then
   systemctl stop takyon-worker.service >/dev/null 2>&1 || true
   systemctl stop takyon-dashboard.service >/dev/null 2>&1 || true
+  systemctl stop takyon-docker-broker.service >/dev/null 2>&1 || true
 fi
 
 if command -v systemctl >/dev/null 2>&1; then

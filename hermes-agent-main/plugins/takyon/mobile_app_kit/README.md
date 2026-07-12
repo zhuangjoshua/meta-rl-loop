@@ -27,6 +27,14 @@ second backend.
    (Apple 5.1.1(v)) ships in `src/screens/profile.tsx`, wired to the `account.delete` rail.
 5. **Ugly on purpose.** `theme.ts` + placeholder copy/assets are starting points the CEO worker
    replaces before publish. A shipped app that still looks like this is a quality finding.
+6. **Record references.** Record responses expose one opaque `record.ref`; pass it unchanged to
+   `readRecord(ref)`, `saveRecord({ ref, data, ...fields })`, and `deleteRecord(ref)`. Record saves
+   are upserts, so `data` is required. Raw IDs and positional record operations remain runtime-only
+   compatibility for already-published apps and are not part of the generated mobile SDK.
+7. **Self-service cancellation.** Every active paid subscription exposes an in-app cancel control
+   in `src/screens/profile.tsx`. It calls the shared account rail, ends access immediately with no
+   grace period, and refreshes authoritative account state; support-mediated cancellation is not
+   permitted.
 
 ## Pins
 

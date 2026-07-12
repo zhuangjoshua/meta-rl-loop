@@ -10,6 +10,8 @@ VERIFY_SUPABASE_AUTH_SCRIPT="$RUNTIME_DIR/scripts/verify-supabase-auth-runtime.p
 VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh"
 REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/remove-stripe-authority-env.py"
 WEB_BUILD_SCRIPT="$ROOT_DIR/deploy/shared/build-web-locked.sh"
+RUNTIME_RELEASE_SCRIPT="$ROOT_DIR/deploy/shared/runtime-release.sh"
+PREFLIGHT_STAGED_RUNTIME_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/preflight-staged-runtime.sh"
 ISOLATE_OPERATOR_MIGRATION_DSN_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/isolate-operator-migration-dsn.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
@@ -40,9 +42,65 @@ TAKYON_SMOKE_MAX_TIME="${TAKYON_SMOKE_MAX_TIME:-10}"
 TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS="${TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS:-900}"
 TAKYON_DEPLOY_DRAIN_POLL_SECONDS="${TAKYON_DEPLOY_DRAIN_POLL_SECONDS:-5}"
 TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS="${TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS:-1800}"
+TAKYON_DEPLOY_WORKER_STOP_GRACE_SECONDS="${TAKYON_DEPLOY_WORKER_STOP_GRACE_SECONDS:-960}"
 TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
 TAKYON_REQUIRE_XURL_AUTH="${TAKYON_REQUIRE_XURL_AUTH:-0}"
 TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
+
+# The outer invocation builds a read-only, revision-pinned runtime snapshot and re-enters this
+# script while holding the home-level promotion lock. The lock stays owned through rsync, service
+# activation, smoke checks, and every other exit gate below; no deploy reads the mutable worktree.
+if [[ "${TAKYON_DEPLOY_LOCK_HELD:-0}" != "1" ]]; then
+  if [[ "$TAKYON_RUN_WEB_BUILD" != "1" ]]; then
+    echo "refusing unlocked operator deploy: TAKYON_RUN_WEB_BUILD=0 is internal-only" >&2
+    exit 1
+  fi
+  if [[ ! -f "$WEB_BUILD_SCRIPT" ]]; then
+    echo "web build helper not found: $WEB_BUILD_SCRIPT" >&2
+    exit 1
+  fi
+  exec bash "$WEB_BUILD_SCRIPT" "$RUNTIME_DIR" -- "$ROOT_DIR/deploy/argon-alpha-14/deploy-runtime.sh" "$@"
+fi
+
+DEPLOY_REPO_DIR="${TAKYON_DEPLOY_REPO_ARTIFACT:-}"
+DEPLOY_RUNTIME_DIR="${TAKYON_DEPLOY_RUNTIME_ARTIFACT:-}"
+if [[ ! -d "$DEPLOY_RUNTIME_DIR" || ! -f "$DEPLOY_RUNTIME_DIR/.takyon-deploy-artifact.json" ]]; then
+  echo "immutable deploy runtime artifact is missing or invalid: $DEPLOY_RUNTIME_DIR" >&2
+  exit 1
+fi
+if [[ ! -d "$DEPLOY_REPO_DIR" \
+  || "$(cd "$DEPLOY_REPO_DIR" && pwd -P)" != "$(cd "$ROOT_DIR" && pwd -P)" \
+  || "$(cd "$DEPLOY_RUNTIME_DIR" && pwd -P)" != "$(cd "$RUNTIME_DIR" && pwd -P)" ]]; then
+  echo "operator deploy callback is not running entirely from the immutable repository artifact" >&2
+  exit 1
+fi
+
+if [[ ! -f "$RUNTIME_RELEASE_SCRIPT" ]]; then
+  echo "runtime release helper not found: $RUNTIME_RELEASE_SCRIPT" >&2
+  exit 1
+fi
+if [[ ! -f "$PREFLIGHT_STAGED_RUNTIME_SCRIPT" ]]; then
+  echo "staged runtime preflight not found: $PREFLIGHT_STAGED_RUNTIME_SCRIPT" >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+source "$RUNTIME_RELEASE_SCRIPT"
+takyon_runtime_release_init "$TAKYON_REMOTE_RUNTIME" "$TAKYON_DEPLOY_SOURCE_REVISION"
+
+remote_dashboard_candidate="$TAKYON_REMOTE_RELEASE_META/candidates/takyon-dashboard.service"
+remote_worker_candidate="$TAKYON_REMOTE_RELEASE_META/candidates/takyon-worker.service"
+remote_docker_broker_candidate="$TAKYON_REMOTE_RELEASE_META/candidates/takyon-docker-broker.service"
+remote_operator_cli_candidate="$TAKYON_REMOTE_RELEASE_META/candidates/takyon-op"
+remote_dashboard_backup="$TAKYON_REMOTE_RELEASE_META/backups/takyon-dashboard.service"
+remote_worker_backup="$TAKYON_REMOTE_RELEASE_META/backups/takyon-worker.service"
+remote_docker_broker_backup="$TAKYON_REMOTE_RELEASE_META/backups/takyon-docker-broker.service"
+remote_operator_cli_backup="$TAKYON_REMOTE_RELEASE_META/backups/takyon-op"
+remote_release_files_marker="$TAKYON_REMOTE_RELEASE_META/release-files-installed"
+remote_operator_cli_existed_marker="$TAKYON_REMOTE_RELEASE_META/operator-cli-existed"
+remote_skills_preflight_home="$TAKYON_REMOTE_RELEASE_META/skills-preflight-home"
+remote_skills_backup="$TAKYON_REMOTE_RELEASE_META/backups/home-skills"
+remote_skills_existed_marker="$TAKYON_REMOTE_RELEASE_META/home-skills-existed"
+remote_skills_activation_marker="$TAKYON_REMOTE_RELEASE_META/home-skills-installed"
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
   echo "runtime directory not found: $RUNTIME_DIR" >&2
@@ -124,6 +182,108 @@ if [[ ! -f "$TAKYON_VPS_KEY" ]]; then
   exit 1
 fi
 
+for numeric_setting in \
+  TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS \
+  TAKYON_DEPLOY_DRAIN_POLL_SECONDS \
+  TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS \
+  TAKYON_DEPLOY_WORKER_STOP_GRACE_SECONDS; do
+  numeric_value="${!numeric_setting}"
+  if ! [[ "$numeric_value" =~ ^[0-9]+$ ]] || (( numeric_value < 1 )); then
+    echo "$numeric_setting must be a positive integer" >&2
+    exit 1
+  fi
+done
+
+operator_worker_quiesce_attempted=0
+operator_dashboard_stopped=0
+operator_runtime_activation_started=0
+operator_services_activated=0
+
+restore_operator_services_on_failure() {
+  local exit_status="$?"
+  local operator_rollback_ready=1
+  if [[ "$operator_worker_quiesce_attempted" == "1" && "$operator_services_activated" != "1" ]]; then
+    echo "operator deploy did not activate; restoring core services before exit" >&2
+    if [[ "$operator_runtime_activation_started" == "1" ]]; then
+      if ! ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+        "set -euo pipefail
+        systemctl stop takyon-worker.service takyon-dashboard.service takyon-docker-broker.service
+        for unit in takyon-worker.service takyon-dashboard.service takyon-docker-broker.service; do
+          systemctl is-active --quiet \"\$unit\" && exit 1 || true
+        done"; then
+        operator_rollback_ready=0
+      fi
+      if [[ "$operator_rollback_ready" == "1" ]] \
+        && ! takyon_rollback_runtime_if_pending "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"; then
+        operator_rollback_ready=0
+      fi
+      if [[ "$operator_rollback_ready" == "1" ]] \
+        && ! ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+        "set -euo pipefail
+        if [[ -f '$remote_release_files_marker' ]]; then
+          cp -p '$remote_dashboard_backup' '$TAKYON_REMOTE_SERVICE_FILE'
+          cp -p '$remote_worker_backup' '$TAKYON_REMOTE_WORKER_SERVICE_FILE'
+          cp -p '$remote_docker_broker_backup' '$TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE'
+          if [[ -f '$remote_operator_cli_existed_marker' ]]; then
+            cp -p '$remote_operator_cli_backup' /usr/local/bin/takyon-op
+          else
+            rm -f /usr/local/bin/takyon-op
+          fi
+        fi"; then
+        operator_rollback_ready=0
+      fi
+      if [[ "$operator_rollback_ready" == "1" ]] \
+        && ! ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+        "set -euo pipefail
+        if [[ -f '$remote_skills_activation_marker' ]]; then
+          rm -rf '$TAKYON_REMOTE_HOME/skills'
+          if [[ -f '$remote_skills_existed_marker' ]]; then
+            test -d '$remote_skills_backup'
+            cp -a '$remote_skills_backup' '$TAKYON_REMOTE_HOME/skills'
+          fi
+        fi"; then
+        operator_rollback_ready=0
+      fi
+    fi
+    if [[ "$operator_rollback_ready" == "1" ]]; then
+      ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+        "set +e
+        systemctl daemon-reload
+        if [[ '$operator_dashboard_stopped' == '1' ]]; then
+          systemctl restart takyon-docker-broker.service
+          systemctl restart takyon-dashboard.service
+        fi
+        if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
+          systemctl restart takyon-worker.service
+        fi
+        systemctl is-active --quiet takyon-dashboard.service" \
+        || true
+    else
+      echo "operator rollback failed; leaving core services stopped for manual recovery" >&2
+    fi
+    if [[ "$operator_runtime_activation_started" != "1" ]]; then
+      takyon_discard_staged_runtime_release "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" || true
+    fi
+  fi
+  return "$exit_status"
+}
+trap restore_operator_services_on_failure EXIT
+
+quiesce_remote_worker() {
+  operator_worker_quiesce_attempted=1
+  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+    "set -euo pipefail
+    if ! grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
+      exit 0
+    fi
+    # SIGTERM tells WorkerPool to stop claiming immediately and join every in-flight lane. Give a
+    # full 900-second product task an additional minute to finish instead of letting systemd's old
+    # 120-second stop ceiling SIGKILL and requeue it.
+    systemctl set-property --runtime takyon-worker.service TimeoutStopUSec='${TAKYON_DEPLOY_WORKER_STOP_GRACE_SECONDS}s'
+    systemctl stop takyon-worker.service
+    systemctl is-active --quiet takyon-worker.service && exit 1 || true"
+}
+
 TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
 TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
   "$ISOLATE_OPERATOR_MIGRATION_DSN_SCRIPT"
@@ -145,43 +305,37 @@ if [[ "$TAKYON_BOOTSTRAP_HOST" == "1" ]]; then
     "$BOOTSTRAP_SCRIPT"
 fi
 
-if [[ "$TAKYON_RUN_WEB_BUILD" == "1" ]]; then
-  bash "$WEB_BUILD_SCRIPT" "$RUNTIME_DIR/web"
-fi
+# Stop fresh claims before staged preflight reconciles shared dependencies and skills; the dashboard
+# keeps serving the old revision until the later bounded source/unit activation window.
+quiesce_remote_worker
 
-python3 -m compileall -q \
-  "$RUNTIME_DIR/plugins/takyon" \
-  "$RUNTIME_DIR/takyon_cli" \
-  "$RUNTIME_DIR/tui_gateway"
+(
+  compile_cache="$(mktemp -d)"
+  trap 'rm -rf "$compile_cache"' EXIT
+  PYTHONPYCACHEPREFIX="$compile_cache" python3 -m compileall -q \
+    "$DEPLOY_RUNTIME_DIR/plugins/takyon" \
+    "$DEPLOY_RUNTIME_DIR/takyon_cli" \
+    "$DEPLOY_RUNTIME_DIR/tui_gateway"
+)
 
-rsync -az --delete \
-  --filter='protect /.venv' \
-  --exclude '.git/' \
-  --exclude '.pytest_cache/' \
-  --exclude '__pycache__/' \
-  --exclude '*.pyc' \
-  --exclude 'node_modules/' \
-  --exclude 'web/node_modules/' \
-  --exclude '/.venv' \
-  -e "ssh -i $TAKYON_VPS_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-  "$RUNTIME_DIR/" \
-  "$TAKYON_VPS_HOST:$TAKYON_REMOTE_RUNTIME/"
+takyon_stage_runtime_release \
+  "$DEPLOY_RUNTIME_DIR" "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" "$TAKYON_DEPLOY_SOURCE_REVISION"
 
 scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$SERVICE_FILE" \
-  "$TAKYON_VPS_HOST:$TAKYON_REMOTE_SERVICE_FILE"
+  "$TAKYON_VPS_HOST:$remote_dashboard_candidate"
 
 scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$WORKER_SERVICE_FILE" \
-  "$TAKYON_VPS_HOST:$TAKYON_REMOTE_WORKER_SERVICE_FILE"
+  "$TAKYON_VPS_HOST:$remote_worker_candidate"
 
 scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$DOCKER_BROKER_SERVICE_FILE" \
-  "$TAKYON_VPS_HOST:$TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE"
+  "$TAKYON_VPS_HOST:$remote_docker_broker_candidate"
 
 scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$OPERATOR_CLI_FILE" \
-  "$TAKYON_VPS_HOST:/tmp/takyon-op"
+  "$TAKYON_VPS_HOST:$remote_operator_cli_candidate"
 
 if ! TARGET_HOST="$TAKYON_VPS_HOST" \
   TARGET_KEY="$TAKYON_VPS_KEY" \
@@ -200,7 +354,7 @@ run_remote_migrations() {
     "exec env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root \
       TAKYON_RUN_DB_MIGRATIONS='$TAKYON_RUN_DB_MIGRATIONS' \
       TAKYON_REMOTE_SERVICE_FILE='$TAKYON_REMOTE_SERVICE_FILE' \
-      TAKYON_REMOTE_RUNTIME='$TAKYON_REMOTE_RUNTIME' \
+      TAKYON_REMOTE_RUNTIME='$TAKYON_REMOTE_STAGED_RUNTIME' \
       TAKYON_REMOTE_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
       bash -s" <<'REMOTE_MIGRATE'
 set -euo pipefail
@@ -259,7 +413,7 @@ with psycopg.connect(resolve_database_url(plane='operator'), autocommit=True, pr
             \"\"\"
             SELECT COUNT(*)
             FROM business_work_requests AS work_request
-            WHERE work_request.status IN ('queued', 'running')
+            WHERE work_request.status = 'running'
               AND NULLIF(work_request.updated_at, '')::timestamptz >= (NOW() - %s::interval)
               -- A live Mac worker is outside the VPS restart boundary. Ignore its mirrored work
               -- request only when no other queued/running execution for that request has an
@@ -276,10 +430,9 @@ with psycopg.connect(resolve_database_url(plane='operator'), autocommit=True, pr
                       SELECT 1
                       FROM jobs AS other_job
                       WHERE other_job.payload->>'work_request_id' = work_request.id
-                        AND other_job.status IN ('queued', 'running')
+                        AND other_job.status = 'running'
                         AND (
-                            other_job.status <> 'running'
-                            OR COALESCE(other_job.locked_by, '') NOT LIKE 'mac-operator-%%'
+                            COALESCE(other_job.locked_by, '') NOT LIKE 'mac-operator-%%'
                         )
                   )
               )
@@ -317,18 +470,77 @@ PY"
   done
 }
 
+preflight_remote_staged_runtime() {
+  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+    "exec env \
+      TAKYON_STAGED_RUNTIME='$TAKYON_REMOTE_STAGED_RUNTIME' \
+      TAKYON_LIVE_RUNTIME='$TAKYON_REMOTE_RUNTIME' \
+      TAKYON_REMOTE_HOME='$TAKYON_REMOTE_HOME' \
+      TAKYON_DASHBOARD_UNIT_CANDIDATE='$remote_dashboard_candidate' \
+      TAKYON_WORKER_UNIT_CANDIDATE='$remote_worker_candidate' \
+      TAKYON_DOCKER_BROKER_UNIT_CANDIDATE='$remote_docker_broker_candidate' \
+      TAKYON_OPERATOR_CLI_CANDIDATE='$remote_operator_cli_candidate' \
+      TAKYON_SKILLS_PREFLIGHT_HOME='$remote_skills_preflight_home' \
+      TAKYON_REMOTE_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
+      TAKYON_DENO_VERSION='$TAKYON_DENO_VERSION' \
+      TAKYON_CLAUDE_AGENT_DOCKER_IMAGE='$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE' \
+      bash -s" < "$PREFLIGHT_STAGED_RUNTIME_SCRIPT"
+}
+
+preflight_remote_staged_runtime
 wait_for_remote_runtime_idle
 
-# Migrations are additive and run against the newly rsynced tree. Apply them while the current
-# services are still healthy, then enter the short stop/restart window. A slow advisory-lock wait
-# must never turn into operator-dashboard downtime.
+# Migrations are additive and run against the newly rsynced tree after the VPS worker has stopped
+# accepting work. The dashboard remains healthy until the short stop/restart cutover.
 run_remote_migrations
 
+takyon_prepare_runtime_rollback "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"
+
+operator_dashboard_stopped=1
 TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
   TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
 TAKYON_REMOTE_HOME="$TAKYON_REMOTE_HOME" \
 TAKYON_STOP_CORE_SERVICES=1 \
   "$REPAIR_PRODUCT_RUNTIME_SCRIPT"
+
+operator_runtime_activation_started=1
+takyon_begin_runtime_activation "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "set -euo pipefail
+  cp -p '$TAKYON_REMOTE_SERVICE_FILE' '$remote_dashboard_backup'
+  cp -p '$TAKYON_REMOTE_WORKER_SERVICE_FILE' '$remote_worker_backup'
+  cp -p '$TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE' '$remote_docker_broker_backup'
+  if [[ -e /usr/local/bin/takyon-op ]]; then
+    cp -p /usr/local/bin/takyon-op '$remote_operator_cli_backup'
+    touch '$remote_operator_cli_existed_marker'
+  fi
+  if [[ -L '$TAKYON_REMOTE_HOME/skills' ]]; then
+    echo 'refusing to replace symlinked operator skills tree' >&2
+    exit 1
+  fi
+  if [[ -d '$TAKYON_REMOTE_HOME/skills' ]]; then
+    cp -a '$TAKYON_REMOTE_HOME/skills' '$remote_skills_backup'
+    touch '$remote_skills_existed_marker'
+  fi
+  touch '$remote_skills_activation_marker'
+  touch '$remote_release_files_marker'
+  install -o root -g root -m 0644 '$remote_dashboard_candidate' '$TAKYON_REMOTE_SERVICE_FILE'
+  install -o root -g root -m 0644 '$remote_worker_candidate' '$TAKYON_REMOTE_WORKER_SERVICE_FILE'
+  install -o root -g root -m 0644 '$remote_docker_broker_candidate' '$TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE'
+  install -o root -g root -m 0750 '$remote_operator_cli_candidate' /usr/local/bin/takyon-op"
+takyon_activate_staged_runtime "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" "$TAKYON_DEPLOY_SOURCE_REVISION"
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "set -euo pipefail
+  env PYTHONPATH='$TAKYON_REMOTE_RUNTIME' TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/opt/takyon \
+    TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1 '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
+from tools.skills_sync import sync_skills
+
+result = sync_skills(quiet=False)
+if not result.get('total_bundled'):
+    raise SystemExit('activated runtime contains no bundled skills')
+if result.get('user_modified'):
+    raise SystemExit(f\"bundled skill sync left user-modified entries behind: {result['user_modified']}\")
+PY"
 
 if [[ "$TAKYON_FINALIZE_STRIPE_LIVE" == "1" ]]; then
   TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
@@ -340,130 +552,6 @@ fi
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
   grep -F -- '--tui' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null
-  systemctl enable docker >/dev/null
-  systemctl start docker
-  systemctl is-active --quiet docker
-  docker version >/dev/null
-  command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
-  command -v deno >/dev/null 2>&1
-  test \"\$(deno --version | awk 'NR==1 {print \$2}')\" = '$TAKYON_DENO_VERSION'
-  command -v systemd-run >/dev/null 2>&1
-  # The tracked units run as the dedicated non-root 'takyon' user. Docker authority now lives in
-  # takyon-docker-broker.service only, so the user must NOT remain in the docker group.
-  if ! id -u takyon >/dev/null 2>&1; then
-    useradd --system --user-group --home-dir /opt/takyon --shell /usr/sbin/nologin takyon
-  fi
-  if id -nG takyon | grep -qw docker; then
-    gpasswd -d takyon docker >/dev/null 2>&1 || deluser takyon docker >/dev/null 2>&1 || true
-  fi
-  chown takyon:takyon /opt/takyon
-  chown -R takyon:takyon '$TAKYON_REMOTE_HOME'
-  if [ -d /opt/takyon/secrets ]; then chown -R takyon:takyon /opt/takyon/secrets; fi
-  # Service HOME moved /root -> /opt/takyon (ProtectHome=true hides /root): migrate existing xurl
-  # auth state once, then keep it owned by the service user.
-  if [ -e /root/.xurl ] && [ ! -e /opt/takyon/.xurl ]; then cp -a /root/.xurl /opt/takyon/.xurl; fi
-  if [ -e /opt/takyon/.xurl ]; then chown -R takyon:takyon /opt/takyon/.xurl; fi
-  install -o root -g root -m 0750 /tmp/takyon-op /usr/local/bin/takyon-op
-  rm -f /tmp/takyon-op
-	  if ! grep -q '^TAKYON_SAFEBOX_TOKEN=' /opt/takyon/.takyon/.env 2>/dev/null \
-	    && ! grep -q '^TAKYON_SAFEBOX_TOKEN=' /opt/takyon/secrets/.env 2>/dev/null; then
-	    echo 'TAKYON_SAFEBOX_TOKEN missing from both /opt/takyon/.takyon/.env and /opt/takyon/secrets/.env' >&2
-	    exit 1
-	  fi
-	  if ! grep -q '^TAKYON_SAFEBOX_OPERATOR_TOKEN=' /opt/takyon/.takyon/.env 2>/dev/null \
-	    && ! grep -q '^TAKYON_SAFEBOX_OPERATOR_TOKEN=' /opt/takyon/secrets/.env 2>/dev/null; then
-	    echo 'TAKYON_SAFEBOX_OPERATOR_TOKEN missing from both /opt/takyon/.takyon/.env and /opt/takyon/secrets/.env' >&2
-	    exit 1
-	  fi
-	  for key in R2_S3_ENDPOINT R2_BUCKET; do
-	    if ! grep -q \"^\${key}=\" /opt/takyon/.takyon/.env 2>/dev/null \
-	      && ! grep -q \"^\${key}=\" /opt/takyon/secrets/.env 2>/dev/null; then
-	      echo \"\${key} missing from operator env; product edge publish will not mirror to R2\" >&2
-	      exit 1
-	    fi
-	  done
-	  if grep -q '^R2_S3_ACCESS_KEY_ID=' /opt/takyon/.takyon/.env /opt/takyon/secrets/.env 2>/dev/null \
-	    || grep -q '^R2_S3_SECRET_ACCESS_KEY=' /opt/takyon/.takyon/.env /opt/takyon/secrets/.env 2>/dev/null; then
-	    echo 'R2 write credentials must live only on Safebox, not on the operator host' >&2
-	    exit 1
-	  fi
-  # A /usr/local/bin/xurl SYMLINK into /root/.local is unreachable for the service under
-  # ProtectHome=true — replace it with a real copy once.
-  if [ -L /usr/local/bin/xurl ] && [ -x /root/.local/bin/xurl ]; then
-    install -m 0755 /root/.local/bin/xurl /usr/local/bin/xurl
-  fi
-  if ! docker image inspect '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE' >/dev/null 2>&1; then
-    docker pull '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE'
-  fi
-  docker run --rm --entrypoint node '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE' --version >/dev/null
-  if grep -F -- 'TAKYON_STORAGE_BACKEND=supabase_s3' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null \
-    || grep -F -- 'TAKYON_STORAGE_BACKEND=supabase_s3' '$TAKYON_REMOTE_WORKER_SERVICE_FILE' >/dev/null; then
-    if ! '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' -c 'import boto3' >/dev/null 2>&1; then
-      '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' -m pip install 'boto3==1.42.89'
-    fi
-    env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_STORAGE_BACKEND=supabase_s3 TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
-      '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
-from plugins.takyon.core import load_takyon_env
-from plugins.takyon import storage
-
-load_takyon_env()
-backend = storage.get_storage_backend()
-if getattr(backend, 'name', '') != 'supabase_s3':
-    raise SystemExit('unexpected storage backend: %r' % (getattr(backend, 'name', ''),))
-PY
-  fi
-  if ! (cd '$TAKYON_REMOTE_RUNTIME' && '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
-from tools.lazy_deps import feature_missing
-
-raise SystemExit(1 if feature_missing('image.logo_postprocess') else 0)
-PY
-  )
-  then
-    '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' -m pip install 'Pillow>=10.4,<12' 'numpy==2.4.3'
-  fi
-  python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
-  env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/opt/takyon TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1 \
-    '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
-from tools.skills_sync import sync_skills
-
-result = sync_skills(quiet=False)
-if result.get('user_modified'):
-    raise SystemExit(f\"bundled skill sync left user-modified entries behind: {result['user_modified']}\")
-PY
-  env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/root PYTHONUNBUFFERED=1 TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
-    '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' '$TAKYON_REMOTE_RUNTIME/scripts/verify-supabase-auth-runtime.py'
-  systemctl stop takyon-activation-broker.service >/dev/null 2>&1 || true
-  systemctl disable takyon-activation-broker.service >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/takyon-activation-broker.service
-  for unit_file in '$TAKYON_REMOTE_SERVICE_FILE' '$TAKYON_REMOTE_WORKER_SERVICE_FILE'; do
-    grep -Fx -- 'Environment=TAKYON_STRICT_MODEL_ROLES=1' "\$unit_file" >/dev/null
-    grep -Fx -- 'Environment=TAKYON_MODEL=gpt-5.5' "\$unit_file" >/dev/null
-    grep -Fx -- 'Environment=TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
-    grep -Fx -- 'Environment=ANTHROPIC_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
-    grep -Fx -- 'Environment=ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
-    grep -Fx -- 'Environment=ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
-    grep -Fx -- 'Environment=ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
-    grep -Fx -- 'Environment=CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
-  done
-  '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
-from pathlib import Path
-import yaml
-
-data = yaml.safe_load(Path('/opt/takyon/.takyon/config.yaml').read_text()) or {}
-model = data.get('model') or {}
-expected = {
-    'provider': 'custom',
-    'base_url': 'https://api.openai.com/v1',
-    'api_mode': 'codex_responses',
-    'default': 'gpt-5.5',
-    'claude_agent_default': 'deepseek-v4-pro',
-}
-wrong = {key: model.get(key) for key, value in expected.items() if model.get(key) != value}
-if wrong:
-    raise SystemExit(f'operator model config violates strict role contract: {wrong}')
-if data.get('fallback_model') or data.get('fallback_providers'):
-    raise SystemExit('operator model fallback config must be absent')
-PY
   systemctl daemon-reload
   systemctl enable takyon-docker-broker.service >/dev/null
   systemctl restart takyon-docker-broker.service
@@ -534,13 +622,15 @@ run_remote_smoke() {
     esac"
 }
 
+operator_smoke_succeeded=0
 for attempt in {1..12}; do
   curl_status=0
   if curl -fsS -o /dev/null \
     --connect-timeout "$TAKYON_SMOKE_CONNECT_TIMEOUT" \
     --max-time "$TAKYON_SMOKE_MAX_TIME" \
     "$TAKYON_SMOKE_HOST" >/dev/null; then
-    exit 0
+    operator_smoke_succeeded=1
+    break
   else
     curl_status=$?
   fi
@@ -550,11 +640,20 @@ for attempt in {1..12}; do
   sleep 5
 done
 
-for attempt in {1..12}; do
-  if run_remote_smoke; then
-    exit 0
-  fi
-  sleep 5
-done
+if [[ "$operator_smoke_succeeded" != "1" ]]; then
+  for attempt in {1..12}; do
+    if run_remote_smoke; then
+      operator_smoke_succeeded=1
+      break
+    fi
+    sleep 5
+  done
+fi
 
-run_remote_smoke
+if [[ "$operator_smoke_succeeded" != "1" ]]; then
+  run_remote_smoke
+fi
+
+operator_runtime_activation_started=0
+operator_services_activated=1
+takyon_finalize_runtime_release "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"

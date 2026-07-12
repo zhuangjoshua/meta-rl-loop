@@ -13,11 +13,12 @@ Files:
 - `surface-context.js` — generated per business; exports the current surface truth.
 - `surface-context.js` also carries `auth` when the app shell has the auth rail, including the
   public Supabase URL + publishable key the browser needs to start Google OAuth.
-- `runtime-client.js` — canonical client for `/api/takyon/apps/<slug>/...`, including account helpers such as `cancelSubscription()`.
+- `runtime-client.js` — canonical client for `/api/takyon/apps/<slug>/...`, including the server-authoritative immediate `cancelSubscription()` account helper.
 - `packs.js` — mode, subscription, and API pack hints for faster composition.
 - `ui-primitives.js` — small blocked/pricing/usage/API helper renderers.
 - `tokens.css` — neutral shared tokens and state styles.
 - Seeded starter source under `src/` — a landing page at `/`, public support pages at `/pricing`, `/privacy`, and `/terms`, a gated product shell at `/app`, an account/subscription page at `/app/profile`, and supporting metadata routes for Open Graph, Twitter, `robots`, and `sitemap`.
+- `src/components/subscription-cancellation.tsx` — force-refreshed self-service cancellation rendered on `/app/profile` for active Stripe subscriptions; it ends access immediately and cannot be replaced with contact-support-only copy.
 
 Normal pattern:
 

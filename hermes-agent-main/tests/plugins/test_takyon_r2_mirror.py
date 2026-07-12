@@ -18,6 +18,7 @@ What they pin (the contract the edge depends on):
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -31,9 +32,22 @@ class _RecordingR2Backend:
 
     def __init__(self) -> None:
         self.puts: list[tuple[str, bytes, str]] = []
+        self.objects: dict[str, bytes] = {}
+        self.deleted: list[str] = []
 
     def put(self, key: str, data: bytes, *, digest: str) -> None:
         self.puts.append((key, data, digest))
+        self.objects[key] = data
+
+    def get(self, key: str) -> bytes:
+        try:
+            return self.objects[key]
+        except KeyError as exc:
+            raise storage.ObjectNotFound(key) from exc
+
+    def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self.objects.pop(key, None)
 
 
 def _seed_dist(root: Path) -> None:
@@ -92,6 +106,68 @@ def test_pointer_is_written_last(tmp_path: Path) -> None:
     assert pointer_index == len(fake.puts) - 1
 
 
+def test_database_activation_hook_runs_after_uploads_and_before_pointer(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _seed_dist(dist)
+    build_id = "d" * 32
+    events: list[str] = []
+
+    class Backend(_RecordingR2Backend):
+        def put(self, key: str, data: bytes, *, digest: str) -> None:
+            super().put(key, data, digest=digest)
+            events.append("pointer" if key == "acme/current" else "object")
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def pointer_guard():
+        events.append("guard-enter")
+        try:
+            yield
+        finally:
+            events.append("guard-exit")
+
+    storage.write_public_site_to_r2(
+        "acme",
+        build_id,
+        dist,
+        backend=Backend(),
+        before_pointer=lambda: events.append("database"),
+        pointer_guard=pointer_guard,
+    )
+
+    assert events[-4:] == ["guard-enter", "database", "pointer", "guard-exit"]
+    assert all(event == "object" for event in events[:-4])
+
+
+def test_already_current_build_still_runs_database_activation_hook(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _seed_dist(dist)
+    build_id = "e" * 32
+
+    class Backend(_RecordingR2Backend):
+        def get(self, key: str) -> bytes:
+            if key == "acme/current":
+                return build_id.encode("utf-8")
+            raise storage.ObjectNotFound(key)
+
+    backend = Backend()
+    activated: list[bool] = []
+    result = storage.write_public_site_to_r2(
+        "acme",
+        build_id,
+        dist,
+        backend=backend,
+        before_pointer=lambda: activated.append(True),
+    )
+
+    assert activated == [True]
+    assert backend.puts == []
+    assert result["skipped"] == "pointer_already_current"
+
+
 def test_put_digests_match_file_bytes(tmp_path: Path) -> None:
     dist = tmp_path / "dist"
     dist.mkdir()
@@ -118,6 +194,150 @@ def test_public_site_object_key_rejects_bad_build_id(tmp_path: Path) -> None:
 def test_public_site_object_key_rejects_bad_slug() -> None:
     with pytest.raises(storage.UnsafePath):
         storage.public_site_object_key("../evil", "a" * 32, "index.html")
+
+
+def test_restore_pointer_only_reverts_the_failed_build() -> None:
+    class Backend(_RecordingR2Backend):
+        def __init__(self, current: str) -> None:
+            super().__init__()
+            self.current = current
+
+        def get(self, key: str) -> bytes:
+            if key == "acme/current":
+                if not self.current:
+                    raise storage.ObjectNotFound(key)
+                return self.current.encode("utf-8")
+            return super().get(key)
+
+        def put(self, key: str, data: bytes, *, digest: str) -> None:
+            super().put(key, data, digest=digest)
+            if key == "acme/current":
+                self.current = data.decode("utf-8")
+
+        def delete(self, key: str) -> None:
+            super().delete(key)
+            if key == "acme/current":
+                self.current = ""
+
+    failed = "b" * 32
+    previous = "a" * 32
+    backend = Backend(failed)
+    restored = storage.restore_public_site_pointer_from_r2(
+        "acme",
+        failed_build_id=failed,
+        previous_build_id=previous,
+        backend=backend,
+    )
+    assert restored["restored"] is True
+    assert backend.current == previous
+
+    newer = Backend("c" * 32)
+    untouched = storage.restore_public_site_pointer_from_r2(
+        "acme",
+        failed_build_id=failed,
+        previous_build_id=previous,
+        backend=newer,
+    )
+    assert untouched["restored"] is False
+    assert untouched["status"] == "pointer_changed"
+    assert newer.puts == []
+
+    already_previous = Backend(previous)
+    prior_descriptor = b'{"build_id":"0' + (b"0" * 30) + b'","servable_until":"2999-01-01T00:00:00Z"}\n'
+    restored_descriptor = storage.restore_public_site_pointer_from_r2(
+        "acme",
+        failed_build_id=failed,
+        previous_build_id=previous,
+        prior_previous_pointer=prior_descriptor.decode(),
+        backend=already_previous,
+    )
+    assert restored_descriptor["restored"] is True
+    assert restored_descriptor["status"] == "current_already_previous"
+    assert already_previous.objects["acme/previous"] == prior_descriptor
+
+
+def test_activation_receipt_publishes_bounded_previous_before_current(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _seed_dist(dist)
+    current = "b" * 32
+    previous = "a" * 32
+    backend = _RecordingR2Backend()
+    backend.objects["acme/current"] = previous.encode()
+    deadline = "2999-01-01T00:00:00+00:00"
+
+    result = storage.write_public_site_to_r2(
+        "acme",
+        current,
+        dist,
+        backend=backend,
+        before_pointer=lambda: {
+            "live_build_id": current,
+            "previous_build_id": previous,
+            "previous_servable_until": deadline,
+        },
+    )
+
+    descriptor = json.loads(backend.objects["acme/previous"])
+    assert descriptor == {"build_id": previous, "servable_until": deadline}
+    assert backend.objects["acme/current"] == current.encode()
+    pointer_puts = [key for key, _body, _digest in backend.puts if key in {"acme/previous", "acme/current"}]
+    assert pointer_puts == ["acme/previous", "acme/current"]
+    assert result["activation"]["previous_build_id"] == previous
+
+
+def test_ambiguous_put_response_is_success_when_exact_readback_matches(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _seed_dist(dist)
+    build_id = "f" * 32
+
+    class Backend(_RecordingR2Backend):
+        def put(self, key: str, data: bytes, *, digest: str) -> None:
+            super().put(key, data, digest=digest)
+            if key == "acme/current":
+                raise RuntimeError("response lost after commit")
+
+    backend = Backend()
+    result = storage.write_public_site_to_r2("acme", build_id, dist, backend=backend)
+    assert result["build_id"] == build_id
+    assert backend.objects["acme/current"] == build_id.encode()
+
+
+def test_pointer_failure_callback_runs_before_business_fence_releases(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    _seed_dist(dist)
+    build_id = "9" * 32
+    events: list[str] = []
+
+    class Backend(_RecordingR2Backend):
+        def put(self, key: str, data: bytes, *, digest: str) -> None:
+            if key == "acme/current":
+                raise RuntimeError("pointer unavailable")
+            super().put(key, data, digest=digest)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def guard():
+        events.append("guard-enter")
+        try:
+            yield
+        finally:
+            events.append("guard-exit")
+
+    with pytest.raises(storage.PointerStateAmbiguous):
+        storage.write_public_site_to_r2(
+            "acme",
+            build_id,
+            dist,
+            backend=Backend(),
+            before_pointer=lambda: {"live_build_id": build_id},
+            pointer_guard=guard,
+            on_pointer_failure=lambda _exc, _receipt: events.append("reconcile"),
+        )
+    assert events == ["guard-enter", "reconcile", "guard-exit"]
 
 
 @pytest.fixture

@@ -221,6 +221,21 @@ async function serveStatic(slug, url, request, env) {
     return objectResponse(object, key, wantHead);
   }
 
+  // HTML from the immediately previous build can remain in a browser/cache while `current` flips.
+  // Its content-hashed asset URL is an immutable build identity; when that key is absent from the
+  // new build, resolve it through the publisher's bounded previous descriptor. Never fall back HTML
+  // or stable-named assets, and never honor the descriptor after its database-derived deadline.
+  if (isBuildBoundAsset(rel)) {
+    const previous = await readPreviousBuild(slug, buildId, env);
+    if (previous) {
+      const previousKey = `${slug}/${previous}/${rel}`;
+      object = await getObject(env, previousKey, request);
+      if (object) {
+        return objectResponse(object, previousKey, wantHead);
+      }
+    }
+  }
+
   // 2) Directory-style request (`/foo/`) -> `/foo/index.html`.
   if (rel.endsWith("/")) {
     key = prefix + rel + "index.html";
@@ -243,6 +258,31 @@ async function serveStatic(slug, url, request, env) {
   }
 
   return notFound(slug, "file not found");
+}
+
+async function readPreviousBuild(slug, currentBuildId, env) {
+  const pointer = await env.PRODUCT_SITES.get(`${slug}/previous`);
+  if (!pointer) return "";
+  let descriptor;
+  try {
+    descriptor = JSON.parse(await pointer.text());
+  } catch {
+    return "";
+  }
+  const buildId = String(descriptor?.build_id || "").trim().toLowerCase();
+  const deadline = Date.parse(String(descriptor?.servable_until || ""));
+  if (!/^[0-9a-f]{16,64}$/.test(buildId) || buildId === currentBuildId) return "";
+  if (!Number.isFinite(deadline) || deadline <= Date.now()) return "";
+  return buildId;
+}
+
+function isBuildBoundAsset(rel) {
+  if (!rel || rel.endsWith("/") || !rel.startsWith("assets/")) return false;
+  const base = rel.split("/").pop() || "";
+  // Vite/Rollup emit `name-<hash>.ext`; accept common hex-dot fingerprints too. Requiring a
+  // fingerprint prevents an old stable `assets/logo.png` from masking a deliberate deletion.
+  return /-[A-Za-z0-9_-]{6,}\.[A-Za-z0-9]+$/.test(base)
+    || /\.[a-f0-9]{8,}\.[A-Za-z0-9]+$/i.test(base);
 }
 
 /**

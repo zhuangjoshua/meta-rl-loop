@@ -27,6 +27,7 @@ import logging
 import os
 import socket
 import threading
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from . import jobs
@@ -276,6 +277,11 @@ class WorkerPool:
         concurrency = self.size
         once = self.once
         max_jobs = self.max_jobs
+        ready_file = str(os.getenv("TAKYON_WORKER_READY_FILE") or "").strip()
+        if ready_file and not self.register:
+            raise RuntimeError(
+                "TAKYON_WORKER_READY_FILE requires a registered worker pool"
+            )
 
         stop = threading.Event()
 
@@ -290,9 +296,9 @@ class WorkerPool:
         # Register this pool's heartbeated lease row; a daemon thread renews it on its own
         # connection so a long-running handler never lets the lease lapse (a lapsed lease
         # spills the pool's STRICT reservations to other workers — correct when the pool is
-        # dead, wrong when it is merely busy). Registration failure degrades loudly, never
-        # fatally: the pool still drains, but its strict reservations spill as if it were
-        # down until the row exists.
+        # dead, wrong when it is merely busy). A normal daemon may self-heal an initial
+        # registration failure through the heartbeat loop. A console preflight is stricter:
+        # it must not open an operator shell until this exact worker owns a live registry row.
         registered = False
         if self.register:
             try:
@@ -311,7 +317,7 @@ class WorkerPool:
                     registered = True
                 finally:
                     conn.close()
-            except Exception as exc:  # noqa: BLE001 — degraded, not fatal; the heartbeat loop retries
+            except Exception as exc:  # noqa: BLE001 — daemon self-heals; preflight fails closed
                 _log.error(
                     "worker[%s]: pool registration failed (%s); strict reservations for pool "
                     "%s will spill as if the pool were down until the registry row exists "
@@ -320,6 +326,26 @@ class WorkerPool:
                     exc,
                     self.pool_id,
                 )
+                if ready_file:
+                    raise RuntimeError(
+                        f"worker pool {self.pool_id} did not register; refusing readiness"
+                    ) from exc
+
+        if ready_file:
+            if not registered:
+                raise RuntimeError(
+                    f"worker pool {self.pool_id} is not registered; refusing readiness"
+                )
+            marker = Path(ready_file)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            temporary = marker.with_name(
+                f".{marker.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+            )
+            temporary.write_text(
+                f"worker_id={worker_id}\npool_id={self.pool_id}\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, marker)
 
         def _pool_heartbeat_loop() -> None:
             from . import claim_scope as _cs
@@ -482,9 +508,14 @@ class WorkerPool:
             not in {"0", "false", "no", "off"}
         )
 
+        operator_task_lane_thread: threading.Thread | None = None
+
         def _spawn_operator_task_lane() -> threading.Thread | None:
+            nonlocal operator_task_lane_thread
             if not operator_task_lane:
                 return None
+            if operator_task_lane_thread is not None:
+                return operator_task_lane_thread
             lane = threading.Thread(
                 target=lambda: _run_loop(
                     thread_worker_id=f"{worker_id}-optask",
@@ -503,13 +534,24 @@ class WorkerPool:
                 daemon=True,
             )
             lane.start()
+            operator_task_lane_thread = lane
             return lane
+
+        def _join_operator_task_lane() -> None:
+            # The lane owns the long product/Taste jobs most likely to still be running when a
+            # deploy asks the worker to drain. It may be a daemon for crash semantics, but graceful
+            # process shutdown must join it so systemd never sees the main loop exit and kills the
+            # child task while it is still committing its exact attempt.
+            if operator_task_lane_thread is not None:
+                operator_task_lane_thread.join()
 
         if concurrency == 1:
             try:
                 _spawn_operator_task_lane()
                 return _run_loop(thread_worker_id=worker_id, allow_dispatch=self.dispatch)
             finally:
+                stop.set()
+                _join_operator_task_lane()
                 _decommission()
 
         totals = [0 for _ in range(concurrency)]
@@ -542,6 +584,7 @@ class WorkerPool:
             thread.start()
         for thread in threads:
             thread.join()
+        _join_operator_task_lane()
 
         _decommission()
         if errors:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +18,7 @@ from plugins.takyon.core import (
     _scan_for_pinned_stack_server_entrypoints,
     _format_forbidden_product_source_blockers,
     _refresh_product_surface_path,
+    _requested_live_action_execution_verification_state,
     _validate_product_surface_contract,
 )
 
@@ -591,6 +594,126 @@ def test_requested_workflow_gate_accepts_action_generate_and_records_wiring(tmp_
     ) == ""
 
 
+def test_requested_live_action_execution_verification_is_durable_and_live_build_scoped(tmp_path):
+    from plugins.takyon import app_actions
+
+    site = tmp_path / "product" / "site"
+    (site / "src" / "screens").mkdir(parents=True)
+    (site / "actions").mkdir(parents=True)
+    (site / "src" / "screens" / "app-home.tsx").write_text(
+        'const runner = useActionRunner("generate-proposal");\n',
+        encoding="utf-8",
+    )
+    (site / "actions" / "generate-proposal.ts").write_text(
+        "export default async function generateProposal(\n"
+        "  payload: TakyonActionPayload, ctx: TakyonActionContext\n"
+        ") {\n"
+        "  return ctx.generate({ messages: [{ role: 'user', content: String(payload) }] });\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    live_build_id = "a" * 32
+    bundle = app_actions.build_action_bundle(site)
+    # Verification must remain attached to published bytes even if the producer workspace moves on.
+    (site / "actions" / "generate-proposal.ts").unlink()
+    (site / "actions" / "workspace-only.ts").write_text(
+        "export default async () => ({ wrong: true });\n",
+        encoding="utf-8",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE app_usage_events ("
+        "id TEXT PRIMARY KEY, business_slug TEXT NOT NULL, purpose TEXT NOT NULL, route TEXT NOT NULL, "
+        "status TEXT NOT NULL, metadata_json TEXT, error TEXT, created_at TEXT NOT NULL, "
+        "completed_at TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE events (business_slug TEXT NOT NULL, event_type TEXT NOT NULL, "
+        "payload_json TEXT NOT NULL, created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE app_surface_contracts (business_slug TEXT PRIMARY KEY, live_build_id TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE product_builds (build_id TEXT PRIMARY KEY, business_slug TEXT, "
+        "action_bundle_json TEXT, action_bundle_sha256 TEXT, status TEXT, created_at TEXT, "
+        "servable_until TEXT, activation_state TEXT)"
+    )
+    conn.execute("INSERT INTO app_surface_contracts VALUES ('proposal', ?)", (live_build_id,))
+    conn.execute(
+        "INSERT INTO product_builds VALUES (?, 'proposal', ?, ?, 'live', datetime('now'), NULL, 'live')",
+        (live_build_id, bundle["json"], bundle["sha256"]),
+    )
+    surface = {
+        "source_path": "product/site",
+        "live_build_id": live_build_id,
+        "metadata": {"workflow_completion_required": True},
+    }
+
+    pending = _requested_live_action_execution_verification_state(
+        conn,
+        business="proposal",
+        root=site,
+        surface=surface,
+    )
+
+    assert pending["status"] == "pending"
+    assert pending["actions"] == ["generate-proposal"]
+    at = "2026-07-11T03:00:00+00:00"
+    conn.execute(
+        "INSERT INTO app_usage_events "
+        "(id, business_slug, purpose, route, status, metadata_json, error, created_at, completed_at) "
+        "VALUES (?, ?, 'action_invoke', ?, 'completed', ?, NULL, ?, ?)",
+        (
+            "evt-current",
+            "proposal",
+            "/api/takyon/apps/proposal/actions/generate-proposal",
+            json.dumps(
+                {
+                    "action": "generate-proposal",
+                    "trigger": "http",
+                    "principal": "session",
+                    "live_build_id": live_build_id,
+                    "receipt_path": "metrics/receipts/app-actions/generate.json",
+                }
+            ),
+            at,
+            at,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO events (business_slug, event_type, payload_json, created_at) "
+        "VALUES (?, 'app.action.invoke', ?, ?)",
+        (
+            "proposal",
+            json.dumps(
+                {
+                    "action": "generate-proposal",
+                    "trigger": "http",
+                    "principal": "session",
+                    "live_build_id": live_build_id,
+                    "receipt_path": "metrics/receipts/app-actions/generate.json",
+                    "usage_reservation_key": "evt-current",
+                }
+            ),
+            at,
+        ),
+    )
+
+    verified = _requested_live_action_execution_verification_state(
+        conn,
+        business="proposal",
+        root=site,
+        surface=surface,
+    )
+
+    assert verified["status"] == "action_verified"
+    assert verified["verified_action"] == "generate-proposal"
+    assert verified["live_build_id"] == live_build_id
+    assert verified["receipt_path"] == "metrics/receipts/app-actions/generate.json"
+
+
 def test_app_access_gate_null_markers_flag_blank_app_routes(tmp_path):
     from plugins.takyon import core as takyon_core
 
@@ -819,6 +942,23 @@ def test_starter_metadata_never_promotes_transient_auth_failure_to_seo_copy(tmp_
     assert metadata["title"] == "Proposal Flow"
     assert "Sign-in is temporarily unavailable" not in metadata["title"]
     assert "Sign-in is temporarily unavailable" not in metadata["description"]
+
+
+def test_canonical_app_shell_does_not_ship_transient_sign_in_promise():
+    from plugins.takyon import core as takyon_core
+
+    scaffold = (
+        Path(takyon_core.__file__).resolve().parent
+        / "subuser_app_kit"
+        / "scaffold"
+        / "src"
+        / "screens"
+        / "app-home.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert "Sign-in is temporarily unavailable" not in scaffold
+    assert "Please try again shortly" not in scaffold
+    assert "Sign-in is not configured for this product" in scaffold
 
 
 def test_starter_metadata_uses_canonical_inline_strategy_truth_not_fictional_preview(tmp_path):
@@ -1085,6 +1225,7 @@ def test_product_build_normalizer_restores_scaffold_owned_config(tmp_path):
     action_config = json.loads((tmp_path / "tsconfig.actions.json").read_text(encoding="utf-8"))
     assert action_config["compilerOptions"]["lib"] == ["ES2020"]
     assert action_config["compilerOptions"]["noImplicitAny"] is True
+    assert action_config["compilerOptions"]["allowImportingTsExtensions"] is True
     assert action_config["files"] == ["action-env.d.ts"]
     assert action_config["include"] == ["actions/**/*.ts"]
     assert '"@takyon": new URL("./_takyon", import.meta.url).pathname' in (
@@ -1202,6 +1343,30 @@ def test_scaffold_typechecks_browser_and_action_code_in_separate_global_environm
         assert unavailable in diagnostics
     assert "Expected 1 arguments, but got 2" in diagnostics
     assert "Property 'publishRecord' does not exist" in diagnostics
+
+    # The immutable action bundle requires explicit local `.ts` specifiers so Deno executes the
+    # exact checked module graph. The action compiler must accept that same spelling; otherwise
+    # extensionless imports typecheck but fail publish, while executable `.ts` imports fail tsc.
+    helper = actions / "helper.ts"
+    helper.write_text("export const answer = 42;\n", encoding="utf-8")
+    action.write_text(
+        'import { answer } from "./helper.ts";\n'
+        "export default async function run(\n"
+        "  payload: TakyonActionPayload,\n"
+        "  ctx: TakyonActionContext,\n"
+        ") {\n"
+        "  return { answer, payload, recordsCallable: ctx.isRailCallable(\"records\") };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    bundled_import = subprocess.run(
+        [str(tsc), "--noEmit", "-p", "tsconfig.actions.json"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert bundled_import.returncode == 0, bundled_import.stdout + bundled_import.stderr
 
     (src / "unchecked-record-read.js").write_text(
         'import { createSubuserRuntimeClient } from "../_takyon/runtime-client.js";\n'

@@ -1,4 +1,6 @@
+import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -157,11 +159,11 @@ def test_deploy_scripts_preflight_authority_env_before_sync_or_restart():
         assert "VALIDATE_AUTHORITY_ENV_SCRIPT" in src, plane
         assert f"bash -s -- {plane} /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" in src, plane
         preflight_index = src.index(f"bash -s -- {plane}")
-        assert preflight_index < src.index("rsync -az --delete"), plane
-        assert preflight_index < src.index("systemctl restart"), plane
+        assert preflight_index < src.index("takyon_stage_runtime_release"), plane
 
 
 def test_runtime_deploys_fail_closed_on_venv_symlinks_and_protect_remote_venvs():
+    release_helper = (ROOT / "deploy/shared/runtime-release.sh").read_text()
     scripts = (
         ROOT / "deploy/argon-alpha-14/deploy-runtime.sh",
         ROOT / "deploy/takyon-subuser/deploy-runtime.sh",
@@ -171,9 +173,11 @@ def test_runtime_deploys_fail_closed_on_venv_symlinks_and_protect_remote_venvs()
         src = path.read_text()
         preflight = src.index('if [[ -L "$RUNTIME_DIR/.venv" ]]')
         assert preflight < src.index("ssh -i"), path
-        assert "--filter='protect /.venv'" in src, path
-        assert "--exclude '/.venv'" in src, path
+        assert 'source "$RUNTIME_RELEASE_SCRIPT"' in src, path
+        assert "takyon_stage_runtime_release" in src, path
         assert "rsync -az --delete --force" not in src, path
+    assert "--filter='protect /.venv'" in release_helper
+    assert "--exclude '/.venv'" in release_helper
 
 
 def test_runtime_rsync_rules_cannot_replace_remote_venv_with_source_symlink(tmp_path):
@@ -222,10 +226,109 @@ def test_safebox_deploy_uses_hash_locked_external_environment_before_restart():
     assert deploy.index('"$REBUILD_VENV_SCRIPT"') < deploy.index("systemctl restart")
     assert "--require-hashes" in rebuild
     assert "--only-binary=:all:" in rebuild
+    assert 'TAKYON_SAFEBOX_VENV_ACTIVATE=0' in deploy
+    assert 'TAKYON_SAFEBOX_VENV_RESULT_FILE="$remote_venv_result"' in deploy
+    assert 'if [[ "$current_target" == "$candidate" ]]' in rebuild
+    assert "refusing in-place mutation" in rebuild
+    assert '-e "$runtime"' not in rebuild
+    assert deploy.index("systemctl stop '$TAKYON_REMOTE_SERVICE_NAME'") < deploy.index(
+        "safebox-current.next"
+    )
     assert rebuild.index("-m pip check") < rebuild.index('mv -Tf "$current.next" "$current"')
     assert "ExecStart=/opt/takyon/venvs/safebox-current/bin/python" in unit
     assert "ExecStart=/opt/takyon/venvs/safebox-current/bin/python" in dev_unit
     assert "Environment=PUBLIC_COMPANY_BASE_DOMAIN=dev.coscale.app" in dev_unit
+
+
+def test_safebox_candidate_repair_never_renames_active_environment(tmp_path):
+    runtime = ROOT / "hermes-agent-main"
+    lock_file = runtime / "packaging/safebox-requirements.lock"
+    lock_sha = hashlib.sha256(lock_file.read_bytes()).hexdigest()
+    venv_root = tmp_path / "venvs"
+    base = venv_root / f"safebox-{lock_sha[:16]}"
+    repair_id = "abcdef0123456789"
+    repair = venv_root / f"safebox-{lock_sha[:16]}-repair-{repair_id[:12]}"
+    for candidate, exit_code in ((base, 1), (repair, 0)):
+        (candidate / "bin").mkdir(parents=True)
+        python = candidate / "bin/python"
+        python.write_text(f"#!/bin/sh\nexit {exit_code}\n", encoding="utf-8")
+        python.chmod(0o755)
+        (candidate / ".takyon-safebox-lock-sha256").write_text(
+            lock_sha + "\n", encoding="utf-8"
+        )
+    current = venv_root / "safebox-current"
+    current.symlink_to(base, target_is_directory=True)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        "while [[ $# -gt 0 && $1 != bash ]]; do shift; done\n"
+        "exec \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o755)
+    fake_install = fake_bin / "install"
+    fake_install.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        "target=''\nfor target in \"$@\"; do :; done\n"
+        "mkdir -p \"$target\"\n",
+        encoding="utf-8",
+    )
+    fake_install.chmod(0o755)
+    fake_flock = fake_bin / "flock"
+    fake_flock.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_flock.chmod(0o755)
+    key = tmp_path / "key"
+    key.write_text("test\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "deploy/takyon-safebox/rebuild-venv.sh")],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "TAKYON_VPS_KEY": str(key),
+            "TAKYON_VPS_HOST": "root@test.invalid",
+            "TAKYON_REMOTE_RUNTIME": str(runtime),
+            "TAKYON_REMOTE_VENV_ROOT": str(venv_root),
+            "TAKYON_SAFEBOX_VENV_ACTIVATE": "0",
+            "TAKYON_SAFEBOX_VENV_REPAIR_ID": repair_id,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert current.resolve() == base.resolve()
+    assert base.is_dir()
+    assert not list(venv_root.glob(f"{base.name}.invalid-*"))
+    assert f"candidate ready: {repair}" in result.stdout
+
+
+def test_runtime_units_are_staged_before_the_quiesced_activation_window():
+    operator = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
+    subuser = (ROOT / "deploy/takyon-subuser/deploy-runtime.sh").read_text()
+    safebox = (ROOT / "deploy/takyon-safebox/deploy-runtime.sh").read_text()
+
+    for source in (operator, subuser, safebox):
+        assert "$TAKYON_VPS_HOST:$TAKYON_REMOTE_SERVICE_FILE" not in source
+    assert "$TAKYON_VPS_HOST:$TAKYON_REMOTE_WORKER_SERVICE_FILE" not in operator
+    assert "$TAKYON_VPS_HOST:$TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE" not in operator
+
+    assert operator.index("$TAKYON_VPS_HOST:$remote_dashboard_candidate") < operator.index(
+        "TAKYON_STOP_CORE_SERVICES=1"
+    )
+    assert operator.index("TAKYON_STOP_CORE_SERVICES=1") < operator.index(
+        "'$remote_dashboard_candidate' '$TAKYON_REMOTE_SERVICE_FILE'"
+    )
+    assert "$TAKYON_VPS_HOST:$remote_service_candidate" in subuser
+    assert "'$remote_service_candidate' '$TAKYON_REMOTE_SERVICE_FILE'" in subuser
+    assert safebox.index("$TAKYON_VPS_HOST:$remote_service_candidate") < safebox.index(
+        "systemctl stop '$TAKYON_REMOTE_SERVICE_NAME'"
+    )
 
 
 def test_production_safebox_deploy_defaults_to_exact_checkout_pause_preflight():
@@ -250,6 +353,25 @@ def test_operator_deploy_runs_migrations_only_when_revision_requires_them():
     assert 'TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-0}"' in src
     assert 'if [[ "$TAKYON_RUN_DB_MIGRATIONS" != "1" ]]' in src
     assert "run_remote_migrations" in src
+
+
+def test_operator_deploy_quiesces_worker_before_observing_and_migrating():
+    src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
+
+    quiesce = src.index("\nquiesce_remote_worker\n")
+    observe = src.index("\nwait_for_remote_runtime_idle\n")
+    migrate = src.index("\nrun_remote_migrations\n")
+    stop_dashboard = src.index("TAKYON_STOP_CORE_SERVICES=1")
+    assert quiesce < observe < migrate < stop_dashboard
+    assert "systemctl set-property --runtime takyon-worker.service TimeoutStopUSec=" in src
+    assert "WHERE work_request.status = 'running'" in src
+    assert "WHERE work_request.status IN ('queued', 'running')" not in src
+    assert "restore_operator_services_on_failure" in src
+    assert "trap restore_operator_services_on_failure EXIT" in src
+    assert "systemctl stop takyon-worker.service takyon-dashboard.service takyon-docker-broker.service" in src
+
+    worker_unit = (ROOT / "deploy/argon-alpha-14/takyon-worker.service").read_text()
+    assert "TimeoutStopSec=960" in worker_unit
 
 
 def test_operator_deploy_drain_probe_survives_ssh_double_quoted_string():
@@ -299,7 +421,9 @@ def test_operator_deploy_drain_owner_query_semantics():
     cases = {
         "mac-only": ([('running', 'mac-operator-local-1')], 0),
         "mixed-owner": ([('running', 'mac-operator-local-1'), ('running', 'vps-worker-1')], 1),
-        "queued-sibling": ([('running', 'mac-operator-local-1'), ('queued', None)], 1),
+        # The VPS worker is already quiesced before this probe; queued work is durable and cannot
+        # be killed by the restart, so only another running owner blocks activation.
+        "queued-sibling": ([('running', 'mac-operator-local-1'), ('queued', None)], 0),
         "missing-link": ([], 1),
         "unknown-owner": ([('running', None)], 1),
         "terminal-sibling": ([('running', 'mac-operator-local-1'), ('completed', 'vps-worker-1')], 0),

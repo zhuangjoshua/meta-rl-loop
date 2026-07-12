@@ -217,3 +217,65 @@ def test_worker_tool_handler_binds_workspace_root_into_session(monkeypatch):
     assert observed["run_id"] == "wr-ctx"
     assert observed["task_kind"] == "business_claude_agent_task"
     assert outcome.result == {"status": "completed", "work_request_id": "wr-ctx"}
+
+
+def test_worker_tool_handler_restores_exact_parent_bootstrap_context(monkeypatch):
+    from plugins.takyon import worker as takyon_worker
+
+    observed: dict[str, object] = {}
+
+    @contextmanager
+    def _workspace(*_args, **_kwargs):
+        yield "/tmp/takyon-worker-parent-context"
+
+    monkeypatch.setattr(takyon_worker, "_business_owner_user_id", lambda _slug: "user-123")
+    monkeypatch.setattr(takyon_worker, "_update_work_request", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "plugins.takyon.turn_runtime._business_workspace_execution_context",
+        _workspace,
+    )
+    monkeypatch.setattr("gateway.session_context.set_session_vars", lambda **_k: [])
+    monkeypatch.setattr("gateway.session_context.clear_session_vars", lambda *_a, **_k: None)
+
+    def _tool(_args, **_kwargs):
+        observed.update(takyon_core._active_operator_task_receipt_context())
+        return json.dumps({"success": True})
+
+    job = takyon_worker.Job(
+        id="child-job",
+        business_slug="acme",
+        kind="claude.agent_task",
+        status="running",
+        idempotency_key="child-idem",
+        payload={
+            "args": {"business": "acme"},
+            "work_request_id": "child-request",
+            "parent_operator_task": {
+                "task_kind": "ceo_bootstrap",
+                "run_id": "bootstrap-job",
+                "attempt": 4,
+            },
+        },
+        result=None,
+        error=None,
+        reserved_billing_entry_id=None,
+        attempts=1,
+        max_attempts=1,
+        locked_by="worker-1",
+        locked_at=None,
+        created_at=None,
+        updated_at=None,
+    )
+
+    outcome = takyon_worker._operator_tool_task_handler(
+        job,
+        tool_name="business_claude_agent_task",
+        handler_fn=_tool,
+    )
+
+    assert observed == {
+        "run_id": "bootstrap-job",
+        "task_kind": "ceo_bootstrap",
+        "attempt": 4,
+    }
+    assert outcome.result == {"status": "completed", "work_request_id": "child-request"}

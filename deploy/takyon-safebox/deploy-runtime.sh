@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 WEB_BUILD_SCRIPT="$ROOT_DIR/deploy/shared/build-web-locked.sh"
+RUNTIME_RELEASE_SCRIPT="$ROOT_DIR/deploy/shared/runtime-release.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-safebox/takyon-safebox.service"
 REBUILD_VENV_SCRIPT="$ROOT_DIR/deploy/takyon-safebox/rebuild-venv.sh"
 VERIFY_LOCK_SCRIPT="$ROOT_DIR/deploy/takyon-safebox/verify-requirements-lock.sh"
@@ -15,9 +16,44 @@ TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
 TAKYON_REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-/opt/takyon/hermes-agent-main}"
 TAKYON_REMOTE_SERVICE_FILE="${TAKYON_REMOTE_SERVICE_FILE:-/etc/systemd/system/takyon-safebox.service}"
 TAKYON_REMOTE_SERVICE_NAME="${TAKYON_REMOTE_SERVICE_NAME:-takyon-safebox.service}"
-TAKYON_REMOTE_SAFEBOX_PYTHON="${TAKYON_REMOTE_SAFEBOX_PYTHON:-/opt/takyon/venvs/safebox-current/bin/python}"
-TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-0}"
+TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
 TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED="${TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED:-1}"
+
+# Every production plane promotes one immutable outer-repository revision under the same Mac lock.
+# Safebox does not serve the dashboard, but building the bounded bundle here keeps this canonical
+# deploy entrypoint on the same revision-pinned rail as operator and sub-user deployments.
+if [[ "${TAKYON_DEPLOY_LOCK_HELD:-0}" != "1" ]]; then
+  if [[ "$TAKYON_RUN_WEB_BUILD" != "1" ]]; then
+    echo "refusing unlocked Safebox deploy: TAKYON_RUN_WEB_BUILD=0 is internal-only" >&2
+    exit 1
+  fi
+  if [[ ! -f "$WEB_BUILD_SCRIPT" ]]; then
+    echo "web build helper not found: $WEB_BUILD_SCRIPT" >&2
+    exit 1
+  fi
+  exec bash "$WEB_BUILD_SCRIPT" "$RUNTIME_DIR" -- "$ROOT_DIR/deploy/takyon-safebox/deploy-runtime.sh" "$@"
+fi
+
+DEPLOY_REPO_DIR="${TAKYON_DEPLOY_REPO_ARTIFACT:-}"
+DEPLOY_RUNTIME_DIR="${TAKYON_DEPLOY_RUNTIME_ARTIFACT:-}"
+if [[ ! -d "$DEPLOY_RUNTIME_DIR" || ! -f "$DEPLOY_RUNTIME_DIR/.takyon-deploy-artifact.json" ]]; then
+  echo "immutable deploy runtime artifact is missing or invalid: $DEPLOY_RUNTIME_DIR" >&2
+  exit 1
+fi
+if [[ ! -d "$DEPLOY_REPO_DIR" \
+  || "$(cd "$DEPLOY_REPO_DIR" && pwd -P)" != "$(cd "$ROOT_DIR" && pwd -P)" \
+  || "$(cd "$DEPLOY_RUNTIME_DIR" && pwd -P)" != "$(cd "$RUNTIME_DIR" && pwd -P)" ]]; then
+  echo "Safebox deploy callback is not running entirely from the immutable repository artifact" >&2
+  exit 1
+fi
+
+if [[ ! -f "$RUNTIME_RELEASE_SCRIPT" ]]; then
+  echo "runtime release helper not found: $RUNTIME_RELEASE_SCRIPT" >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+source "$RUNTIME_RELEASE_SCRIPT"
+takyon_runtime_release_init "$TAKYON_REMOTE_RUNTIME" "$TAKYON_DEPLOY_SOURCE_REVISION"
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
   echo "runtime directory not found: $RUNTIME_DIR" >&2
@@ -85,38 +121,61 @@ if [[ "$TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED" == "1" ]]; then
       'TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=1'"
 fi
 
-if [[ "$TAKYON_RUN_WEB_BUILD" == "1" ]]; then
-  bash "$WEB_BUILD_SCRIPT" "$RUNTIME_DIR/web"
-fi
+(
+  compile_cache="$(mktemp -d)"
+  trap 'rm -rf "$compile_cache"' EXIT
+  PYTHONPYCACHEPREFIX="$compile_cache" python3 -m compileall -q \
+    "$DEPLOY_RUNTIME_DIR/plugins/takyon" \
+    "$DEPLOY_RUNTIME_DIR/takyon_cli" \
+    "$DEPLOY_RUNTIME_DIR/tui_gateway"
+)
 
-python3 -m compileall -q \
-  "$RUNTIME_DIR/plugins/takyon" \
-  "$RUNTIME_DIR/takyon_cli" \
-  "$RUNTIME_DIR/tui_gateway"
+safebox_stage_incomplete=1
+cleanup_incomplete_safebox_stage() {
+  local status="$?"
+  if [[ "$safebox_stage_incomplete" == "1" ]]; then
+    takyon_discard_staged_runtime_release "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" || true
+  fi
+  return "$status"
+}
+trap cleanup_incomplete_safebox_stage EXIT
 
-rsync -az --delete \
-  --filter='protect /.venv' \
-  --exclude '.git/' \
-  --exclude '.pytest_cache/' \
-  --exclude '__pycache__/' \
-  --exclude '*.pyc' \
-  --exclude 'node_modules/' \
-  --exclude 'web/node_modules/' \
-  --exclude '/.venv' \
-  -e "ssh -i $TAKYON_VPS_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-  "$RUNTIME_DIR/" \
-  "$TAKYON_VPS_HOST:$TAKYON_REMOTE_RUNTIME/"
+takyon_stage_runtime_release \
+  "$DEPLOY_RUNTIME_DIR" "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" "$TAKYON_DEPLOY_SOURCE_REVISION"
+
+remote_service_candidate="$TAKYON_REMOTE_RELEASE_META/candidates/takyon-safebox.service"
+remote_service_backup="$TAKYON_REMOTE_RELEASE_META/backups/takyon-safebox.service"
+remote_venv_result="$TAKYON_REMOTE_RELEASE_META/safebox-venv-candidate"
+scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+  "$SERVICE_FILE" \
+  "$TAKYON_VPS_HOST:$remote_service_candidate"
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "set -euo pipefail
+  test -s '$remote_service_candidate'
+  systemd-analyze verify '$remote_service_candidate' >/dev/null"
 
 previous_venv_target="$(
   ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
     "$TAKYON_VPS_HOST" \
-    'if [ -L /opt/takyon/venvs/safebox-current ]; then readlink -f /opt/takyon/venvs/safebox-current; fi'
+    'set -euo pipefail; test -L /opt/takyon/venvs/safebox-current; readlink -f /opt/takyon/venvs/safebox-current'
 )"
 
 TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
 TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
-TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
+TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_STAGED_RUNTIME" \
+TAKYON_SAFEBOX_VENV_ACTIVATE=0 \
+TAKYON_SAFEBOX_VENV_REPAIR_ID="$TAKYON_DEPLOY_SOURCE_REVISION" \
+TAKYON_SAFEBOX_VENV_RESULT_FILE="$remote_venv_result" \
   "$REBUILD_VENV_SCRIPT"
+
+remote_venv_candidate="$(
+  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+    "$TAKYON_VPS_HOST" "set -euo pipefail; cat '$remote_venv_result'"
+)"
+if ! [[ "$remote_venv_candidate" =~ ^/opt/takyon/venvs/safebox-[0-9a-f]{16}(-repair-[0-9A-Za-z._-]{1,12})?$ ]]; then
+  echo "Safebox environment builder returned an unsafe candidate: $remote_venv_candidate" >&2
+  exit 1
+fi
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
@@ -139,42 +198,76 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
 	    exit 1
 	  fi
 	  bash -s -- validate-file /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
-  < "$SUPABASE_AUTH_HELPER"
-
-remote_service_backup="${TAKYON_REMOTE_SERVICE_FILE}.pre-deploy"
-ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
-  "set -euo pipefail; cp -p '$TAKYON_REMOTE_SERVICE_FILE' '$remote_service_backup'"
-
-scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-  "$SERVICE_FILE" \
-  "$TAKYON_VPS_HOST:$TAKYON_REMOTE_SERVICE_FILE"
+	  < "$SUPABASE_AUTH_HELPER"
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
-  rollback() {
-    rc=\$?
-    trap - EXIT
-    if [ -f '$remote_service_backup' ]; then
-      cp -p '$remote_service_backup' '$TAKYON_REMOTE_SERVICE_FILE'
+  cd '$TAKYON_REMOTE_STAGED_RUNTIME'
+  test -x '$remote_venv_candidate/bin/python'
+  PYTHONPATH='$TAKYON_REMOTE_STAGED_RUNTIME' '$remote_venv_candidate/bin/python' -m pip check
+  PYTHONPATH='$TAKYON_REMOTE_STAGED_RUNTIME' python3 -m compileall -q \
+    '$TAKYON_REMOTE_STAGED_RUNTIME/plugins/takyon' \
+    '$TAKYON_REMOTE_STAGED_RUNTIME/takyon_cli' \
+    '$TAKYON_REMOTE_STAGED_RUNTIME/tui_gateway'
+  PYTHONPATH='$TAKYON_REMOTE_STAGED_RUNTIME' TAKYON_HOME=/opt/takyon/.takyon \
+    TAKYON_HOST_ROLE=safebox '$remote_venv_candidate/bin/python' -c \
+    'from plugins.takyon import safebox_app; assert safebox_app.app is not None'"
+
+safebox_stage_incomplete=0
+trap - EXIT
+activation_started=0
+rollback_safebox_activation() {
+  local status="$?"
+  if [[ "$activation_started" == "1" ]]; then
+    if ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+      "set -euo pipefail
+      systemctl stop '$TAKYON_REMOTE_SERVICE_NAME'
+      systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME' && exit 1 || true" \
+      && takyon_rollback_runtime_if_pending "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"; then
+      if ! ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+        "set -euo pipefail
+        if [[ -f '$remote_service_backup' ]]; then
+          cp -p '$remote_service_backup' '$TAKYON_REMOTE_SERVICE_FILE'
+        fi
+        ln -sfn '$previous_venv_target' /opt/takyon/venvs/safebox-current.rollback
+        mv -Tf /opt/takyon/venvs/safebox-current.rollback /opt/takyon/venvs/safebox-current
+        systemctl daemon-reload
+        systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'
+        systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME'"; then
+        echo "Safebox unit/venv rollback failed; leaving the service stopped for manual recovery" >&2
+      fi
+    else
+      echo "Safebox could not enter a safe rollback state; leaving release state intact for manual recovery" >&2
     fi
-    if [ -n '$previous_venv_target' ]; then
-      ln -sfn '$previous_venv_target' /opt/takyon/venvs/safebox-current.rollback
-      mv -Tf /opt/takyon/venvs/safebox-current.rollback /opt/takyon/venvs/safebox-current
-    fi
-    systemctl daemon-reload
-    systemctl restart '$TAKYON_REMOTE_SERVICE_NAME' || true
-    exit \$rc
-  }
-  trap rollback EXIT
-  cd '$TAKYON_REMOTE_RUNTIME'
-  '$TAKYON_REMOTE_SAFEBOX_PYTHON' -m pip check
-  python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
+  fi
+  return "$status"
+}
+trap rollback_safebox_activation EXIT
+
+takyon_prepare_runtime_rollback "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"
+activation_started=1
+takyon_begin_runtime_activation "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "set -euo pipefail
+  systemctl stop '$TAKYON_REMOTE_SERVICE_NAME'
+  systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME' && exit 1 || true
+  cp -p '$TAKYON_REMOTE_SERVICE_FILE' '$remote_service_backup'
+  install -o root -g root -m 0644 '$remote_service_candidate' '$TAKYON_REMOTE_SERVICE_FILE'
+  if [[ -n '$previous_venv_target' && '$previous_venv_target' != '$remote_venv_candidate' ]]; then
+    ln -sfn '$previous_venv_target' /opt/takyon/venvs/safebox-previous.next
+    mv -Tf /opt/takyon/venvs/safebox-previous.next /opt/takyon/venvs/safebox-previous
+  fi
+  ln -sfn '$remote_venv_candidate' /opt/takyon/venvs/safebox-current.next
+  mv -Tf /opt/takyon/venvs/safebox-current.next /opt/takyon/venvs/safebox-current"
+takyon_activate_staged_runtime "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" "$TAKYON_DEPLOY_SOURCE_REVISION"
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "set -euo pipefail
   systemctl daemon-reload
   systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'
   systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME'
-  if [ '$TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED' = 1 ]; then
+  if [[ '$TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED' == '1' ]]; then
     pid=\$(systemctl show -p MainPID --value '$TAKYON_REMOTE_SERVICE_NAME')
-    [ \"\$pid\" != 0 ]
+    [[ \"\$pid\" != 0 ]]
     process_env=\$(tr '\\000' '\\n' < \"/proc/\$pid/environ\")
     grep -Fxq 'TAKYON_STRIPE_CHECKOUT_DISABLED=1' <<<\"\$process_env\"
     grep -Fxq 'TAKYON_STRIPE_ACCOUNT_ID=acct_1TXWsW7tYL4lkVC6' <<<\"\$process_env\"
@@ -182,13 +275,12 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
     grep -Fxq 'TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED=1' <<<\"\$process_env\"
     grep -Fxq 'TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=1' <<<\"\$process_env\"
   fi
-  # The service binds the VPC interface only (see the unit), so the health probe targets it too.
   for _ in \$(seq 1 30); do
-    if curl -fsS http://10.116.0.2:8000/healthz >/dev/null; then
-      rm -f '$remote_service_backup'
-      trap - EXIT
-      exit 0
-    fi
+    curl -fsS http://10.116.0.2:8000/healthz >/dev/null && break
     sleep 1
   done
-  curl -fsS http://10.116.0.2:8000/healthz >/dev/null"
+  curl -fsS http://10.116.0.2:8000/healthz >/dev/null
+  test \"\$(readlink -f /opt/takyon/venvs/safebox-current)\" = '$remote_venv_candidate'"
+activation_started=0
+trap - EXIT
+takyon_finalize_runtime_release "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"

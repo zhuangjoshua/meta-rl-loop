@@ -311,6 +311,7 @@ def _business_bootstrap_instruction(
         "- Scope this pass to the access shell and account page on the EXISTING seeded auth + checkout rails:",
         "  - Keep the canonical `src/screens/app-layout.tsx` unchanged: it already owns loading stability, auth, checkout, full-width layout, and direct entitled access. Build the real product directly in `src/screens/app-home.tsx`; never add another welcome/enter/Open app screen.",
         "  - Make `/app/profile` the truthful account/subscription page in `src/screens/profile.tsx` on the existing account + profile rails.",
+        "  - Preserve the starter-owned immediate `SubscriptionCancellation` control that `src/main.tsx` renders on `/app/profile`; never tell a customer to contact support to cancel or change billing. Every active paid subscription must remain cancellable in-app, and cancellation ends access immediately with no grace period.",
         "- Do not edit `src/screens/landing.tsx` again unless a small correction is required to keep it consistent with the brand; 2a already published it.",
         "- Do not spend bootstrap time editing `src/screens/support.tsx` unless explicitly asked.",
         "- Keep the shared Vite route skeleton intact unless a small route-level correction is required for correctness.",

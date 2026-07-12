@@ -3251,6 +3251,12 @@ async def _app_post_action_invoke(request, business, parts, bound, token, body):
         "payload": payload_value if payload_value is not None else {},
         "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"action:{business}:{action_name}:{uuid.uuid4().hex}",
         "bound_origin": _takyon_app_origin(request, body),
+        # Static product builds carry their immutable build identity.  The action consumer uses it
+        # to execute the matching bundle during the bounded A/B pointer rollout instead of silently
+        # pairing browser build B with database build A.
+        "expected_live_build_id": str(
+            request.headers.get("x-takyon-live-build-id") or ""
+        ).strip(),
     }
     # Run the (blocking, deno-subprocess) action invoke OFF the event loop. The action's
     # ctx.generate hairpins back to /generate on THIS same server, so blocking the loop here

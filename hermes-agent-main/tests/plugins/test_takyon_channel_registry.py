@@ -11,8 +11,11 @@ aliases, toolkit, publication root) — a byte-faithful contract, not a tautolog
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from plugins.takyon import channel_registry, core, worker
 from plugins.takyon.channel_registry import (
@@ -122,6 +125,133 @@ def test_x_publication_root_is_the_receipt_writer_artifact_prefix(monkeypatch):
     root = CHANNEL_REGISTRY["x"].publication_root
     assert committed["artifact"].startswith(root + "/")
     assert result["artifact"].startswith(root + "/")
+
+
+def test_x_receipt_atomically_records_scoped_bootstrap_outcome(monkeypatch):
+    committed: dict[str, Any] = {}
+
+    class _FakeStore:
+        def commit(self, *, scope, operations, idempotency_key, reason, actor):
+            committed["operations"] = operations
+
+    monkeypatch.setattr(core, "TakyonStore", _FakeStore, raising=False)
+    worker._record_x_publish_result(
+        "acme",
+        job_id="x-worker-job",
+        payload={
+            "body": "hi",
+            "metadata": {
+                "operator_task": {
+                    "task_kind": "ceo_bootstrap",
+                    "run_id": "bootstrap-job",
+                    "attempt": 2,
+                }
+            },
+        },
+        post_id="tweet-9",
+        post_url="https://x.com/u/status/tweet-9",
+        provider_response={},
+    )
+
+    event_op = next(
+        op
+        for op in committed["operations"]
+        if op.get("event_type") == "bootstrap.x_launch.outcome"
+    )
+    assert event_op["payload"]["status"] == "published"
+    assert event_op["payload"]["operator_task"] == {
+        "task_kind": "ceo_bootstrap",
+        "run_id": "bootstrap-job",
+        "attempt": 2,
+    }
+    assert event_op["payload"]["receipt_sent"] is True
+    assert event_op["payload"]["external_side_effects"] == "sent"
+    assert len(event_op["payload"]["receipt_sha256"]) == 64
+    receipt_op = next(
+        op
+        for op in committed["operations"]
+        if op.get("action") == "artifact.write" and op.get("path", "").endswith(".json")
+    )
+    receipt = json.loads(receipt_op["content"])
+    assert receipt["operator_task"]["run_id"] == "bootstrap-job"
+    assert receipt["operator_task"]["attempt"] == 2
+
+
+def test_x_blocker_records_scoped_bootstrap_outcome_with_deterministic_key(monkeypatch):
+    commits: list[dict[str, Any]] = []
+    recorded_times = iter(("2026-07-11T01:00:00Z", "2026-07-11T01:01:00Z"))
+    monkeypatch.setattr(core, "_now", lambda: next(recorded_times))
+
+    class _FakeStore:
+        def commit(self, **kwargs):
+            commits.append(kwargs)
+
+    for _ in range(2):
+        core._record_scoped_bootstrap_x_outcome(
+            _FakeStore(),
+            "acme",
+            operator_task={
+                "task_kind": "ceo_bootstrap",
+                "run_id": "bootstrap-job",
+                "attempt": 4,
+            },
+            status="blocked",
+            blocker="x channel credits exhausted",
+            source="creative_credit_preflight",
+            review_required=True,
+        )
+
+    event_op = commits[0]["operations"][0]
+    assert event_op["event_type"] == "bootstrap.x_launch.outcome"
+    assert event_op["payload"]["status"] == "blocked"
+    assert event_op["payload"]["operator_task"]["attempt"] == 4
+    assert event_op["payload"]["blocker"] == "x channel credits exhausted"
+    assert event_op["payload"]["review_required"] is True
+    assert commits[0]["idempotency_key"] == commits[1]["idempotency_key"]
+    assert (
+        commits[0]["operations"][0]["payload"]["recorded_at"]
+        != commits[1]["operations"][0]["payload"]["recorded_at"]
+    )
+
+
+def test_scoped_bootstrap_x_outcome_commit_failure_propagates():
+    class _FailingStore:
+        def commit(self, **_kwargs):
+            raise RuntimeError("database commit failed")
+
+    with pytest.raises(RuntimeError, match="database commit failed"):
+        core._record_scoped_bootstrap_x_outcome(
+            _FailingStore(),
+            "acme",
+            operator_task={
+                "task_kind": "ceo_bootstrap",
+                "run_id": "bootstrap-job",
+                "attempt": 1,
+            },
+            status="blocked",
+            blocker="no X credit",
+        )
+
+
+def test_business_record_event_rejects_runtime_reserved_bootstrap_namespace(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "_commit_tool",
+        lambda *_a, **_k: pytest.fail("reserved event must not reach commit"),
+    )
+
+    result = json.loads(
+        core.handle_business_record_event(
+            {
+                "business": "acme",
+                "event_type": "bootstrap.x_launch.outcome",
+                "payload": {"status": "published"},
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "runtime-reserved" in result["error"]
 
 
 def test_reddit_publication_root_is_the_receipt_writer_artifact_prefix(monkeypatch):

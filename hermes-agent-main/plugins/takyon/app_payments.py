@@ -94,6 +94,10 @@ class CancelableSubscriptionNotFound(AppPaymentError):
     """The sub-user has no Stripe-backed subscription that can still be cancelled."""
 
 
+class InvalidSubscriptionCancellation(AppPaymentError):
+    """Stripe did not confirm immediate cancellation of the exact subscription requested."""
+
+
 @dataclass(frozen=True)
 class CheckoutIntent:
     id: str
@@ -1027,7 +1031,14 @@ def reconcile_subscription(conn, subscription: dict) -> dict:
     return _process_subscription_event(conn, subscription)
 
 
-def _cancelable_subscription_entitlement(conn, business_slug: str, app_user_id: str):
+def _subscription_entitlement_for_cancellation(conn, business_slug: str, app_user_id: str):
+    """Newest Stripe subscription for this user, preferring one not already canceled.
+
+    Keeping the terminal row as a fallback makes the customer cancellation operation idempotent:
+    a repeated click returns the already-canceled provider truth instead of turning a successful
+    first request into a misleading 404.
+    """
+    terminal = None
     for entitlement in app_entitlements.list_entitlements(
         conn,
         business_slug,
@@ -1038,9 +1049,11 @@ def _cancelable_subscription_entitlement(conn, business_slug: str, app_user_id: 
         if not subscription_id:
             continue
         if status in {"cancelled", "canceled"}:
+            if terminal is None:
+                terminal = entitlement
             continue
         return entitlement
-    return None
+    return terminal
 
 
 def cancel_subscription(
@@ -1048,62 +1061,78 @@ def cancel_subscription(
     business_slug: str,
     *,
     app_user_id: str,
-    subscription_updater: Callable[[str, bool], dict[str, Any]],
-    cancel_at_period_end: bool = True,
+    subscription_canceler: Callable[[str], dict[str, Any]],
 ) -> dict[str, Any]:
-    """Cancel one Stripe-backed product subscription for a sub-user.
+    """Immediately cancel one Stripe-backed product subscription for a sub-user.
 
-    The provider mutation is injected via ``subscription_updater`` so this leaf stays testable and
-    keeps the provider/network policy at the layer above. Durable truth still lands here: the
-    Stripe response is reconciled back onto the canonical entitlement rows through the existing
-    subscription lifecycle path.
+    Cancellation is serialized per business/user, provider-authoritative, and has no grace-period
+    mode: the injected callback must perform Stripe's DELETE subscription operation and return the
+    exact subscription with terminal ``canceled`` status. Durable truth is reconciled before this
+    call commits, so access ends in the same request. A repeated call returns the terminal local
+    projection without issuing another provider mutation.
     """
-    entitlement = _cancelable_subscription_entitlement(conn, business_slug, app_user_id)
-    if entitlement is None:
-        raise CancelableSubscriptionNotFound("no cancelable Stripe subscription found")
-    existing_cancel = bool((entitlement.metadata or {}).get("cancel_at_period_end"))
-    if cancel_at_period_end and existing_cancel:
+    business = str(business_slug or "").strip()
+    user = str(app_user_id or "").strip()
+    if not business or not user:
+        raise ValueError("business_slug and app_user_id are required")
+
+    with conn.transaction():
+        conn.execute(
+            "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"takyon-app-subscription-cancel:{business}:{user}",),
+        )
+        entitlement = _subscription_entitlement_for_cancellation(conn, business, user)
+        if entitlement is None:
+            raise CancelableSubscriptionNotFound("no Stripe subscription found")
+        subscription_id = str(entitlement.stripe_subscription_id or "")
+        existing_status = str(entitlement.status or "").strip().lower()
+        if existing_status in {"cancelled", "canceled"}:
+            metadata = entitlement.metadata or {}
+            return {
+                "recorded": True,
+                "business_slug": business,
+                "app_user_id": user,
+                "stripe_subscription_id": subscription_id,
+                "plan_key": entitlement.plan_key,
+                "cancel_at_period_end": False,
+                "current_period_end": entitlement.current_period_end,
+                "stripe_subscription_status": str(
+                    metadata.get("stripe_subscription_status") or "canceled"
+                ),
+                "effective_immediately": True,
+                "already_canceled": True,
+                "already_canceling": False,
+            }
+
+        subscription = subscription_canceler(subscription_id)
+        if not isinstance(subscription, dict):
+            raise InvalidSubscriptionCancellation(
+                "subscription_canceler must return a subscription object"
+            )
+        returned_id = _stripe_object_id(subscription.get("id"))
+        returned_status = str(subscription.get("status") or "").strip().lower()
+        if returned_id != subscription_id or returned_status not in {"canceled", "cancelled"}:
+            raise InvalidSubscriptionCancellation(
+                "Stripe did not confirm immediate cancellation of the requested subscription"
+            )
+        reconcile_subscription(conn, subscription)
+        refreshed = (
+            _subscription_entitlement_for_cancellation(conn, business, user) or entitlement
+        )
+        refreshed_metadata = refreshed.metadata or {}
         return {
             "recorded": True,
-            "business_slug": business_slug,
-            "app_user_id": app_user_id,
-            "stripe_subscription_id": str(entitlement.stripe_subscription_id or ""),
-            "plan_key": entitlement.plan_key,
-            "cancel_at_period_end": True,
-            "current_period_end": entitlement.current_period_end,
-            "stripe_subscription_status": str(
-                (entitlement.metadata or {}).get("stripe_subscription_status")
-                or entitlement.status
-                or ""
-            ),
-            "already_canceling": True,
+            "business_slug": business,
+            "app_user_id": user,
+            "stripe_subscription_id": subscription_id,
+            "plan_key": refreshed.plan_key,
+            "cancel_at_period_end": False,
+            "current_period_end": refreshed.current_period_end,
+            "stripe_subscription_status": returned_status,
+            "effective_immediately": True,
+            "already_canceled": False,
+            "already_canceling": False,
         }
-    subscription_id = str(entitlement.stripe_subscription_id or "")
-    subscription = subscription_updater(subscription_id, bool(cancel_at_period_end))
-    if not isinstance(subscription, dict):
-        raise ValueError("subscription_updater must return a subscription object")
-    reconcile_subscription(conn, subscription)
-    refreshed = _cancelable_subscription_entitlement(conn, business_slug, app_user_id) or entitlement
-    refreshed_metadata = refreshed.metadata or {}
-    return {
-        "recorded": True,
-        "business_slug": business_slug,
-        "app_user_id": app_user_id,
-        "stripe_subscription_id": subscription_id,
-        "plan_key": refreshed.plan_key,
-        "cancel_at_period_end": bool(
-            subscription.get("cancel_at_period_end")
-            or refreshed_metadata.get("cancel_at_period_end")
-        ),
-        "current_period_end": refreshed.current_period_end,
-        "stripe_subscription_status": str(
-            subscription.get("status")
-            or refreshed_metadata.get("stripe_subscription_status")
-            or refreshed.status
-            or ""
-        ),
-        "already_canceling": False,
-    }
 
 
 def _process_checkout_completed(conn, event: dict, session: dict) -> dict:

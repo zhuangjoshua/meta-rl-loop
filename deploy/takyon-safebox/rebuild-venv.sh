@@ -10,6 +10,24 @@ TAKYON_VPS_HOST="${TAKYON_VPS_HOST:-root@67.205.158.170}"
 TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
 TAKYON_REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-/opt/takyon/hermes-agent-main}"
 TAKYON_REMOTE_VENV_ROOT="${TAKYON_REMOTE_VENV_ROOT:-/opt/takyon/venvs}"
+TAKYON_SAFEBOX_VENV_ACTIVATE="${TAKYON_SAFEBOX_VENV_ACTIVATE:-1}"
+TAKYON_SAFEBOX_VENV_REPAIR_ID="${TAKYON_SAFEBOX_VENV_REPAIR_ID:-$(date +%s)-$$}"
+TAKYON_SAFEBOX_VENV_RESULT_FILE="${TAKYON_SAFEBOX_VENV_RESULT_FILE:-}"
+
+if [[ "$TAKYON_SAFEBOX_VENV_ACTIVATE" != "0" && "$TAKYON_SAFEBOX_VENV_ACTIVATE" != "1" ]]; then
+  echo "TAKYON_SAFEBOX_VENV_ACTIVATE must be 0 or 1" >&2
+  exit 1
+fi
+if ! [[ "$TAKYON_SAFEBOX_VENV_REPAIR_ID" =~ ^[0-9A-Za-z._-]+$ ]]; then
+  echo "TAKYON_SAFEBOX_VENV_REPAIR_ID contains unsafe characters" >&2
+  exit 1
+fi
+if [[ -n "$TAKYON_SAFEBOX_VENV_RESULT_FILE" ]] \
+  && { ! [[ "$TAKYON_SAFEBOX_VENV_RESULT_FILE" =~ ^/opt/takyon/[0-9A-Za-z._/-]+$ ]] \
+    || [[ "$TAKYON_SAFEBOX_VENV_RESULT_FILE" == *"/../"* ]]; }; then
+  echo "TAKYON_SAFEBOX_VENV_RESULT_FILE must stay under /opt/takyon" >&2
+  exit 1
+fi
 
 [[ -x "$VERIFY_LOCK_SCRIPT" ]] || {
   echo "Safebox lock verifier not found or not executable: $VERIFY_LOCK_SCRIPT" >&2
@@ -32,12 +50,17 @@ PY
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$TAKYON_VPS_HOST" bash -s -- \
-  "$TAKYON_REMOTE_RUNTIME" "$TAKYON_REMOTE_VENV_ROOT" "$lock_sha" <<'REMOTE'
+  "$TAKYON_REMOTE_RUNTIME" "$TAKYON_REMOTE_VENV_ROOT" "$lock_sha" \
+  "$TAKYON_SAFEBOX_VENV_ACTIVATE" "$TAKYON_SAFEBOX_VENV_REPAIR_ID" \
+  "$TAKYON_SAFEBOX_VENV_RESULT_FILE" <<'REMOTE'
 set -euo pipefail
 
 runtime="$1"
 venv_root="$2"
 lock_sha="$3"
+activate="$4"
+repair_id="$5"
+result_file="$6"
 lock_file="$runtime/packaging/safebox-requirements.lock"
 candidate="$venv_root/safebox-${lock_sha:0:16}"
 current="$venv_root/safebox-current"
@@ -60,8 +83,10 @@ flock 9
 
 smoke() {
   local python_bin="$1"
+  local source_runtime="$2"
   "$python_bin" -m pip check
-  TAKYON_HOME=/opt/takyon/.takyon TAKYON_HOST_ROLE=safebox "$python_bin" - <<'PY'
+  PYTHONPATH="$source_runtime" TAKYON_HOME=/opt/takyon/.takyon TAKYON_HOST_ROLE=safebox \
+    "$python_bin" - <<'PY'
 from importlib.metadata import version
 
 expected = {
@@ -104,14 +129,36 @@ PY
 
 candidate_valid=0
 if [[ -x "$candidate/bin/python" && -f "$marker" ]]; then
-  if [[ "$(<"$marker")" == "$lock_sha" ]] && smoke "$candidate/bin/python"; then
+  if [[ "$(<"$marker")" == "$lock_sha" ]] \
+    && smoke "$candidate/bin/python" "$runtime"; then
     candidate_valid=1
   fi
 fi
 
 if [[ "$candidate_valid" != 1 ]]; then
+  current_target=""
+  if [[ -L "$current" ]]; then
+    current_target="$(readlink -f "$current")"
+  fi
+  if [[ "$current_target" == "$candidate" ]]; then
+    # The serving interpreter may still import from this directory. Never rename or rebuild it;
+    # prepare a sibling repair candidate and let the deploy flip the pointer only after service stop.
+    candidate="$venv_root/safebox-${lock_sha:0:16}-repair-${repair_id:0:12}"
+    marker="$candidate/.takyon-safebox-lock-sha256"
+    if [[ -x "$candidate/bin/python" && -f "$marker" ]] \
+      && [[ "$(<"$marker")" == "$lock_sha" ]] \
+      && smoke "$candidate/bin/python" "$runtime"; then
+      candidate_valid=1
+    elif [[ "$current_target" == "$candidate" ]]; then
+      echo "active Safebox repair environment is invalid; refusing in-place mutation: $candidate" >&2
+      exit 1
+    fi
+  fi
+fi
+
+if [[ "$candidate_valid" != 1 ]]; then
   if [[ -e "$candidate" || -L "$candidate" ]]; then
-    mv "$candidate" "$candidate.invalid-$(date +%Y%m%d%H%M%S)"
+    mv "$candidate" "$candidate.invalid-$(date +%Y%m%d%H%M%S)-$$"
   fi
   python3 -m venv "$candidate"
   "$candidate/bin/python" -m pip install \
@@ -119,18 +166,26 @@ if [[ "$candidate_valid" != 1 ]]; then
     --only-binary=:all: \
     --require-hashes \
     -r "$lock_file"
-  "$candidate/bin/python" -m pip install \
-    --disable-pip-version-check \
-    --no-deps \
-    --no-build-isolation \
-    -e "$runtime"
-  smoke "$candidate/bin/python"
+  smoke "$candidate/bin/python" "$runtime"
   "$candidate/bin/python" - "$marker" "$lock_sha" <<'PY'
 from pathlib import Path
 import sys
 
 Path(sys.argv[1]).write_text(sys.argv[2] + "\n", encoding="utf-8")
 PY
+fi
+
+if [[ -n "$result_file" ]]; then
+  install -d "$(dirname "$result_file")"
+  printf '%s\n' "$candidate" >"$result_file.tmp.$$"
+  mv -f "$result_file.tmp.$$" "$result_file"
+fi
+
+# A deploy prepares and validates dependencies while the old Safebox keeps serving, but it must not
+# advance the process-visible pointer until the service is stopped in the bounded activation window.
+if [[ "$activate" != "1" ]]; then
+  echo "Safebox environment candidate ready: $candidate"
+  exit 0
 fi
 
 if [[ -e "$current" && ! -L "$current" ]]; then
@@ -148,7 +203,7 @@ fi
 ln -sfn "$candidate" "$current.next"
 mv -Tf "$current.next" "$current"
 
-if ! smoke "$current/bin/python"; then
+if ! smoke "$current/bin/python" "$runtime"; then
   if [[ -n "$old_target" ]]; then
     ln -sfn "$old_target" "$current.rollback"
     mv -Tf "$current.rollback" "$current"

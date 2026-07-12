@@ -25,10 +25,15 @@ export interface AppRecord {
   id: string;
   type: string;
   ref: RecordRef;
+  title?: string | null;
+  data?: unknown;
+  metadata?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
   [key: string]: unknown;
 }
 
-export interface RecordResponse {
+export interface RecordResponse extends AppRecord {
   record: AppRecord;
   [key: string]: unknown;
 }
@@ -37,6 +42,39 @@ export interface RecordListResponse {
   records: AppRecord[];
   [key: string]: unknown;
 }
+
+export interface SaveRecordFields {
+  title?: string | null;
+  /** The records rail is an upsert contract; data is required for both create and update. */
+  data: NonNullable<unknown>;
+  metadata?: Record<string, unknown>;
+  /** Raw runtime IDs are compatibility-only. Generated products preserve and pass `ref`. */
+  id?: never;
+  record_id?: never;
+  record_ref?: never;
+  [key: string]: unknown;
+}
+
+export type SaveRecordPayload = SaveRecordFields & (
+  | {
+      /** Create a new record of this type. */
+      record_type: string;
+      type?: string;
+      ref?: never;
+    }
+  | {
+      /** Backward-compatible create spelling. */
+      type: string;
+      record_type?: string;
+      ref?: never;
+    }
+  | {
+      /** Update the record addressed by this exact runtime-owned reference. */
+      ref: RecordRef;
+      record_type?: string;
+      type?: string;
+    }
+);
 
 const RECORD_REF_PREFIX = "takyon-record-v1.";
 
@@ -49,6 +87,17 @@ function recordRefFromRecord(record: unknown): RecordRef | "" {
   const type = String(record.type || record.record_type || "").trim();
   const id = String(record.id || record.record_id || "").trim();
   if (!type || !id) return "";
+  // Preserve a runtime-supplied canonical ref byte-for-byte. The deterministic v1 encoding is
+  // only the compatibility path for older record responses that still expose type/id alone.
+  const existingRef = typeof record.ref === "string" ? record.ref : "";
+  if (existingRef) {
+    try {
+      const existingKey = recordKeyFromRef(existingRef as RecordRef);
+      if (existingKey.type === type && existingKey.id === id) return existingRef as RecordRef;
+    } catch {
+      // Ignore a malformed/stale legacy response ref and derive the compatible v1 locator below.
+    }
+  }
   return `${RECORD_REF_PREFIX}${encodeURIComponent(JSON.stringify([1, type, id]))}` as RecordRef;
 }
 
@@ -79,20 +128,24 @@ function recordKeyFromRef(ref: RecordRef): { type: string; id: string } {
   }
 }
 
+function recordWithRef(record: unknown): unknown {
+  if (!isObject(record)) return record;
+  const ref = recordRefFromRecord(record);
+  return ref ? { ...record, ref } : record;
+}
+
 function payloadWithRecordRefs(payload: any): any {
   if (!isObject(payload)) return payload;
   const out = { ...payload };
   if (isObject(payload.record)) {
-    const ref = recordRefFromRecord(payload.record);
-    out.record = ref ? { ...payload.record, ref } : payload.record;
+    const record = recordWithRef(payload.record) as Record<string, unknown>;
+    out.record = record;
+    // Preserve the historical envelope and also expose exactly that record at the top level. Some
+    // generated screens consumed mutations/reads as a flat record; deterministic mirroring keeps
+    // those screens compatible without introducing a second identity.
+    for (const [key, value] of Object.entries(record)) out[key] = value;
   }
-  if (Array.isArray(payload.records)) {
-    out.records = payload.records.map((record: unknown) => {
-      if (!isObject(record)) return record;
-      const ref = recordRefFromRecord(record);
-      return ref ? { ...record, ref } : record;
-    });
-  }
+  if (Array.isArray(payload.records)) out.records = payload.records.map(recordWithRef);
   return out;
 }
 
@@ -151,14 +204,14 @@ export interface MobileRuntimeClient {
   deleteAccount(): Promise<{ success: boolean; deleted: boolean }>;
   // account / profile
   account(): Promise<any>;
-  cancelSubscription(payload?: Record<string, unknown>): Promise<any>;
+  cancelSubscription(): Promise<any>;
   profile(): Promise<any>;
   updateProfile(p: Record<string, unknown>): Promise<any>;
   // records
   listRecords(o?: Record<string, unknown>): Promise<RecordListResponse>;
   getRecord(ref: RecordRef): Promise<RecordResponse>;
   readRecord(ref: RecordRef): Promise<RecordResponse>;
-  saveRecord(p: Record<string, unknown>): Promise<RecordResponse>;
+  saveRecord(p: SaveRecordPayload): Promise<RecordResponse>;
   deleteRecord(ref: RecordRef): Promise<RecordResponse>;
   // paid rails (brokered server-side)
   generate(payload: Record<string, unknown>): Promise<any>;
@@ -252,6 +305,60 @@ export function createMobileRuntimeClient(
     );
   }
 
+  async function saveRecord(payload: Record<string, any> = {}): Promise<RecordResponse> {
+    ensureRail("records");
+    if (!Object.prototype.hasOwnProperty.call(payload, "data") || payload.data == null) {
+      throw new TypeError("data is required");
+    }
+    const suppliedRefs = [payload.ref, payload.record_ref]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    if (new Set(suppliedRefs).size > 1) {
+      throw new TypeError("ref does not match the supplied record_ref");
+    }
+    const suppliedRef = suppliedRefs[0] || "";
+    const refKey = suppliedRef ? recordKeyFromRef(suppliedRef as RecordRef) : null;
+    const suppliedTypes = [payload.record_type, payload.type]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    const legacyRecordIds = [payload.record_id, payload.id]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    if (new Set(suppliedTypes).size > 1) {
+      throw new TypeError("record_type does not match the supplied type");
+    }
+    if (new Set(legacyRecordIds).size > 1) {
+      throw new TypeError("record_id does not match the supplied id");
+    }
+    const suppliedType = suppliedTypes[0] || "";
+    const legacyRecordId = legacyRecordIds[0] || "";
+    if (refKey && suppliedTypes.some((value) => value !== refKey.type)) {
+      throw new TypeError("record_type does not match the supplied record ref");
+    }
+    if (refKey && legacyRecordIds.some((value) => value !== refKey.id)) {
+      throw new TypeError("record_id does not match the supplied record ref");
+    }
+    const recordType = refKey ? refKey.type : suppliedType;
+    if (!recordType) throw new Error("record_type is required");
+    // Raw IDs remain accepted by the runtime implementation for already-published apps, but the
+    // MobileRuntimeClient type exposes only RecordRef updates to newly generated product code.
+    const recordId = refKey ? refKey.id : legacyRecordId;
+    const route = recordId
+      ? `records/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}`
+      : "records";
+    const { ref: _ref, record_ref: _recordRef, ...recordPayload } = payload;
+    return payloadWithRecordRefs(
+      await req(route, {
+        method: "POST",
+        body: JSON.stringify({
+          ...recordPayload,
+          record_type: recordType,
+          record_id: recordId || undefined,
+        }),
+      }),
+    );
+  }
+
   return {
     railStateFor,
     isRailCallable,
@@ -292,11 +399,11 @@ export function createMobileRuntimeClient(
       ensureRail("account");
       return req("account", { method: "GET" });
     },
-    async cancelSubscription(payload = {}) {
+    async cancelSubscription() {
       ensureRail("account");
       return req("account", {
         method: "POST",
-        body: JSON.stringify({ ...payload, action: "cancel_subscription" }),
+        body: JSON.stringify({ action: "cancel_subscription" }),
       });
     },
     async profile() {
@@ -317,12 +424,7 @@ export function createMobileRuntimeClient(
     },
     getRecord,
     readRecord,
-    async saveRecord(p) {
-      ensureRail("records");
-      return payloadWithRecordRefs(
-        await req("records", { method: "POST", body: JSON.stringify(p) }),
-      );
-    },
+    saveRecord,
     deleteRecord,
 
     async generate(payload) {

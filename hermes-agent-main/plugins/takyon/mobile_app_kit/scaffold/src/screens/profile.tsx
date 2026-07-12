@@ -14,6 +14,22 @@ export default function ProfileScreen() {
   const client = useTakyon();
   const router = useRouter();
   const [busy, setBusy] = useState(false);
+  const [cancellationBusy, setCancellationBusy] = useState(false);
+  const hasPaidSubscription = ["paid", "pro", "trial"].includes(
+    String(auth.tier || "").trim().toLowerCase(),
+  );
+
+  const confirmCancellation = () =>
+    new Promise<boolean>((resolve) => {
+      Alert.alert(
+        "Cancel your subscription now?",
+        "Your access will end immediately. There is no grace period.",
+        [
+          { text: "Keep subscription", style: "cancel", onPress: () => resolve(false) },
+          { text: "Cancel now", style: "destructive", onPress: () => resolve(true) },
+        ],
+      );
+    });
 
   const confirmDestructive = () =>
     new Promise<boolean>((resolve) => {
@@ -49,6 +65,39 @@ export default function ProfileScreen() {
           </Button>
         </CardContent>
       </Card>
+
+      {hasPaidSubscription ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Cancel subscription</CardTitle>
+            <CardDescription>
+              Cancellation ends access immediately. There is no grace period, and you will not be
+              charged for another billing period.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              variant="destructive"
+              busy={cancellationBusy}
+              onPress={async () => {
+                if (!(await confirmCancellation())) return;
+                setCancellationBusy(true);
+                try {
+                  await client.cancelSubscription();
+                  await auth.refresh();
+                  Alert.alert("Subscription canceled", "Your access has ended immediately.");
+                } catch (e: any) {
+                  Alert.alert("Could not cancel subscription", String(e?.message ?? e));
+                } finally {
+                  setCancellationBusy(false);
+                }
+              }}
+            >
+              Cancel subscription now
+            </Button>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>

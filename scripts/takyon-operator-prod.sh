@@ -835,7 +835,7 @@ require_tunnel() {
       timestamp="$(date +%Y%m%d-%H%M%S)"
       tunnel_log="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.log"
       tunnel_pid_file="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.pid"
-      ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy
+      ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT"
       return 0
     fi
     ensure_dev_safebox_up
@@ -896,6 +896,14 @@ require_tunnel_restart_lock_tool() {
     echo "takyon-prod: /usr/bin/shlock is required for shared tunnel ownership on the Mac production rail" >&2
     return 1
   fi
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "takyon-prod: lsof is required to verify shared tunnel listener ownership" >&2
+    return 1
+  fi
+  if ! command -v nc >/dev/null 2>&1; then
+    echo "takyon-prod: nc is required to verify shared tunnel listener health" >&2
+    return 1
+  fi
 }
 
 acquire_tunnel_restart_lock() {
@@ -909,6 +917,28 @@ acquire_tunnel_restart_lock() {
   /usr/bin/shlock -f "$lock_file" -p "$current_pid"
 }
 
+acquire_tunnel_restart_lock_wait() {
+  local port="$1"
+  local wait_seconds="${TAKYON_TUNNEL_LOCK_WAIT_SECONDS:-45}"
+  if ! [[ "$wait_seconds" =~ ^[0-9]+$ ]] || [[ "$wait_seconds" -lt 1 ]]; then
+    wait_seconds="45"
+  fi
+  local attempts=$((wait_seconds * 10))
+  local _attempt lock_status
+  for _attempt in $(seq 1 "$attempts"); do
+    lock_status=0
+    acquire_tunnel_restart_lock "$port" || lock_status="$?"
+    if [[ "$lock_status" == "0" ]]; then
+      return 0
+    fi
+    if [[ "$lock_status" != "1" ]]; then
+      return "$lock_status"
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 release_tunnel_restart_lock() {
   local port="$1"
   local lock_file owner_pid current_pid
@@ -918,6 +948,176 @@ release_tunnel_restart_lock() {
   if [[ "$owner_pid" == "$current_pid" ]]; then
     rm -f "$lock_file"
   fi
+}
+
+tunnel_owner_record_path() {
+  local port="$1"
+  local owner_root="$LOCAL_PROD_ROOT/tunnel-locks"
+  mkdir -p "$owner_root"
+  printf '%s/owner-%s.pid' "$owner_root" "$port"
+}
+
+process_start_identity() {
+  local pid="${1:-}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  ps -o lstart= -p "$pid" 2>/dev/null \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+read_managed_tunnel_owner() {
+  local port="$1"
+  local owner_file owner_pid owner_identity
+  owner_file="$(tunnel_owner_record_path "$port")"
+  [[ -f "$owner_file" ]] || return 1
+  IFS=$'\t' read -r owner_pid owner_identity <"$owner_file" || return 1
+  [[ "$owner_pid" =~ ^[0-9]+$ ]] || return 1
+  [[ -n "$owner_identity" ]] || return 1
+  printf '%s\t%s\n' "$owner_pid" "$owner_identity"
+}
+
+record_managed_tunnel_owner() {
+  local port="$1"
+  local pid="$2"
+  local owner_file owner_identity owner_tmp
+  owner_identity="$(process_start_identity "$pid")"
+  [[ -n "$owner_identity" ]] || return 1
+  owner_file="$(tunnel_owner_record_path "$port")"
+  owner_tmp="${owner_file}.$$.$RANDOM.tmp"
+  printf '%s\t%s\n' "$pid" "$owner_identity" >"$owner_tmp"
+  chmod 600 "$owner_tmp" 2>/dev/null || true
+  mv -f "$owner_tmp" "$owner_file"
+}
+
+managed_tunnel_record_matches_process() {
+  local port="$1"
+  local expected_pid="${2:-}"
+  local owner_record owner_pid owner_identity current_identity
+  owner_record="$(read_managed_tunnel_owner "$port")" || return 1
+  IFS=$'\t' read -r owner_pid owner_identity <<<"$owner_record"
+  if [[ -n "$expected_pid" && "$owner_pid" != "$expected_pid" ]]; then
+    return 1
+  fi
+  kill -0 "$owner_pid" >/dev/null 2>&1 || return 1
+  current_identity="$(process_start_identity "$owner_pid")"
+  [[ -n "$current_identity" && "$current_identity" == "$owner_identity" ]]
+}
+
+managed_tunnel_recorded_owner_owns_listener() {
+  local port="$1"
+  local expected_pid="${2:-}"
+  local owner_record owner_pid owner_identity
+  managed_tunnel_record_matches_process "$port" "$expected_pid" || return 1
+  owner_record="$(read_managed_tunnel_owner "$port")" || return 1
+  IFS=$'\t' read -r owner_pid owner_identity <<<"$owner_record"
+  lsof -nP -a -p "$owner_pid" -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null \
+    | grep -qx "$owner_pid"
+}
+
+clear_managed_tunnel_owner() {
+  local port="$1"
+  local expected_pid="${2:-}"
+  local owner_file owner_record owner_pid owner_identity
+  owner_file="$(tunnel_owner_record_path "$port")"
+  if [[ -n "$expected_pid" ]]; then
+    owner_record="$(read_managed_tunnel_owner "$port")" || return 0
+    IFS=$'\t' read -r owner_pid owner_identity <<<"$owner_record"
+    [[ "$owner_pid" == "$expected_pid" ]] || return 0
+  fi
+  rm -f "$owner_file"
+}
+
+tunnel_consumer_root_path() {
+  local port="$1"
+  local root="$LOCAL_PROD_ROOT/tunnel-locks/consumers-$port"
+  mkdir -p "$root"
+  chmod 700 "$root" 2>/dev/null || true
+  printf '%s' "$root"
+}
+
+tunnel_consumer_record_path() {
+  local port="$1"
+  local consumer_pid="$2"
+  printf '%s/%s.lease' "$(tunnel_consumer_root_path "$port")" "$consumer_pid"
+}
+
+register_managed_tunnel_consumer_locked() {
+  local port="$1"
+  local consumer_pid="$2"
+  local identity lease_file lease_tmp
+  identity="$(process_start_identity "$consumer_pid")"
+  [[ -n "$identity" ]] || return 1
+  lease_file="$(tunnel_consumer_record_path "$port" "$consumer_pid")"
+  lease_tmp="${lease_file}.$$.$RANDOM.tmp"
+  printf '%s\t%s\n' "$consumer_pid" "$identity" >"$lease_tmp"
+  chmod 600 "$lease_tmp" 2>/dev/null || true
+  mv -f "$lease_tmp" "$lease_file"
+}
+
+prune_managed_tunnel_consumers_locked() {
+  local port="$1"
+  local root lease_file consumer_pid consumer_identity current_identity
+  root="$(tunnel_consumer_root_path "$port")"
+  for lease_file in "$root"/*.lease; do
+    [[ -f "$lease_file" ]] || continue
+    consumer_pid=""
+    consumer_identity=""
+    IFS=$'\t' read -r consumer_pid consumer_identity <"$lease_file" || true
+    if ! [[ "$consumer_pid" =~ ^[0-9]+$ ]] || [[ -z "$consumer_identity" ]] \
+      || ! kill -0 "$consumer_pid" >/dev/null 2>&1; then
+      rm -f "$lease_file"
+      continue
+    fi
+    current_identity="$(process_start_identity "$consumer_pid")"
+    [[ -n "$current_identity" && "$current_identity" == "$consumer_identity" ]] \
+      || rm -f "$lease_file"
+  done
+}
+
+managed_tunnel_consumer_count_locked() {
+  local port="$1"
+  local root count=0 lease_file
+  prune_managed_tunnel_consumers_locked "$port"
+  root="$(tunnel_consumer_root_path "$port")"
+  for lease_file in "$root"/*.lease; do
+    [[ -f "$lease_file" ]] && count=$((count + 1))
+  done
+  printf '%s' "$count"
+}
+
+release_managed_tunnel_consumer() {
+  local port="$1"
+  local consumer_pid="$2"
+  local pid_file="${3:-}"
+  local lock_status=0 lease_file
+  acquire_tunnel_restart_lock_wait "$port" || lock_status="$?"
+  if [[ "$lock_status" != "0" ]]; then
+    [[ "$lock_status" == "1" ]] \
+      && echo "takyon-prod: timed out acquiring shared tunnel lock for consumer cleanup on port $port" >&2
+    return "$lock_status"
+  fi
+  lease_file="$(tunnel_consumer_record_path "$port" "$consumer_pid")"
+  rm -f "$lease_file"
+  # The tunnel is shared Mac infrastructure, not a child resource of whichever console happened
+  # to start it. Keep the managed owner alive at zero leases so separately spawned/free shells do
+  # not lose broker access; a later health reconciler replaces it only if it is actually unhealthy.
+  managed_tunnel_consumer_count_locked "$port" >/dev/null
+  [[ -n "$pid_file" ]] && rm -f "$pid_file"
+  release_tunnel_restart_lock "$port"
+}
+
+terminate_recorded_tunnel_owner() {
+  local port="$1"
+  local expected_pid="${2:-}"
+  local owner_record owner_pid owner_identity
+  owner_record="$(read_managed_tunnel_owner "$port")" || return 0
+  IFS=$'\t' read -r owner_pid owner_identity <<<"$owner_record"
+  if [[ -n "$expected_pid" && "$owner_pid" != "$expected_pid" ]]; then
+    return 0
+  fi
+  if managed_tunnel_record_matches_process "$port" "$owner_pid"; then
+    terminate_pid "$owner_pid"
+  fi
+  clear_managed_tunnel_owner "$port" "$owner_pid"
 }
 
 tunnel_healthy() {
@@ -966,24 +1166,32 @@ local_worker_stop_grace_seconds() {
   printf '%s' "$seconds"
 }
 
-pid_file_process_running() {
-  local pid_file="$1"
-  [[ -f "$pid_file" ]] || return 1
-  local pid
-  pid="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
-  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-  kill -0 "$pid" >/dev/null 2>&1
-}
-
-stop_pid_file_process() {
-  local pid_file="$1"
-  if [[ ! -f "$pid_file" ]]; then
-    return 0
+stop_managed_tunnel_pid_file() {
+  local pid_file="${1:-}"
+  local port="$2"
+  [[ -n "$pid_file" && -f "$pid_file" ]] || return 0
+  local pid="" pid_identity="" owner_record owner_pid="" owner_identity="" lock_status=0
+  IFS=$'\t' read -r pid pid_identity <"$pid_file" || true
+  acquire_tunnel_restart_lock_wait "$port" || lock_status="$?"
+  if [[ "$lock_status" != "0" ]]; then
+    if [[ "$lock_status" == "1" ]]; then
+      echo "takyon-prod: timed out acquiring shared tunnel lock for cleanup on port $port" >&2
+    fi
+    return "$lock_status"
   fi
-  local pid
-  pid="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
-  terminate_pid "$pid"
+  owner_record="$(read_managed_tunnel_owner "$port")" || owner_record=""
+  if [[ -n "$owner_record" ]]; then
+    IFS=$'\t' read -r owner_pid owner_identity <<<"$owner_record"
+  fi
+  if [[ "$pid" =~ ^[0-9]+$ \
+    && -n "$pid_identity" \
+    && "$pid" == "$owner_pid" \
+    && "$pid_identity" == "$owner_identity" \
+  ]] && managed_tunnel_record_matches_process "$port" "$pid"; then
+    terminate_recorded_tunnel_owner "$port" "$pid"
+  fi
   rm -f "$pid_file"
+  release_tunnel_restart_lock "$port"
 }
 
 start_managed_tunnel() {
@@ -992,14 +1200,72 @@ start_managed_tunnel() {
   local health_url="$3"
   local log_file="$4"
   local pid_file="$5"
-  "$0" "$command" >>"$log_file" 2>&1 &
+  local port="$6"
+  nohup "$0" "$command" </dev/null >>"$log_file" 2>&1 &
   local pid="$!"
   printf '%s\n' "$pid" >"$pid_file"
-  if wait_for_url "$label" "$health_url" "$log_file"; then
+  if ! record_managed_tunnel_owner "$port" "$pid"; then
+    echo "$label tunnel owner could not be recorded for pid $pid" >&2
+    terminate_pid "$pid"
+    rm -f "$pid_file"
+    return 1
+  fi
+  # Keep the same PID+process-start identity in the console-local file. Cleanup compares both
+  # fields with the shared owner record, so a long-lived console can never kill a replacement
+  # tunnel merely because macOS eventually reused its original numeric PID.
+  read_managed_tunnel_owner "$port" >"$pid_file"
+  if wait_for_url "$label" "$health_url" "$log_file" \
+    && managed_tunnel_recorded_owner_owns_listener "$port" "$pid"; then
     return 0
   fi
-  stop_pid_file_process "$pid_file"
+  if curl --silent --fail --max-time 2 "$health_url" >/dev/null 2>&1; then
+    echo "$label health endpoint is reachable, but pid $pid does not own listener 127.0.0.1:$port; refusing false tunnel ownership" >&2
+  fi
+  terminate_recorded_tunnel_owner "$port" "$pid"
+  rm -f "$pid_file"
   return 1
+}
+
+ensure_managed_tunnel_locked() {
+  local label="$1"
+  local display_url="$2"
+  local health_url="$3"
+  local command="$4"
+  local log_file="$5"
+  local pid_file="$6"
+  local health_fn="$7"
+  local port="$8"
+  if "$health_fn"; then
+    echo "$label tunnel: already healthy at $display_url"
+    return 0
+  fi
+
+  if local_tcp_port_listening "$port"; then
+    # A remote service restart can briefly leave a valid SSH listener returning connection errors.
+    # Confirm the failed health check before replacing a listener that this rail provably owns.
+    local _health_retry
+    for _health_retry in 1 2 3; do
+      sleep 0.5
+      if "$health_fn"; then
+        echo "$label tunnel: healthy again at $display_url"
+        return 0
+      fi
+    done
+    if managed_tunnel_recorded_owner_owns_listener "$port"; then
+      echo "$label tunnel listener is owned by this rail but unhealthy; restarting under the shared lock..."
+      terminate_recorded_tunnel_owner "$port"
+    else
+      echo "$label tunnel is unhealthy and 127.0.0.1:$port is occupied by an unowned listener; refusing to rebind or terminate an unrelated process" >&2
+      return 1
+    fi
+  else
+    # Reap a recorded process that never reached LISTEN (failed ssh setup, dead remote, or stale
+    # owner record) before creating a replacement. PID start identity prevents killing a reused PID.
+    terminate_recorded_tunnel_owner "$port"
+  fi
+
+  echo "Starting $label tunnel in background..."
+  start_managed_tunnel "$label" "$command" "$health_url" "$log_file" "$pid_file" "$port"
 }
 
 ensure_managed_tunnel() {
@@ -1010,40 +1276,23 @@ ensure_managed_tunnel() {
   local log_file="$5"
   local pid_file="$6"
   local health_fn="$7"
-  if "$health_fn"; then
-    echo "$label tunnel: already healthy at $display_url"
-    return 0
-  fi
-  echo "Starting $label tunnel in background..."
-  start_managed_tunnel "$label" "$command" "$health_url" "$log_file" "$pid_file"
-}
-
-restart_managed_tunnel_if_unowned() {
-  local label="$1"
-  local command="$2"
-  local health_url="$3"
-  local log_file="$4"
-  local pid_file="$5"
-  local health_fn="$6"
-  local port="$7"
+  local port="$8"
+  local consumer_pid="${9:-}"
   local result=0
   local lock_status=0
 
-  acquire_tunnel_restart_lock "$port" || lock_status="$?"
-  if [[ "$lock_status" == "1" ]]; then
-    return 0
-  fi
+  acquire_tunnel_restart_lock_wait "$port" || lock_status="$?"
   if [[ "$lock_status" != "0" ]]; then
+    if [[ "$lock_status" == "1" ]]; then
+      echo "takyon-prod: timed out acquiring shared tunnel lock for $label on port $port" >&2
+    fi
     return "$lock_status"
   fi
-  # Recheck both signals after taking the shared lock: another shell may have repaired the tunnel
-  # between this monitor's failed health check and lock acquisition.
-  if ! "$health_fn" && ! local_tcp_port_listening "$port"; then
-    stop_pid_file_process "$pid_file"
-    echo "$label tunnel dropped; restarting..."
-    if ! start_managed_tunnel "$label" "$command" "$health_url" "$log_file" "$pid_file"; then
-      result=1
-    fi
+  ensure_managed_tunnel_locked \
+    "$label" "$display_url" "$health_url" "$command" "$log_file" "$pid_file" "$health_fn" "$port" \
+    || result="$?"
+  if [[ "$result" == "0" && -n "$consumer_pid" ]]; then
+    register_managed_tunnel_consumer_locked "$port" "$consumer_pid" || result=1
   fi
   release_tunnel_restart_lock "$port"
   return "$result"
@@ -1058,24 +1307,16 @@ monitor_console_tunnels() {
   while true; do
     sleep "$CONSOLE_TUNNEL_MONITOR_SECONDS"
     if ! safebox_tunnel_healthy; then
-      # A shared tunnel owned by another operator shell can keep the local listener alive while the
-      # remote service briefly restarts. Do not race it by binding the same port; the next monitor
-      # tick will health-check the existing listener again.
-      if ! local_tcp_port_listening "$LOCAL_SAFEBOX_PORT"; then
-        restart_managed_tunnel_if_unowned \
-          "Safebox" "safebox-tunnel" "$LOCAL_SAFEBOX_URL/healthz" \
-          "$safebox_log" "$safebox_pid_file" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT" || true
-      fi
+      ensure_managed_tunnel \
+        "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" \
+        "$safebox_log" "$safebox_pid_file" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT" || true
     fi
     if [[ "$TARGET" == "dev" ]]; then
       continue
     fi
     if ! dashboard_tunnel_healthy; then
-      if local_tcp_port_listening "$LOCAL_DASHBOARD_PORT"; then
-        continue
-      fi
-      restart_managed_tunnel_if_unowned \
-        "Operator dashboard" "dashboard-tunnel" "$LOCAL_DASHBOARD_URL/healthz" \
+      ensure_managed_tunnel \
+        "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" \
         "$dashboard_log" "$dashboard_pid_file" dashboard_tunnel_healthy "$LOCAL_DASHBOARD_PORT" || true
     fi
   done
@@ -1085,6 +1326,7 @@ WORKER_TUNNEL_GUARD_MONITOR_PID=""
 WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE=""
 WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE=""
 WORKER_TUNNEL_GUARD_CHILD_PID=""
+WORKER_TUNNEL_GUARD_CONSUMER_PID=""
 
 cleanup_worker_tunnel_guard() {
   if [[ -n "${WORKER_TUNNEL_GUARD_CHILD_PID:-}" ]] && kill -0 "$WORKER_TUNNEL_GUARD_CHILD_PID" >/dev/null 2>&1; then
@@ -1093,12 +1335,17 @@ cleanup_worker_tunnel_guard() {
   if [[ -n "${WORKER_TUNNEL_GUARD_MONITOR_PID:-}" ]] && kill -0 "$WORKER_TUNNEL_GUARD_MONITOR_PID" >/dev/null 2>&1; then
     terminate_pid "$WORKER_TUNNEL_GUARD_MONITOR_PID"
   fi
-  stop_pid_file_process "${WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE:-}"
-  stop_pid_file_process "${WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE:-}"
+  if [[ -n "${WORKER_TUNNEL_GUARD_CONSUMER_PID:-}" ]]; then
+    release_managed_tunnel_consumer "$LOCAL_SAFEBOX_PORT" "$WORKER_TUNNEL_GUARD_CONSUMER_PID" "${WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE:-}" || true
+    if [[ "$TARGET" != "dev" ]]; then
+      release_managed_tunnel_consumer "$LOCAL_DASHBOARD_PORT" "$WORKER_TUNNEL_GUARD_CONSUMER_PID" "${WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE:-}" || true
+    fi
+  fi
   WORKER_TUNNEL_GUARD_MONITOR_PID=""
   WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE=""
   WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE=""
   WORKER_TUNNEL_GUARD_CHILD_PID=""
+  WORKER_TUNNEL_GUARD_CONSUMER_PID=""
 }
 
 start_worker_tunnel_guard() {
@@ -1107,6 +1354,7 @@ start_worker_tunnel_guard() {
     WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE=""
     WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE=""
     WORKER_TUNNEL_GUARD_CHILD_PID=""
+    WORKER_TUNNEL_GUARD_CONSUMER_PID=""
     return 0
   fi
 
@@ -1118,6 +1366,7 @@ start_worker_tunnel_guard() {
   local dashboard_tunnel_log="$LOCAL_PROD_ROOT/logs/dashboard-tunnel-$timestamp.log"
   WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.pid"
   WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE="$LOCAL_PROD_ROOT/logs/dashboard-tunnel-$timestamp.pid"
+  WORKER_TUNNEL_GUARD_CONSUMER_PID="$(current_shell_process_pid)"
 
   trap cleanup_worker_tunnel_guard EXIT INT TERM
 
@@ -1125,14 +1374,14 @@ start_worker_tunnel_guard() {
     if ! dev_remote_safebox_configured; then
       return 0
     fi
-    ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" safebox_tunnel_healthy
+    ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT" "$WORKER_TUNNEL_GUARD_CONSUMER_PID"
     monitor_console_tunnels "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" "$dashboard_tunnel_log" "$WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE" >>"$tunnel_log" 2>&1 &
     WORKER_TUNNEL_GUARD_MONITOR_PID="$!"
     return 0
   fi
 
-  ensure_managed_tunnel "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" safebox_tunnel_healthy
-  ensure_managed_tunnel "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE" dashboard_tunnel_healthy
+  ensure_managed_tunnel "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT" "$WORKER_TUNNEL_GUARD_CONSUMER_PID"
+  ensure_managed_tunnel "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE" dashboard_tunnel_healthy "$LOCAL_DASHBOARD_PORT" "$WORKER_TUNNEL_GUARD_CONSUMER_PID"
 
   monitor_console_tunnels "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" "$dashboard_tunnel_log" "$WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE" >>"$tunnel_log" 2>&1 &
   WORKER_TUNNEL_GUARD_MONITOR_PID="$!"
@@ -1157,6 +1406,55 @@ require_docker_for_worker() {
     >/dev/null 2>&1; then
     die "Docker cannot bind-mount the runtime checkout at $RUNTIME_DIR; move or create the checkout under a Docker Desktop shared path (normally /Users/...) before starting the production worker"
   fi
+}
+
+worker_preflight_wait_seconds() {
+  local seconds="${TAKYON_WORKER_PREFLIGHT_WAIT_SECONDS:-180}"
+  if ! [[ "$seconds" =~ ^[0-9]+$ ]] || [[ "$seconds" -lt 5 ]]; then
+    seconds="180"
+  fi
+  printf '%s' "$seconds"
+}
+
+surface_worker_preflight_failure() {
+  local worker_log="$1"
+  echo "Local worker preflight failed; refusing to open an operator shell without the requested Mac worker." >&2
+  if [[ -f "$worker_log" ]]; then
+    echo "Worker preflight log:" >&2
+    tail -80 "$worker_log" >&2 || true
+  fi
+}
+
+wait_for_worker_preflight() {
+  local worker_pid="$1"
+  local ready_file="$2"
+  local worker_log="$3"
+  local wait_seconds attempts _attempt
+  wait_seconds="$(worker_preflight_wait_seconds)"
+  attempts=$((wait_seconds * 10))
+  for _attempt in $(seq 1 "$attempts"); do
+    if [[ -f "$ready_file" ]]; then
+      # WorkerPool writes this marker atomically only after its database-backed pool registration
+      # succeeds. Still require the producer process to be alive before opening the shell.
+      if kill -0 "$worker_pid" >/dev/null 2>&1; then
+        return 0
+      fi
+      wait "$worker_pid" >/dev/null 2>&1 || true
+      surface_worker_preflight_failure "$worker_log"
+      return 1
+    fi
+    if ! kill -0 "$worker_pid" >/dev/null 2>&1; then
+      wait "$worker_pid" >/dev/null 2>&1 || true
+      surface_worker_preflight_failure "$worker_log"
+      return 1
+    fi
+    sleep 0.1
+  done
+  echo "Local worker preflight did not become ready within ${wait_seconds}s; stopping the preflight child." >&2
+  terminate_pid "$worker_pid"
+  wait "$worker_pid" >/dev/null 2>&1 || true
+  surface_worker_preflight_failure "$worker_log"
+  return 1
 }
 
 ensure_deno_toolchain() {
@@ -1478,6 +1776,61 @@ cmd_run() {
   exec "$TAKYON_ENTRY" "$@"
 }
 
+cmd_product_edge_deploy() {
+  load_operator_env
+  require_tunnel
+  local edge_dir="$ROOT/deploy/cloudflare/product-worker"
+  [[ -f "$edge_dir/worker.js" && -f "$edge_dir/wrangler.toml" ]] || {
+    echo "takyon-prod: tracked product-edge worker is missing" >&2
+    return 1
+  }
+  command -v npx >/dev/null 2>&1 || {
+    echo "takyon-prod: npx is required to deploy the product-edge worker" >&2
+    return 1
+  }
+  local dirty head published
+  dirty="$(git -C "$ROOT" status --porcelain --untracked-files=all)"
+  [[ -z "$dirty" ]] || {
+    echo "takyon-prod: refusing product-edge deploy from a dirty worktree" >&2
+    return 1
+  }
+  git -C "$ROOT" fetch --quiet origin main || {
+    echo "takyon-prod: could not verify the published origin/main revision" >&2
+    return 1
+  }
+  head="$(git -C "$ROOT" rev-parse HEAD)"
+  published="$(git -C "$ROOT" rev-parse refs/remotes/origin/main)"
+  [[ "$head" == "$published" ]] || {
+    echo "takyon-prod: refusing product-edge deploy from unpublished revision $head" >&2
+    return 1
+  }
+  # Resolve the infra token through the existing Safebox authority route and exec Wrangler with a
+  # minimal environment. The token is never printed, persisted, or inherited alongside operator DB
+  # authority; only this one Cloudflare control-plane process receives it.
+  cd "$ROOT"
+  PYTHONPATH="$RUNTIME_DIR" exec "$RUNTIME_DIR/.venv/bin/python" - "$edge_dir" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+from plugins.takyon import safebox
+
+edge_dir = Path(sys.argv[1]).resolve()
+token = str(safebox.first_env_backed_value("CLOUDFLARE_API_TOKEN") or "").strip()
+if not token:
+    raise SystemExit("takyon-prod: CLOUDFLARE_API_TOKEN is unavailable from Safebox")
+safe_names = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")
+env = {name: os.environ[name] for name in safe_names if os.environ.get(name)}
+env["CLOUDFLARE_API_TOKEN"] = token
+os.chdir(edge_dir)
+os.execvpe(
+    "npx",
+    ["npx", "--yes", "wrangler@4.110.0", "deploy"],
+    env,
+)
+PY
+}
+
 cmd_overview() {
   load_operator_env
   require_tunnel
@@ -1784,6 +2137,8 @@ cmd_console() {
   local tunnel_monitor_pid=""
   local worker_pid=""
   local local_worker_started="0"
+  local worker_ready_file=""
+  local tunnel_consumer_pid=""
   local timestamp
   timestamp="$(date +%Y%m%d-%H%M%S)"
   local tunnel_log="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.log"
@@ -1791,6 +2146,9 @@ cmd_console() {
   local worker_log="$LOCAL_PROD_ROOT/logs/worker-$timestamp.log"
   local tunnel_pid_file="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.pid"
   local dashboard_tunnel_pid_file="$LOCAL_PROD_ROOT/logs/dashboard-tunnel-$timestamp.pid"
+  worker_ready_file="$LOCAL_PROD_ROOT/logs/worker-$timestamp-$$.ready"
+  tunnel_consumer_pid="$(current_shell_process_pid)"
+  rm -f "$worker_ready_file"
 
   cleanup() {
     if [[ -n "${tunnel_monitor_pid:-}" ]] && kill -0 "$tunnel_monitor_pid" >/dev/null 2>&1; then
@@ -1801,18 +2159,23 @@ cmd_console() {
     elif [[ -n "${worker_pid:-}" ]] && kill -0 "$worker_pid" >/dev/null 2>&1; then
       terminate_pid "$worker_pid"
     fi
-    stop_pid_file_process "$tunnel_pid_file"
-    stop_pid_file_process "$dashboard_tunnel_pid_file"
+    if [[ -n "${tunnel_consumer_pid:-}" ]]; then
+      release_managed_tunnel_consumer "$LOCAL_SAFEBOX_PORT" "$tunnel_consumer_pid" "$tunnel_pid_file" || true
+      if [[ "$TARGET" != "dev" ]]; then
+        release_managed_tunnel_consumer "$LOCAL_DASHBOARD_PORT" "$tunnel_consumer_pid" "$dashboard_tunnel_pid_file" || true
+      fi
+    fi
+    rm -f "$worker_ready_file"
   }
   trap cleanup EXIT INT TERM
 
   # Prod always tunnels Safebox+dashboard. Dev remote mode tunnels Safebox only; dev local mode
   # still runs its own local safebox process.
   if [[ "$TARGET" != "dev" ]]; then
-    ensure_managed_tunnel "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy
-    ensure_managed_tunnel "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$dashboard_tunnel_pid_file" dashboard_tunnel_healthy
+    ensure_managed_tunnel "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT" "$tunnel_consumer_pid"
+    ensure_managed_tunnel "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$dashboard_tunnel_pid_file" dashboard_tunnel_healthy "$LOCAL_DASHBOARD_PORT" "$tunnel_consumer_pid"
   elif dev_remote_safebox_configured; then
-    ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy
+    ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT" "$tunnel_consumer_pid"
   fi
 
   load_operator_env
@@ -1825,25 +2188,22 @@ cmd_console() {
   export TAKYON_WORKER_POOL_ID="$session_pool_id"
   export TAKYON_WORKER_POOL_EXCLUSIVE="${TAKYON_WORKER_POOL_EXCLUSIVE:-1}"
   echo "Starting local worker pool: concurrency=$concurrency pool=$session_pool_id exclusive=$TAKYON_WORKER_POOL_EXCLUSIVE (log: $worker_log)"
-  TAKYON_OPERATOR_TUNNELS_MANAGED=1 "$0" worker "$concurrency" --user-id "$(resolved_operator_user_id)" >"$worker_log" 2>&1 &
+  TAKYON_OPERATOR_TUNNELS_MANAGED=1 \
+  TAKYON_WORKER_READY_FILE="$worker_ready_file" \
+    "$0" worker "$concurrency" --user-id "$(resolved_operator_user_id)" >"$worker_log" 2>&1 &
   worker_pid="$!"
-  sleep 1
-  if kill -0 "$worker_pid" >/dev/null 2>&1; then
-    record_active_local_worker_pool "$worker_pid" "$session_pool_id" >/dev/null || true
-    local_worker_started="1"
-  else
+  if ! wait_for_worker_preflight "$worker_pid" "$worker_ready_file" "$worker_log"; then
     worker_pid=""
-    echo "Local worker unavailable; relying on delayed VPS worker fallback (log: $worker_log)." >&2
+    return 1
   fi
+  rm -f "$worker_ready_file"
+  record_active_local_worker_pool "$worker_pid" "$session_pool_id" >/dev/null || true
+  local_worker_started="1"
 
   cmd_overview
   echo
   echo "Worker log: $worker_log"
-  if [[ "$local_worker_started" == "1" ]]; then
-    echo "VPS worker remains delayed fallback. Exit the shell to stop this local worker."
-  else
-    echo "No local worker is running on this Mac. The VPS worker will claim after its queue-age delay."
-  fi
+  echo "VPS worker remains delayed fallback. Exit the shell to stop this local worker."
   echo
   cd "$ROOT"
   if [[ "$shell_count" -gt 1 ]]; then
@@ -1906,6 +2266,7 @@ Usage:
   scripts/takyon-operator-prod.sh shell [business]
   scripts/takyon-operator-prod.sh quiet [business]
   scripts/takyon-operator-prod.sh run <takyon args...>
+  scripts/takyon-operator-prod.sh product-edge-deploy
   scripts/takyon-operator-prod.sh worker [concurrency] [--user-id <id>]
   scripts/takyon-operator-prod.sh worker-once [--user-id <id>]
   scripts/takyon-operator-prod.sh stop-workers
@@ -1967,6 +2328,10 @@ case "$command" in
   run|exec)
     shift || true
     cmd_run "$@"
+    ;;
+  product-edge-deploy)
+    shift || true
+    cmd_product_edge_deploy "$@"
     ;;
   worker)
     shift || true

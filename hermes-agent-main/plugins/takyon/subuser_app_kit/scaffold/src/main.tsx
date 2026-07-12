@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import "./index.css";
 import { SocialProofMarquee } from "./components/social-proof-marquee";
+import { SubscriptionCancellation } from "./components/subscription-cancellation";
 import { installInteractionSounds } from "./lib/interaction-sounds";
 import { useViewerAccess } from "./lib/hooks";
 import { ProductAuthProvider } from "./lib/product-auth";
@@ -36,6 +37,15 @@ const ProfileScreen = lazy(() =>
   import("./screens/profile").then((m) => ({ default: m.ProfileScreen })),
 );
 
+function AccountRoute() {
+  return (
+    <div className="grid gap-6">
+      <ProfileScreen />
+      <SubscriptionCancellation />
+    </div>
+  );
+}
+
 function PublicLandingRoute() {
   const access = useViewerAccess();
   if (access.loading || access.authenticated) return <LandingScreen />;
@@ -67,7 +77,7 @@ createRoot(container).render(
             <Route path="/articles" element={<ArticlesScreen />} />
             <Route path="/app" element={<AppLayout />}>
               <Route index element={<AppHomeScreen />} />
-              <Route path="profile" element={<ProfileScreen />} />
+              <Route path="profile" element={<AccountRoute />} />
             </Route>
           </Routes>
         </Suspense>

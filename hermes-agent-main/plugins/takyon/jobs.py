@@ -506,18 +506,24 @@ def heartbeat(conn, job_id: str, *, worker_id: str, attempt: int | None = None) 
     with conn.transaction():
         updated = conn.execute(
             "update jobs set locked_at = now(), updated_at = now() "
-            "where id = %s and status = 'running' and locked_by = %s" + attempt_gate,
+            "where id = %s and status = 'running' and locked_by = %s "
+            "and coalesce((payload ->> 'cancel_requested')::boolean, false) = false"
+            + attempt_gate,
             params,
         ).rowcount
     if updated == 0:
         row = conn.execute(
-            "select status, locked_by, attempts from jobs where id = %s", (job_id,)
+            "select status, locked_by, attempts, "
+            "coalesce((payload ->> 'cancel_requested')::boolean, false) "
+            "from jobs where id = %s",
+            (job_id,),
         ).fetchone()
         if (
             row is not None
             and str(row[0]) == "running"
             and str(row[1] or "") == worker_id
             and (attempt is None or int(row[2]) == int(attempt))
+            and not bool(row[3])
         ):
             return
         raise JobClaimLost(
@@ -697,15 +703,20 @@ def requeue_stale(conn, *, older_than_seconds: int = 900, worker_id: str = "reap
     local_job_ids = _live_local_job_ids()
     local_guard = " and not (id = any(%s))" if local_job_ids else ""
     local_params: tuple[Any, ...] = (local_job_ids,) if local_job_ids else ()
-    # A bootstrap may be quiet while a delegated build owns its own fresh claim on another worker
-    # thread/process.  Never reclaim the parent alongside that child.  If the child itself is stale,
-    # this sweep reclaims it first and the next sweep may safely recover the parent.
+    # A bootstrap may be quiet while its exact delegated build owns a claim on another worker
+    # thread/process. Never reclaim that parent alongside its child. The relationship is scoped to
+    # parent job + attempt; a different child for the same business must not pin this generation.
+    # If the child itself is stale, this sweep reclaims it first and the next sweep may recover the
+    # parent safely.
     delegated_child_guard = (
         " and not (kind = 'ceo_bootstrap' and exists ("
         "select 1 from jobs child where child.business_slug = jobs.business_slug "
         "and child.id <> jobs.id "
         "and child.kind in ('claude.agent_task', 'product.surface_refresh') "
-        "and child.status = 'running'))"
+        "and child.status in ('queued', 'running') "
+        "and coalesce(child.payload -> 'parent_operator_task', '{}'::jsonb) @> "
+        "jsonb_build_object('task_kind', 'ceo_bootstrap', 'run_id', jobs.id, "
+        "'attempt', jobs.attempts)))"
     )
     with conn.transaction():
         requeued = conn.execute(
@@ -897,6 +908,7 @@ def run_one(
         row = lifecycle_conn.execute(
             "select status, locked_by, attempts, "
             "locked_at > now() - (%s::double precision * interval '1 second') "
+            ", coalesce((payload ->> 'cancel_requested')::boolean, false) "
             "from jobs where id = %s",
             (window_seconds, job.id),
         ).fetchone()
@@ -906,6 +918,7 @@ def run_one(
             and str(row[1] or "") == worker_id
             and int(row[2]) == int(job.attempts)
             and row[3]
+            and not bool(row[4])
         )
 
     try:

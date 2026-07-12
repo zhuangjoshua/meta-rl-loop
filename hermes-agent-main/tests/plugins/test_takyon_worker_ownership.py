@@ -57,6 +57,24 @@ def test_durable_write_fence_rejects_same_worker_newer_attempt():
     assert guard.lost is True
 
 
+def test_durable_write_fence_reaps_cancelled_child_before_side_effect():
+    guard = jobs.JobClaimGuard(job_id="taste-child", worker_id="mac-worker", attempt=1)
+    store = _RowsStore(
+        {
+            "status": "running",
+            "locked_by": "mac-worker",
+            "attempts": 1,
+            "payload": {"cancel_requested": True},
+        }
+    )
+
+    with jobs._bound_job_claim(guard):
+        with pytest.raises(jobs.JobClaimLost, match="cancellation"):
+            core._assert_active_worker_claim(store, "publish timed-out Taste source")
+
+    assert guard.lost is True
+
+
 class _CaptureConn:
     def __init__(self):
         self.calls: list[tuple[str, tuple]] = []
@@ -83,6 +101,7 @@ def test_stale_reaper_skips_live_local_handler_and_bootstrap_with_child(monkeypa
     for sql, params in update_calls:
         assert "not (id = any(%s))" in sql
         assert "child.kind in ('claude.agent_task', 'product.surface_refresh')" in sql
+        assert "child.status in ('queued', 'running')" in sql
         assert ["briefvault-parent"] in params
 
 

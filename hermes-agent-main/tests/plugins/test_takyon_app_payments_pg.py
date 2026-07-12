@@ -26,13 +26,14 @@ import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 import pytest
 
 psycopg = pytest.importorskip("psycopg")
 
-from plugins.takyon import app_entitlements, app_identity, app_payments, custody  # noqa: E402
+from plugins.takyon import app_entitlements, app_identity, app_payments, custody, safebox  # noqa: E402
 from plugins.takyon.app_payments import (  # noqa: E402
     BusinessOwnerMissing,
     CheckoutIntentNotFound,
@@ -40,6 +41,13 @@ from plugins.takyon.app_payments import (  # noqa: E402
 )
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 from plugins.takyon.stripe_util import build_signature_header  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_unrelated_api_key_authority(monkeypatch):
+    """Owner setup must not require a live Safebox in this payment-ledger suite."""
+    monkeypatch.setattr(safebox, "register_user_api_key", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(safebox, "delete_user_api_key", lambda *_args, **_kwargs: False)
 
 
 def _sub() -> str:
@@ -501,7 +509,7 @@ def test_unpaid_checkout_waits_for_later_paid_event(pg_conn):
     assert len(app_entitlements.list_entitlements(pg_conn, slug)) == 1
 
 
-def test_live_checkout_without_economics_binding_grants_nothing(pg_conn, monkeypatch):
+def test_live_checkout_without_app_binding_is_ignored_and_grants_nothing(pg_conn, monkeypatch):
     monkeypatch.setenv("TAKYON_STRIPE_MODE", "live")
     owner = str(uuid.uuid4())
     pg_conn.execute(
@@ -529,7 +537,7 @@ def test_live_checkout_without_economics_binding_grants_nothing(pg_conn, monkeyp
 
     processed = app_payments.record_webhook_and_process(pg_conn, event)["processed"]
 
-    assert processed == {"recorded": False, "reason": "checkout_economics_missing"}
+    assert processed == {"recorded": False, "ignored": "non_app_checkout"}
     assert app_payments.get_revenue_summary(pg_conn, slug)["events"] == 0
     assert pg_conn.execute(
         "select count(*) from custody_accounts where user_id = %s", (owner,)
@@ -606,7 +614,7 @@ def test_subscription_event_for_unknown_subscription_is_noop(pg_conn):
     assert res["processed"] == {"recorded": False, "updated": []}
 
 
-def test_cancel_subscription_marks_cancel_at_period_end_without_dropping_access(pg_conn):
+def test_cancel_subscription_ends_access_immediately_and_retries_idempotently(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     user = app_identity.upsert_app_user(pg_conn, slug, "cancelme@example.com")
     period_end = datetime.fromtimestamp(1_700_600_000, timezone.utc)
@@ -624,34 +632,49 @@ def test_cancel_subscription_marks_cancel_at_period_end_without_dropping_access(
         metadata={"stripe_subscription_status": "active"},
     )
 
-    calls: list[tuple[str, bool]] = []
+    calls: list[str] = []
 
-    def fake_updater(subscription_id: str, cancel_at_period_end: bool) -> dict:
-        calls.append((subscription_id, cancel_at_period_end))
+    def fake_canceler(subscription_id: str) -> dict:
+        calls.append(subscription_id)
         return {
             "id": subscription_id,
             "object": "subscription",
-            "status": "active",
+            "status": "canceled",
             "customer": "cus_cancel",
             "current_period_end": 1_700_600_000,
-            "cancel_at_period_end": True,
+            "cancel_at_period_end": False,
         }
 
     result = app_payments.cancel_subscription(
         pg_conn,
         slug,
         app_user_id=user.id,
-        subscription_updater=fake_updater,
+        subscription_canceler=fake_canceler,
     )
 
-    assert calls == [("sub_cancel", True)]
+    assert calls == ["sub_cancel"]
     assert result["recorded"] is True
-    assert result["cancel_at_period_end"] is True
-    assert result["stripe_subscription_status"] == "active"
+    assert result["cancel_at_period_end"] is False
+    assert result["stripe_subscription_status"] == "canceled"
+    assert result["effective_immediately"] is True
+    assert result["already_canceled"] is False
     ent = app_entitlements.list_entitlements(pg_conn, slug, app_user_id=user.id)[0]
-    assert ent.metadata["cancel_at_period_end"] is True
-    assert ent.status == "active"
-    assert app_entitlements.resolve_user_tier(pg_conn, slug, user.id) == "paid"
+    assert ent.metadata["cancel_at_period_end"] is False
+    assert ent.status == "cancelled"
+    assert app_entitlements.resolve_user_tier(pg_conn, slug, user.id) == "unentitled"
+
+    repeated = app_payments.cancel_subscription(
+        pg_conn,
+        slug,
+        app_user_id=user.id,
+        subscription_canceler=lambda _subscription_id: pytest.fail(
+            "an already-canceled subscription must not call Stripe again"
+        ),
+    )
+    assert repeated["recorded"] is True
+    assert repeated["effective_immediately"] is True
+    assert repeated["already_canceled"] is True
+    assert repeated["stripe_subscription_status"] == "canceled"
 
 
 # ── webhook plumbing ────────────────────────────────────────────────────────────────────
@@ -659,9 +682,10 @@ def test_cancel_subscription_marks_cancel_at_period_end_without_dropping_access(
 
 def test_ignored_event_type_is_consumed(pg_conn):
     res = app_payments.record_webhook_and_process(
-        pg_conn, {"id": "evt_ig", "type": "invoice.paid", "data": {"object": {"id": "in_1"}}}
+        pg_conn,
+        {"id": "evt_ig", "type": "invoice.finalized", "data": {"object": {"id": "in_1"}}},
     )
-    assert res["processed"] == {"recorded": False, "ignored": "invoice.paid"}
+    assert res["processed"] == {"recorded": False, "ignored": "invoice.finalized"}
     assert _processed_at(pg_conn, "evt_ig") is not None
 
 
@@ -752,9 +776,16 @@ def test_record_stripe_webhook_tool_accrues_to_owner_custody(pg_conn, tmp_path, 
     monkeypatch.setattr(takyon_core, "_store", lambda: store)
     monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
     # App-webhook verify is brokered through the safebox; run as the safebox host so the secret is
-    # read and the signature verified LOCALLY (no remote authority required in-test).
+    # read and the signature verified LOCALLY (no remote authority required in-test). Inject this
+    # test's real throwaway Postgres connection at the Safebox database seam; a production Safebox
+    # resolves its own authority DSN, which must never point at a developer's test database.
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setattr(
+        safebox,
+        "_creative_credit_conn",
+        lambda _conn=None: nullcontext(pg_conn),
+    )
 
     event = _checkout_event(
         event_id="evt_tool",
@@ -801,9 +832,15 @@ def test_record_stripe_webhook_tool_dedups_on_replay(pg_conn, tmp_path, monkeypa
     monkeypatch.setattr(takyon_core, "_store", lambda: store)
     monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
     # App-webhook verify is brokered through the safebox; run as the safebox host so the secret is
-    # read and the signature verified LOCALLY (no remote authority required in-test).
+    # read and the signature verified LOCALLY (no remote authority required in-test). Inject this
+    # test's real throwaway Postgres connection at the Safebox database seam.
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setattr(
+        safebox,
+        "_creative_credit_conn",
+        lambda _conn=None: nullcontext(pg_conn),
+    )
 
     event = _checkout_event(
         event_id="evt_tool_rp", session_id="cs_tool_rp", intent_id=intent.id,

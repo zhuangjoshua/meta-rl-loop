@@ -7467,12 +7467,20 @@ def _materialize_subuser_app_scaffold(
             "plugins/takyon/subuser_app_kit/scaffold, which is missing from this runtime"
         )
     replacements = _starter_seed_replacements(surface, slug=slug, workspace_root=workspace_root)
-    for path in sorted(source.rglob("*")):
-        if not path.is_file():
-            continue
+    # Prune dependency/build directories before descent. Path.rglob followed by a rel.parts filter
+    # still walked every file under a developer's 100MB+ scaffold/node_modules tree on each Mac
+    # bootstrap, even though none could be copied. That hidden traversal consumed the product-worker
+    # budget and made otherwise bounded design/build work look slow. Production VPS archives normally
+    # exclude node_modules, but the approved Mac-primary prod worker runs from this real checkout.
+    seed_files: list[Path] = []
+    for current, dirnames, filenames in os.walk(source):
+        dirnames[:] = sorted(
+            name for name in dirnames if name not in _SCAFFOLD_SEED_SKIP_PARTS
+        )
+        current_path = Path(current)
+        seed_files.extend(current_path / name for name in sorted(filenames))
+    for path in sorted(seed_files):
         rel = path.relative_to(source)
-        if _SCAFFOLD_SEED_SKIP_PARTS & set(rel.parts):
-            continue
         destination = workspace_root / rel
         if destination.exists():
             continue
@@ -7527,6 +7535,7 @@ _STARTER_OWNED_REFRESH_FILES = (
     "src/lib/interaction-sounds.ts",
     "src/components/site-navigation.tsx",
     "src/components/social-proof-marquee.tsx",
+    "src/components/subscription-cancellation.tsx",
     "src/screens/app-layout.tsx",
     "src/screens/support.tsx",
 )
@@ -7717,7 +7726,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of the scaffold wrappers in `src/lib/takyon.ts` and `src/lib/hooks.ts`, and build your own product pages around those shared client/hooks unless you are intentionally changing that rail's logic.",
-        "- Records use runtime-owned references: `saveRecord(...)`, `listRecords(...)`, and record reads return `record.ref`; pass that exact ref to `readRecord(ref)` or `getRecord(ref)`. Never derive a record locator from a title, route slug, form value, or a second generated id, and never use positional `getRecord(type, id)` in generated product code.",
+        "- Records use runtime-owned references: `saveRecord(...)`, `listRecords(...)`, and record reads return `record.ref`; pass that exact ref to `readRecord(ref)` or `getRecord(ref)`, `saveRecord({ ref, data, ...fields })`, and `deleteRecord(ref)`. `saveRecord` is an upsert, so preserve and send the complete `data` value on create and update. Never update with raw `id`/`record_id`, never derive a record locator from a title, route slug, form value, or a second generated id, and never use positional `getRecord(type, id)` in generated product code. Record responses retain `{ record }` and also mirror that same record at the top level for compatibility; choose one response shape and use it consistently.",
         "- Backend actions compile in the server action environment, not the browser environment. Type every handler as `(payload: TakyonActionPayload, ctx: TakyonActionContext)`; do not annotate either parameter as `any`, and do not use DOM/WebWorker globals that the action type environment does not provide.",
         "- Scaffold-owned and force-rewritten from the bundled scaffold on EVERY product build/kit materialize — never edit these; any change to them is silently reverted before the build: "
         + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
@@ -7736,6 +7745,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- The single plan is a MONTHLY paid subscription billed every month. There is NO trial of any kind — not a free trial and not a paid trial. Never show \"free trial\", \"N-day free trial\", \"trial\", \"Start Free Trial\", \"try free\", \"no credit card\", or any countdown/trial CTA, even attached to the paid plan. The subscribe CTA must read like \"Subscribe\" / \"Subscribe — $N/month\", and price copy must say \"/month\".",
         "- Prefer the scaffold access helpers in `src/lib/hooks.ts` such as `useViewerAccess()` and `resolveViewerCta()` when deciding whether the primary path is sign in, complete subscription, or continue.",
         "- The shared account rail returns canonical account truth as `user` plus `entitlements[]`; if a screen needs subscription/access state, derive it from those helpers instead of reviving legacy `has_active_subscription`, nested `subscription.status`, or custom `client.account()` field guesses.",
+        "- Immediate self-service subscription cancellation is a non-removable AppKit invariant. Starter-owned `src/main.tsx` renders `SubscriptionCancellation` on `/app/profile` for every active Stripe subscription and the server revokes access immediately with no grace period. Keep that control visible, never replace cancellation with a billing-portal or support workflow, and never tell customers to contact/email/message support to cancel, change, or manage billing.",
         "- Do not hand-roll subscription gates inside `src/screens/app-home.tsx` or `src/screens/profile.tsx` when the shared hooks already answer whether the viewer should subscribe, continue, update billing, or open the app.",
         "- Never return `null` for anonymous or unentitled viewers on `/app` or `/app/profile`; render a visible sign-in/subscribe/account gate wired to `useProductAuth()` and `resolveViewerCta()`.",
         "- Any starter source already present in `src/` is just route and runtime plumbing. Replace or flesh out the screens themselves.",
@@ -7891,69 +7901,111 @@ def _notify_claude_worker_activity(line: str) -> None:
         pass
 
 
-# Business-keyed worker-activity clock — the CONTEXT-FREE keepalive the wake watchdog reads.
+# Run-scoped worker-activity clock — the CONTEXT-FREE keepalive the wake watchdog reads.
 # The ContextVar sink above routes ticks to the right progress object, but a lost/unbound context
-# anywhere in the composition silently drops every tick, and the wake watchdog then false-kills a
-# HEALTHY run at exactly tool_start+limit while worker events stream (proofline0710 2026-07-09:
-# killed at start+603s with events flowing 75/min; sipstreak was the mobile flavor of the same).
-# The stderr reader always has `business` in scope, so it stamps this process-global dict directly
-# — no context to lose — and worker.py's inactivity loop takes min(idle, this clock).
-_CLAUDE_WORKER_BUSINESS_ACTIVITY: dict[str, float] = {}
-_CLAUDE_WORKER_BUSINESS_ACTIVITY_LOCK = threading.Lock()
-# Un-keyed companion: the last time ANY Claude-worker stderr event was seen in this process, whatever
-# the business. Both operator + subuser worker planes run claude-agent-task at concurrency 1
-# (exclusive pool), so at any instant at most ONE claude-agent-task is streaming — "any worker
-# activity" therefore unambiguously means "the current turn's worker." This is the ROBUST keepalive:
-# it needs NO key match between the stderr reader's `business` and the wake watchdog's turn slug, so a
-# subtle slug/business divergence (or a run where the business-keyed lookup returned +inf) can no
-# longer starve the watchdog while a worker streams. It is strictly MORE lenient than the keyed clock
-# — the correct direction for a bug whose whole failure mode is over-eager killing of a healthy turn
-# (test-2, sipstreak, proofline0710, steadyflow0710). NOTE: only valid while worker concurrency == 1;
-# if a plane ever runs >1 concurrent claude-agent-task per process, gate this on the active count.
-_CLAUDE_WORKER_ANY_ACTIVITY: list[float] = [0.0]  # 1-slot mutable cell (no lock needed for a float write)
+# anywhere in the composition silently drops every tick.  The subprocess reader therefore stamps a
+# plain process registry directly.  Its key is the exact (business, durable run, attempt) identity:
+# production runs several businesses concurrently (Mac=4, VPS=2), so an unkeyed "any worker" clock
+# lets business B keep business A alive forever and even masks A's outer wall-clock bound.
+_CLAUDE_WORKER_RUN_ACTIVITY: dict[tuple[str, str, int], float] = {}
+_CLAUDE_WORKER_RUN_ACTIVITY_LOCK = threading.Lock()
 
 
-def _touch_claude_worker_business_activity(business: str) -> None:
-    now = time.monotonic()
-    _CLAUDE_WORKER_ANY_ACTIVITY[0] = now  # un-keyed companion (concurrency-1 keepalive)
+def _claude_worker_activity_run_identity() -> tuple[str, int]:
+    """Return the exact durable run/attempt represented by the current execution context.
+
+    Parent CEO turns bind their job id as both operator run and claim id, so they receive an exact
+    attempt. Deferred tool children bind a work-request run id while their claim belongs to the
+    mirrored child job; retaining that work-request id with attempt 0 keeps the child isolated from
+    its parent watchdog. The parent's durable delegated-child probe is the only bridge between them.
+    """
+    run_id = str(_ACTIVE_OPERATOR_TASK_RUN_ID.get() or "").strip()
+    guard = _active_worker_claim_guard()
+    if not run_id and guard is not None:
+        run_id = str(guard.job_id or "").strip()
+    attempt = 0
+    if guard is not None and run_id and str(guard.job_id or "").strip() == run_id:
+        attempt = max(0, int(guard.attempt))
+    return run_id, attempt
+
+
+def _claude_worker_activity_key(
+    business: str,
+    *,
+    run_id: str | None = None,
+    attempt: int | None = None,
+) -> tuple[str, str, int] | None:
     slug = str(business or "").strip()
     if not slug:
+        return None
+    if run_id is None or attempt is None:
+        current_run_id, current_attempt = _claude_worker_activity_run_identity()
+        if run_id is None:
+            run_id = current_run_id
+        if attempt is None:
+            attempt = current_attempt
+    try:
+        normalized_attempt = max(0, int(attempt or 0))
+    except (TypeError, ValueError):
+        normalized_attempt = 0
+    return slug, str(run_id or "").strip(), normalized_attempt
+
+
+def _touch_claude_worker_business_activity(
+    business: str,
+    *,
+    run_id: str | None = None,
+    attempt: int | None = None,
+) -> None:
+    key = _claude_worker_activity_key(business, run_id=run_id, attempt=attempt)
+    if key is None:
         return
-    with _CLAUDE_WORKER_BUSINESS_ACTIVITY_LOCK:
-        if len(_CLAUDE_WORKER_BUSINESS_ACTIVITY) > 512 and slug not in _CLAUDE_WORKER_BUSINESS_ACTIVITY:
-            _CLAUDE_WORKER_BUSINESS_ACTIVITY.clear()
-        _CLAUDE_WORKER_BUSINESS_ACTIVITY[slug] = now
+    now = time.monotonic()
+    with _CLAUDE_WORKER_RUN_ACTIVITY_LOCK:
+        if len(_CLAUDE_WORKER_RUN_ACTIVITY) >= 1024 and key not in _CLAUDE_WORKER_RUN_ACTIVITY:
+            stale_before = now - 7200.0
+            stale_keys = [
+                candidate
+                for candidate, stamp in _CLAUDE_WORKER_RUN_ACTIVITY.items()
+                if stamp < stale_before
+            ]
+            for candidate in stale_keys:
+                _CLAUDE_WORKER_RUN_ACTIVITY.pop(candidate, None)
+            if len(_CLAUDE_WORKER_RUN_ACTIVITY) >= 1024:
+                oldest = min(_CLAUDE_WORKER_RUN_ACTIVITY, key=_CLAUDE_WORKER_RUN_ACTIVITY.get)
+                _CLAUDE_WORKER_RUN_ACTIVITY.pop(oldest, None)
+        _CLAUDE_WORKER_RUN_ACTIVITY[key] = now
 
 
-def claude_worker_seconds_since_activity(business: str) -> float:
-    """Seconds since THIS process last saw a Claude-worker stderr event for `business`.
+def claude_worker_seconds_since_activity(
+    business: str,
+    *,
+    run_id: str | None = None,
+    attempt: int | None = None,
+) -> float:
+    """Seconds since this exact business/run/attempt emitted coding-worker activity.
 
-    Returns +inf when no worker has ever ticked for the business in this process, so callers can
-    min() it against other idle clocks without special-casing."""
-    slug = str(business or "").strip()
-    if not slug:
+    Returns +inf when the exact run has never ticked in this process. Activity from another
+    business, another job, or another attempt can never keep this watchdog alive.
+    """
+    key = _claude_worker_activity_key(business, run_id=run_id, attempt=attempt)
+    if key is None:
         return float("inf")
-    with _CLAUDE_WORKER_BUSINESS_ACTIVITY_LOCK:
-        stamp = _CLAUDE_WORKER_BUSINESS_ACTIVITY.get(slug)
+    with _CLAUDE_WORKER_RUN_ACTIVITY_LOCK:
+        stamp = _CLAUDE_WORKER_RUN_ACTIVITY.get(key)
     if stamp is None:
         return float("inf")
     return max(0.0, time.monotonic() - stamp)
 
 
-def claude_worker_seconds_since_any_activity() -> float:
-    """Seconds since ANY Claude-worker stderr event in this process (business-agnostic).
-
-    Returns +inf before the first worker event. Valid as a turn keepalive only under worker
-    concurrency 1 (both planes) — see the note on ``_CLAUDE_WORKER_ANY_ACTIVITY``."""
-    stamp = _CLAUDE_WORKER_ANY_ACTIVITY[0]
-    if not stamp:
-        return float("inf")
-    return max(0.0, time.monotonic() - stamp)
-
-
-def _claude_worker_heartbeat_tick(business: str) -> None:
-    """One context-independent liveness tick for a running coding-worker subprocess."""
-    _touch_claude_worker_business_activity(business)
+def _claude_worker_heartbeat_tick(
+    business: str,
+    *,
+    run_id: str | None = None,
+    attempt: int | None = None,
+) -> None:
+    """One context-independent liveness tick for one exact coding-worker run."""
+    _touch_claude_worker_business_activity(business, run_id=run_id, attempt=attempt)
     _notify_claude_worker_activity("claude-worker build heartbeat")
 
 
@@ -8066,6 +8118,12 @@ _ACTIVE_OPERATOR_TASK_RUN_ID: contextvars.ContextVar[str] = contextvars.ContextV
 _ACTIVE_OPERATOR_TASK_KIND: contextvars.ContextVar[str] = contextvars.ContextVar(
     "takyon_active_operator_task_kind", default=""
 )
+_ACTIVE_OPERATOR_TASK_ATTEMPT: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "takyon_active_operator_task_attempt", default=0
+)
+_ACTIVE_OPERATOR_TASK_DEADLINE_AT: contextvars.ContextVar[float] = contextvars.ContextVar(
+    "takyon_active_operator_task_deadline_at", default=0.0
+)
 
 
 def _active_worker_claim_guard():
@@ -8091,54 +8149,166 @@ def _assert_active_worker_claim(store: "TakyonStore", operation: str) -> None:
     try:
         with store._connect() as conn:
             row = conn.execute(
-                "SELECT status, locked_by, attempts FROM jobs WHERE id = ?",
+                "SELECT status, locked_by, attempts, payload FROM jobs WHERE id = ?",
                 (guard.job_id,),
             ).fetchone()
     except Exception as exc:
         guard.mark_lost(f"could not verify durable ownership: {exc}")
         guard.assert_owned(operation)
         return
+    raw_payload = row.get("payload") if isinstance(row, Mapping) and row is not None else (
+        row[3] if row is not None and len(row) > 3 else {}
+    )
+    if isinstance(raw_payload, Mapping):
+        claim_payload = dict(raw_payload)
+    else:
+        try:
+            claim_payload = json.loads(str(raw_payload or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            claim_payload = {}
+    cancel_requested = bool(claim_payload.get("cancel_requested"))
     matches = bool(
         row is not None
         and str(row["status"] if isinstance(row, Mapping) else row[0]) == "running"
         and str((row["locked_by"] if isinstance(row, Mapping) else row[1]) or "")
         == guard.worker_id
         and int(row["attempts"] if isinstance(row, Mapping) else row[2]) == guard.attempt
+        and not cancel_requested
     )
     if not matches:
-        guard.mark_lost("durable row belongs to a newer or terminal claim generation")
+        guard.mark_lost(
+            "durable child cancellation was requested"
+            if cancel_requested
+            else "durable row belongs to a newer or terminal claim generation"
+        )
+        guard.assert_owned(operation)
+    _assert_active_parent_operator_task(store, operation, child_guard=guard)
+
+
+def _assert_active_parent_operator_task(
+    store: "TakyonStore",
+    operation: str,
+    *,
+    child_guard: Any | None = None,
+) -> None:
+    """Fence a delegated child to the live parent bootstrap generation that created it."""
+    guard = child_guard or _active_worker_claim_guard()
+    parent_run_id = str(_ACTIVE_OPERATOR_TASK_RUN_ID.get() or "").strip()
+    parent_kind = str(_ACTIVE_OPERATOR_TASK_KIND.get() or "").strip().lower()
+    parent_attempt = int(_ACTIVE_OPERATOR_TASK_ATTEMPT.get() or 0)
+    deadline_at = float(_ACTIVE_OPERATOR_TASK_DEADLINE_AT.get() or 0.0)
+    if (
+        guard is None
+        or parent_kind != "ceo_bootstrap"
+        or not parent_run_id
+        or parent_attempt < 1
+        or str(guard.job_id or "").strip() == parent_run_id
+    ):
+        return
+    if deadline_at > 0.0 and time.time() >= deadline_at:
+        guard.mark_lost("parent bootstrap hard deadline expired")
+        guard.assert_owned(operation)
+    try:
+        with store._connect() as conn:
+            parent = conn.execute(
+                "SELECT status, attempts FROM jobs WHERE id = ?",
+                (parent_run_id,),
+            ).fetchone()
+    except Exception as exc:
+        guard.mark_lost(f"could not verify parent bootstrap ownership: {exc}")
+        guard.assert_owned(operation)
+        return
+    parent_live = bool(
+        parent is not None
+        and str(parent["status"] if isinstance(parent, Mapping) else parent[0]) == "running"
+        and int(parent["attempts"] if isinstance(parent, Mapping) else parent[1])
+        == parent_attempt
+    )
+    if not parent_live:
+        guard.mark_lost("parent bootstrap belongs to a newer or terminal generation")
         guard.assert_owned(operation)
 
 
 @contextmanager
-def _hold_active_worker_claim_for_publish(store: "TakyonStore", operation: str):
-    """Hold the exact job row lock across the live-pointer flip.
+def _hold_active_worker_claim_for_publish(
+    store: "TakyonStore",
+    operation: str,
+    *,
+    business: str,
+):
+    """Hold the business activation lease and exact job rows across flip/reconciliation.
 
     The R2 publisher uploads immutable build objects and writes ``<slug>/current`` last.  A plain
     check immediately before upload leaves a narrow race where a stale reaper can supersede the job
     during that upload and the old worker can still flip ``current``.  Holding ``FOR UPDATE`` makes
     ownership loss and pointer activation mutually exclusive without a schema change.
     """
+    normalized_business = _slugify(business)
     guard = _active_worker_claim_guard()
-    if guard is None:
-        yield
-        return
-    guard.assert_owned(operation)
+    if guard is not None:
+        _assert_active_worker_claim(store, operation)
     with store._connect() as conn:
+        # Unlike a job-row lock, this serializes every publisher of one business, including manual
+        # authority calls with no worker claim and different product-writer job ids. It is scoped to
+        # this transaction and therefore releases on every exception/crash.
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+            (f"takyon-product-publish:{normalized_business}",),
+        )
+        if guard is None:
+            yield
+            return
         row = conn.execute(
-            "SELECT status, locked_by, attempts FROM jobs WHERE id = ? FOR UPDATE",
+            "SELECT status, locked_by, attempts, payload FROM jobs WHERE id = ? FOR UPDATE",
             (guard.job_id,),
         ).fetchone()
+        raw_payload = row.get("payload") if isinstance(row, Mapping) and row is not None else (
+            row[3] if row is not None and len(row) > 3 else {}
+        )
+        if isinstance(raw_payload, Mapping):
+            locked_payload = dict(raw_payload)
+        else:
+            try:
+                locked_payload = json.loads(str(raw_payload or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                locked_payload = {}
         matches = bool(
             row is not None
             and str(row["status"] if isinstance(row, Mapping) else row[0]) == "running"
             and str((row["locked_by"] if isinstance(row, Mapping) else row[1]) or "")
             == guard.worker_id
             and int(row["attempts"] if isinstance(row, Mapping) else row[2]) == guard.attempt
+            and not bool(locked_payload.get("cancel_requested"))
         )
         if not matches:
             guard.mark_lost("publish lock found a newer or terminal claim generation")
             guard.assert_owned(operation)
+        parent_run_id = str(_ACTIVE_OPERATOR_TASK_RUN_ID.get() or "").strip()
+        parent_attempt = int(_ACTIVE_OPERATOR_TASK_ATTEMPT.get() or 0)
+        parent_kind = str(_ACTIVE_OPERATOR_TASK_KIND.get() or "").strip().lower()
+        if (
+            parent_kind == "ceo_bootstrap"
+            and parent_run_id
+            and parent_attempt > 0
+            and parent_run_id != str(guard.job_id)
+        ):
+            parent = conn.execute(
+                "SELECT status, attempts FROM jobs WHERE id = ? FOR UPDATE",
+                (parent_run_id,),
+            ).fetchone()
+            if not (
+                parent is not None
+                and str(parent["status"] if isinstance(parent, Mapping) else parent[0])
+                == "running"
+                and int(parent["attempts"] if isinstance(parent, Mapping) else parent[1])
+                == parent_attempt
+                and (
+                    float(_ACTIVE_OPERATOR_TASK_DEADLINE_AT.get() or 0.0) <= 0.0
+                    or time.time() < float(_ACTIVE_OPERATOR_TASK_DEADLINE_AT.get() or 0.0)
+                )
+            ):
+                guard.mark_lost("publish lock found a newer, terminal, or expired parent bootstrap")
+                guard.assert_owned(operation)
         yield
 
 
@@ -8157,17 +8327,60 @@ def _bound_operator_task_run(run_id: str):
 
 
 @contextmanager
-def _bound_operator_task_context(*, run_id: str = "", task_kind: str = ""):
+def _bound_operator_task_context(
+    *,
+    run_id: str = "",
+    task_kind: str = "",
+    attempt: int | None = None,
+    deadline_at: float | int | None = None,
+):
     """Bind the active worker task context so tool handlers can reject phase-invalid operations."""
     normalized_run_id = str(run_id or "").strip()
     normalized_task_kind = str(task_kind or "").strip()
+    try:
+        normalized_attempt = max(0, int(attempt or 0))
+    except (TypeError, ValueError):
+        normalized_attempt = 0
+    try:
+        normalized_deadline = max(0.0, float(deadline_at or 0.0))
+    except (TypeError, ValueError):
+        normalized_deadline = 0.0
     run_token = _ACTIVE_OPERATOR_TASK_RUN_ID.set(normalized_run_id)
     kind_token = _ACTIVE_OPERATOR_TASK_KIND.set(normalized_task_kind)
+    attempt_token = _ACTIVE_OPERATOR_TASK_ATTEMPT.set(normalized_attempt)
+    deadline_token = _ACTIVE_OPERATOR_TASK_DEADLINE_AT.set(normalized_deadline)
     try:
         yield
     finally:
+        _ACTIVE_OPERATOR_TASK_DEADLINE_AT.reset(deadline_token)
+        _ACTIVE_OPERATOR_TASK_ATTEMPT.reset(attempt_token)
         _ACTIVE_OPERATOR_TASK_KIND.reset(kind_token)
         _ACTIVE_OPERATOR_TASK_RUN_ID.reset(run_token)
+
+
+def _active_operator_task_receipt_context() -> dict[str, Any]:
+    """Exact durable parent-task identity for receipts emitted inside an operator turn.
+
+    ``run_id`` alone is insufficient after a requeue because the same bootstrap job id survives
+    across attempts.  When a worker claim is bound, include its attempt only if it is the exact
+    parent run currently in context; consumers must match both fields before adopting evidence.
+    """
+    run_id = str(_ACTIVE_OPERATOR_TASK_RUN_ID.get() or "").strip()
+    task_kind = str(_ACTIVE_OPERATOR_TASK_KIND.get() or "").strip().lower()
+    if not run_id or not task_kind:
+        return {}
+    context: dict[str, Any] = {"run_id": run_id, "task_kind": task_kind}
+    bound_attempt = int(_ACTIVE_OPERATOR_TASK_ATTEMPT.get() or 0)
+    if bound_attempt > 0:
+        context["attempt"] = bound_attempt
+    else:
+        guard = _active_worker_claim_guard()
+        if guard is not None and str(guard.job_id) == run_id:
+            context["attempt"] = int(guard.attempt)
+    deadline_at = float(_ACTIVE_OPERATOR_TASK_DEADLINE_AT.get() or 0.0)
+    if deadline_at > 0.0:
+        context["deadline_at"] = deadline_at
+    return context
 
 
 def _record_claude_agent_runtime_event(
@@ -8356,7 +8569,12 @@ def _run_claude_agent_task_process(
     env: Mapping[str, str] | None,
     business: str,
     workspace_rel: str,
+    claim_store: Any | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    # Capture the exact durable identity before starting reader/heartbeat threads. Passing it
+    # explicitly makes their liveness stamps independent of ContextVar propagation and prevents a
+    # concurrent business or a later attempt for the same business from refreshing this run.
+    activity_run_id, activity_attempt = _claude_worker_activity_run_identity()
     original_run_cmd = list(run_cmd)
     effective_run_cmd, docker_cidfile = _docker_run_with_cidfile(original_run_cmd)
     proc = subprocess.Popen(
@@ -8428,7 +8646,11 @@ def _run_claude_agent_task_process(
                 # events flowed 13-145/min (test-2, 2026-07-08, failed 2/2 then a recovery run
                 # published anyway). Tick on the raw event first; then emit the mapped line if any.
                 _notify_claude_worker_activity("claude-worker event")
-                _touch_claude_worker_business_activity(business)
+                _touch_claude_worker_business_activity(
+                    business,
+                    run_id=activity_run_id,
+                    attempt=activity_attempt,
+                )
                 # Surface the worker's current step/activity as live job/task progress so the long
                 # Claude-worker phase is no longer blank in the tui_gateway. Concise human lines only;
                 # raw per-tool ticks are filtered out by the mapper.
@@ -8441,7 +8663,11 @@ def _run_claude_agent_task_process(
                 continue
             stderr_lines.append(clean)
             _notify_claude_worker_activity(clean)
-            _touch_claude_worker_business_activity(business)
+            _touch_claude_worker_business_activity(
+                business,
+                run_id=activity_run_id,
+                attempt=activity_attempt,
+            )
             _record_claude_agent_runtime_event(
                 business=business,
                 workspace_rel=workspace_rel,
@@ -8465,7 +8691,11 @@ def _run_claude_agent_task_process(
     )
     # Stamp the business clock at spawn so the wake watchdog sees the worker as alive during the
     # quiet pre-stream stretch (docker pull / npm install) before the first stderr line arrives.
-    _touch_claude_worker_business_activity(business)
+    _touch_claude_worker_business_activity(
+        business,
+        run_id=activity_run_id,
+        attempt=activity_attempt,
+    )
     stdout_thread.start()
     stderr_thread.start()
     # Independent keepalive heartbeat: tick the wake-activity sink every 30s while the subprocess
@@ -8483,7 +8713,11 @@ def _run_claude_agent_task_process(
             # activity sink can be absent after delegation crosses a thread/job boundary, so the
             # independent subprocess heartbeat must stamp the same liveness source as stderr
             # events.  proc.wait's timeout below remains the hard bound for a genuine hang.
-            _claude_worker_heartbeat_tick(business)
+            _claude_worker_heartbeat_tick(
+                business,
+                run_id=activity_run_id,
+                attempt=activity_attempt,
+            )
 
     heartbeat_thread = threading.Thread(
         target=lambda: _heartbeat_ctx.run(_heartbeat), name="takyon-claude-heartbeat", daemon=True
@@ -8495,9 +8729,15 @@ def _run_claude_agent_task_process(
             proc.stdin.close()
         deadline = time.monotonic() + max(0.001, float(timeout_ms) / 1000.0)
         claim_guard = _active_worker_claim_guard()
+        next_durable_claim_check = 0.0
         while True:
             if claim_guard is not None:
-                claim_guard.assert_owned("Claude worker execution")
+                now = time.monotonic()
+                if claim_store is not None and now >= next_durable_claim_check:
+                    _assert_active_worker_claim(claim_store, "Claude worker execution")
+                    next_durable_claim_check = now + 5.0
+                else:
+                    claim_guard.assert_owned("Claude worker execution")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(original_run_cmd, float(timeout_ms) / 1000.0)
@@ -11218,6 +11458,14 @@ _APP_ACCESS_GATE_NULL_PATTERN = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE | re.DOTALL,
 )
+_SUPPORT_MEDIATED_CANCELLATION_PATTERN = re.compile(
+    r"(?:"
+    r"\bto\s+(?:cancel|change|manage)\b.{0,180}\b(?:contact|email|message)\s+(?:our\s+)?support\b"
+    r"|\b(?:contact|email|message)\s+(?:our\s+)?support\b.{0,180}\bto\s+(?:cancel|change|manage)\b"
+    r"|\b(?:cancel(?:lation)?|change|manage)\b.{0,100}\b(?:requires?|must|only)\b.{0,80}\b(?:contacting\s+)?support\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _scaffold_placeholder_tokens_marker(root: Path) -> dict[str, Any] | None:
@@ -11295,6 +11543,61 @@ def _app_access_gate_null_markers(root: Path) -> list[dict[str, Any]]:
                 "snippet": _truncate_text(match.group(0).strip(), 220),
             }
         )
+    return markers
+
+
+def _appkit_subscription_cancellation_markers(root: Path) -> list[dict[str, Any]]:
+    """Require the canonical cancel control and reject support-mediated cancellation copy."""
+    markers: list[dict[str, Any]] = []
+    main_path = root / "src" / "main.tsx"
+    component_path = root / "src" / "components" / "subscription-cancellation.tsx"
+    try:
+        main_source = main_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        main_source = ""
+    try:
+        component_source = component_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        component_source = ""
+    if (
+        "SubscriptionCancellation" not in main_source
+        or "<AccountRoute" not in main_source
+        or "client.cancelSubscription()" not in component_source
+        or "Cancel subscription now" not in component_source
+    ):
+        markers.append(
+            {
+                "path": "src/main.tsx",
+                "issue": "appkit_subscription_cancel_missing",
+                "snippet": (
+                    "active paid subscriptions must render the canonical in-app "
+                    "SubscriptionCancellation control on /app/profile"
+                ),
+            }
+        )
+
+    source_root = root / "src"
+    if source_root.is_dir():
+        for path in sorted(source_root.rglob("*"))[:300]:
+            if not path.is_file() or path.suffix.lower() not in _PRODUCT_SOURCE_EXTENSIONS:
+                continue
+            try:
+                if path.stat().st_size > _PRODUCT_INVENTORY_MAX_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            match = _SUPPORT_MEDIATED_CANCELLATION_PATTERN.search(text)
+            if match is None:
+                continue
+            markers.append(
+                {
+                    "path": path.relative_to(root).as_posix(),
+                    "issue": "support_mediated_subscription_cancel",
+                    "snippet": _truncate_text(match.group(0).strip(), 220),
+                }
+            )
+            break
     return markers
 
 
@@ -11442,6 +11745,33 @@ def _app_access_gate_null_unfinished_blocker(refresh: dict[str, Any]) -> str:
     return ""
 
 
+def _appkit_subscription_cancellation_unfinished_blocker(refresh: dict[str, Any]) -> str:
+    """Do-not-publish gate for removable or support-mediated subscription cancellation."""
+    if not isinstance(refresh, dict):
+        return ""
+    inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
+    markers = inventory.get("risk_markers") if isinstance(inventory.get("risk_markers"), list) else []
+    cancellation_markers = [
+        marker
+        for marker in markers
+        if isinstance(marker, dict)
+        and str(marker.get("issue") or "").strip()
+        in {"appkit_subscription_cancel_missing", "support_mediated_subscription_cancel"}
+    ]
+    if not cancellation_markers:
+        return ""
+    details = [
+        f"{str(marker.get('path') or 'product source')}: "
+        f"{str(marker.get('snippet') or marker.get('issue') or '').strip()}"
+        for marker in cancellation_markers[:4]
+    ]
+    return (
+        "product subscription cancellation violates the AppKit contract: "
+        + "; ".join(details)
+        + " — keep the canonical in-app cancel control and remove support-mediated cancellation copy; cancellation must end access immediately with no grace period"
+    )
+
+
 def _requested_workflow_unfinished_blocker(refresh: dict[str, Any]) -> str:
     """Do-not-publish gate for a buildable but incomplete requested SaaS workflow."""
     if not isinstance(refresh, dict):
@@ -11461,6 +11791,69 @@ def _requested_workflow_unfinished_blocker(refresh: dict[str, Any]) -> str:
         "requested SaaS workflow is incomplete even though the source builds: "
         + "; ".join(gaps[:6])
         + " — finish the real action-backed, durably persisted `/app` workflow before publish"
+    )
+
+
+def _requested_live_action_execution_verification_state(
+    conn: Any,
+    *,
+    business: str,
+    root: Path | None,
+    surface: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Post-publish action-execution gate for an explicitly requested customer workflow.
+
+    The publish gate remains structural because the immutable action bundle must be live before a
+    customer can execute it.  This separate gate verifies only a durable successful signed-in
+    invocation of a UI-certified HTTP action on the exact current live build.  It does not certify
+    the full browser workflow; save, exact-ref reopen, revise, copy, export, and delete remain manual
+    browser E2E requirements.
+    """
+    if not _surface_requires_complete_workflow(surface):
+        return {
+            "action_execution_required": False,
+            "status": "not_required",
+            "live_build_id": "",
+            "actions": [],
+            "verified_action": "",
+            "verified_at": "",
+            "receipt_path": "",
+            "blocker": "",
+        }
+    try:
+        from . import app_actions as takyon_app_actions
+    except Exception:
+        from plugins.takyon import app_actions as takyon_app_actions
+
+    publication = _surface_live_publication_state(surface, business=business)
+    live_build_id = str(publication.get("build_id") or "").strip().lower()
+    try:
+        # Evidence follows the immutable build customers execute, never mutable producer source.
+        certified_actions = takyon_app_actions.live_action_bundle_http_action_names(
+            conn,
+            business_slug=business,
+            live_build_id=live_build_id,
+        )
+    except Exception as exc:
+        return {
+            "action_execution_required": True,
+            "status": "pending",
+            "live_build_id": live_build_id,
+            "actions": [],
+            "verified_action": "",
+            "verified_at": "",
+            "receipt_path": "",
+            "blocker": f"immutable live action bundle verification failed: {exc}",
+        }
+    action_specs = [
+        {"name": name, "trigger": "http"}
+        for name in sorted(certified_actions)
+    ]
+    return takyon_app_actions.live_action_execution_verification(
+        conn,
+        business,
+        action_specs,
+        live_build_id=live_build_id,
     )
 
 
@@ -11832,6 +12225,7 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
                 risk_markers.append(placeholder_marker)
             risk_markers.extend(_scaffold_visible_shell_markers(root))
             risk_markers.extend(_app_access_gate_null_markers(root))
+            risk_markers.extend(_appkit_subscription_cancellation_markers(root))
             risk_markers.extend(_requested_workflow_completeness_markers(root, surface))
     except Exception as exc:
         risk_markers.append({"path": source_rel, "issue": "stack_gate_scan_unavailable", "snippet": _truncate_text(str(exc), 160)})
@@ -12233,13 +12627,29 @@ def _run_surface_command(
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     started = _now()
+    effective_timeout = max(1, int(timeout_seconds))
+    parent_deadline_at = float(_ACTIVE_OPERATOR_TASK_DEADLINE_AT.get() or 0.0)
+    if parent_deadline_at > 0.0:
+        remaining = int(parent_deadline_at - time.time())
+        if remaining <= 0:
+            return {
+                "command": command,
+                "status": "blocked",
+                "returncode": None,
+                "started_at": started,
+                "completed_at": _now(),
+                "stdout": "",
+                "stderr": "",
+                "error": "parent bootstrap hard deadline expired before command start",
+            }
+        effective_timeout = min(effective_timeout, max(1, remaining))
     try:
         proc = subprocess.run(
             command,
             cwd=str(cwd),
             text=True,
             capture_output=True,
-            timeout=timeout_seconds,
+            timeout=effective_timeout,
             env=env or _runtime_env(),
         )
         status = "passed" if proc.returncode == 0 else "failed"
@@ -12261,7 +12671,7 @@ def _run_surface_command(
             "completed_at": _now(),
             "stdout": _truncate_text(exc.stdout or "", 12_000),
             "stderr": _truncate_text(exc.stderr or "", 12_000),
-            "error": f"timed out after {timeout_seconds}s",
+            "error": f"timed out after {effective_timeout}s",
         }
 
 
@@ -12828,12 +13238,19 @@ def _ensure_warm_node_modules_prebake() -> Path | None:
         shutil.copy2(scaffold_pkg, staging / "package.json")
         shutil.copy2(scaffold_lock, staging / "package-lock.json")
         env = _javascript_install_env(staging)
+        prebake_timeout = 600
+        parent_deadline_at = float(_ACTIVE_OPERATOR_TASK_DEADLINE_AT.get() or 0.0)
+        if parent_deadline_at > 0.0:
+            remaining = int(parent_deadline_at - time.time())
+            if remaining <= 0:
+                return None
+            prebake_timeout = min(prebake_timeout, max(1, remaining))
         proc = subprocess.run(
             [npm, "ci", "--prefer-offline", "--no-audit", "--no-fund", "--ignore-scripts"],
             cwd=str(staging),
             text=True,
             capture_output=True,
-            timeout=600,
+            timeout=prebake_timeout,
             env=env,
         )
         if proc.returncode != 0 or not _warm_node_modules_ready(staging):
@@ -15116,6 +15533,152 @@ def _publish_target_requires_r2(publish_target: str) -> bool:
     return host == base or host.endswith(f".{base}")
 
 
+def _reconcile_pending_product_build_activation(
+    store: "TakyonStore",
+    business: str,
+) -> dict[str, Any]:
+    """Resolve a durable pointer-pending/ambiguous activation before another publish starts."""
+    from . import storage
+
+    slug = _slugify(business)
+    if not hasattr(store, "_app_surface_contract") or not hasattr(store, "_row_to_dict"):
+        # Narrow compatibility for lightweight read-only test doubles. Every real TakyonStore has
+        # both methods and therefore always runs reconciliation.
+        return {"status": "not_supported"}
+
+    def _state() -> tuple[dict[str, Any], dict[str, Any]]:
+        with store._connect() as conn:
+            current_surface = store._app_surface_contract(conn, slug)
+            build_id = str(current_surface.get("live_build_id") or "").strip().lower()
+            try:
+                row = store._row_to_dict(
+                    conn.execute(
+                        "SELECT build_id, status, activation_state, activation_attempt_id, "
+                        "activation_previous_build_id, activation_previous_servable_until, "
+                        "activation_error, activation_prior_r2_previous_pointer "
+                        "FROM product_builds "
+                        "WHERE business_slug = ? AND build_id = ?",
+                        (slug, build_id),
+                    ).fetchone()
+                ) if build_id else {}
+            except Exception:
+                if isinstance(conn, _PGConn):
+                    raise
+                row = {}
+        return dict(current_surface), row
+
+    surface, build = _state()
+    activation_state = str(build.get("activation_state") or "").strip().lower()
+    if activation_state not in {"pointer_pending", "ambiguous"}:
+        return {"status": "not_needed", "surface": surface}
+    if not storage.r2_configured():
+        return {
+            "status": "blocked",
+            "surface": surface,
+            "blocker": "pending product activation cannot reconcile because R2 is unconfigured",
+        }
+
+    with _hold_active_worker_claim_for_publish(
+        store,
+        f"reconcile live product pointer for business:{slug}",
+        business=slug,
+    ):
+        surface, build = _state()
+        activation_state = str(build.get("activation_state") or "").strip().lower()
+        if activation_state not in {"pointer_pending", "ambiguous"}:
+            return {"status": "already_resolved", "surface": surface}
+        build_id = str(build.get("build_id") or "").strip().lower()
+        attempt_id = str(build.get("activation_attempt_id") or "").strip().lower()
+        previous_build_id = str(
+            build.get("activation_previous_build_id") or ""
+        ).strip().lower()
+        try:
+            edge_build_id = storage.read_public_site_pointer_from_r2(slug)
+        except Exception as exc:
+            return {
+                "status": "blocked",
+                "surface": surface,
+                "blocker": f"public product pointer remains unreadable: {exc}",
+            }
+        if edge_build_id == build_id:
+            store.commit(
+                scope=f"business:{slug}/app",
+                operations=[
+                    {
+                        "action": "app.surface.finalize_build_activation",
+                        "business": slug,
+                        "build_id": build_id,
+                        "activation_attempt_id": attempt_id,
+                    }
+                ],
+                idempotency_key=f"product-build-reconcile-finalize:{slug}:{build_id}:{attempt_id}",
+                reason="reconcile verified public product pointer",
+                actor="runtime",
+            )
+            resolved_surface, _ = _state()
+            return {"status": "finalized", "surface": resolved_surface}
+        if edge_build_id == previous_build_id or (not edge_build_id and not previous_build_id):
+            try:
+                restored_edge = storage.restore_public_site_pointer_from_r2(
+                    slug,
+                    failed_build_id=build_id,
+                    previous_build_id=previous_build_id,
+                    prior_previous_pointer=str(
+                        build.get("activation_prior_r2_previous_pointer") or ""
+                    ),
+                )
+            except Exception as exc:
+                return {
+                    "status": "blocked",
+                    "surface": surface,
+                    "blocker": f"could not restore prior edge descriptor: {exc}",
+                }
+            if not bool(restored_edge.get("restored")):
+                return {
+                    "status": "blocked",
+                    "surface": surface,
+                    "blocker": (
+                        "public product pointer changed during rollback reconciliation: "
+                        f"{restored_edge.get('current_build_id') or '<none>'}"
+                    ),
+                }
+            store.commit(
+                scope=f"business:{slug}/app",
+                operations=[
+                    {
+                        "action": "app.surface.rollback_build_activation",
+                        "business": slug,
+                        "failed_build_id": build_id,
+                        "previous_build_id": previous_build_id,
+                        "activation_attempt_id": attempt_id,
+                        "previous_publish_status": (
+                            "published" if previous_build_id else "not_published"
+                        ),
+                        "previous_publish_target": surface.get("publish_target") or "",
+                        "previous_public_url": (
+                            surface.get("public_url") or "" if previous_build_id else ""
+                        ),
+                        "previous_published_at": surface.get("published_at") or "",
+                        "previous_live_probe_status": "unknown",
+                        "previous_live_probe_detail": "reconciled after ambiguous pointer write",
+                        "previous_publish_receipt_path": "",
+                        "previous_publish_blocker": "",
+                    }
+                ],
+                idempotency_key=f"product-build-reconcile-rollback:{slug}:{build_id}:{attempt_id}",
+                reason="reconcile public product pointer to previous build",
+                actor="runtime",
+            )
+            resolved_surface, _ = _state()
+            return {"status": "rolled_back", "surface": resolved_surface}
+        blocker = (
+            "public product pointer references an unexpected build during reconciliation: "
+            f"edge={edge_build_id or '<none>'}, pending={build_id}, "
+            f"previous={previous_build_id or '<none>'}"
+        )
+        return {"status": "blocked", "surface": surface, "blocker": blocker}
+
+
 def _publish_product_surface_path(
     *,
     business_root: Path,
@@ -15124,6 +15687,12 @@ def _publish_product_surface_path(
     publish_target: str,
     source_revision: int = 0,
     surface: Mapping[str, Any] | None = None,
+    stage_build: Callable[[dict[str, Any]], None] | None = None,
+    activate_build: Callable[[dict[str, Any]], Mapping[str, Any] | None] | None = None,
+    finalize_build: Callable[[dict[str, Any]], None] | None = None,
+    mark_activation_ambiguous: Callable[[dict[str, Any]], None] | None = None,
+    rollback_build: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    pointer_guard: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     from . import storage
 
@@ -15166,7 +15735,17 @@ def _publish_product_surface_path(
         from . import app_actions as takyon_app_actions
     except Exception:
         from plugins.takyon import app_actions as takyon_app_actions
-    action_bundle = takyon_app_actions.build_action_bundle(source_root)
+    frozen_surface = dict(surface) if isinstance(surface, Mapping) else {}
+    action_bundle = takyon_app_actions.build_action_bundle(
+        source_root,
+        _surface_product_workflow_shape(frozen_surface),
+        runtime_features=_surface_runtime_features(frozen_surface),
+        rail_state=(
+            _surface_subuser_app_shape(frozen_surface).get("rail_state")
+            if isinstance(_surface_subuser_app_shape(frozen_surface).get("rail_state"), Mapping)
+            else {}
+        ),
+    )
     build_id = hashlib.sha256(
         _json_dumps(
             {
@@ -15212,42 +15791,6 @@ def _publish_product_surface_path(
         result["blocker"] = "product source cache sync failed: " + "; ".join(required_failures)
         return result
 
-    storage.write_build_artifact(backend, slug, build_id, publish_source)
-
-    r2_required = _publish_target_requires_r2(publish_target)
-    if r2_required and not storage.r2_configured():
-        result["blocker"] = "r2_unconfigured_for_product_edge"
-        return result
-
-    # Mirror the finished static build into the PUBLIC Cloudflare R2 bucket so the edge can serve
-    # <slug>.coscale.app. For current product hosts this is required: the Cloudflare Worker serves
-    # static bytes only from R2 and has no origin fallback for missing pointers.
-    if storage.r2_configured():
-        try:
-            mirror = storage.write_public_site_to_r2(slug, build_id, publish_source)
-            result["r2_mirror"] = mirror
-            logging.getLogger("takyon.r2").info(
-                "mirrored product site to R2: slug=%s build_id=%s files=%d",
-                _slugify(slug),
-                build_id,
-                len(mirror.get("files") or {}),
-            )
-        except Exception as exc:  # pragma: no cover - best-effort edge mirror
-            if r2_required:
-                result["blocker"] = f"r2_mirror_failed: {exc}"
-                return result
-            logging.getLogger("takyon.r2").warning(
-                "R2 product-site mirror failed (publish still succeeded via Supabase): "
-                "slug=%s build_id=%s err=%s",
-                _slugify(slug),
-                build_id,
-                exc,
-            )
-        # Ensure <slug>.coscale.app is routed to the R2 edge worker, so a freshly
-        # published business is served from R2 at the edge (not the VPS). Idempotent +
-        # fail-soft: needs CLOUDFLARE_API_TOKEN in the safebox; never fails the publish.
-        _ensure_product_edge_route(slug)
-
     build_root = _product_live_build_root(slug, build_id)
     current_root = _product_live_current_root(slug)
     if publish_root not in (build_root, *build_root.parents):
@@ -15262,21 +15805,280 @@ def _publish_product_surface_path(
             if name in {"node_modules", ".git", ".next", ".cache", "__pycache__"}
             or name.endswith(".pyc")
         }
+
+    # Materialize the exact static bytes before exposing either pointer. The build marker is baked
+    # into this immutable copy rather than the worker's source/dist tree, so an identical refresh
+    # retains the same content id instead of hashing yesterday's marker into a new build forever.
     _replace_directory_tree_atomic(
         publish_source,
         build_root,
         ignore=ignore,
     )
+    result["build_identity_html_files"] = _inject_live_build_identity(
+        build_root,
+        build_id,
+    )
     _make_static_publish_tree_readable(build_root)
+    storage.write_build_artifact(backend, slug, build_id, build_root)
+
+    r2_required = _publish_target_requires_r2(publish_target)
+    if r2_required and not storage.r2_configured():
+        result["blocker"] = "r2_unconfigured_for_product_edge"
+        return result
+
+    if stage_build is None:
+        result["blocker"] = "product build database staging callback is unavailable"
+        return result
+    try:
+        stage_build(
+            {
+                "build_id": build_id,
+                "business_slug": _slugify(slug),
+                "source_revision": int(source_revision or 0),
+                "artifact_prefix": artifact_prefix,
+                "action_bundle_json": action_bundle["json"],
+                "action_bundle_sha256": action_bundle["sha256"],
+            }
+        )
+        result["database_build_staged"] = True
+    except Exception as exc:
+        result["blocker"] = f"product build database staging failed: {exc}"
+        return result
+
+    if activate_build is None:
+        result["blocker"] = "product build database activation callback is unavailable"
+        return result
+    published_at = _now()
+    publish_source_path = (
+        f"{rel}/{publish_source_label}" if publish_source_label != "source" else rel
+    )
+    activation = {
+        "build_id": build_id,
+        "live_build_id": build_id,
+        "public_url": publish_target,
+        "publish_target": publish_target,
+        "published_at": published_at,
+        "publish_source_path": publish_source_path,
+        "artifact_prefix": artifact_prefix,
+        "source_revision": int(source_revision or 0),
+        "action_bundle_json": action_bundle["json"],
+        "action_bundle_sha256": action_bundle["sha256"],
+    }
+    activation_attempted = False
+    activation_error: Exception | None = None
+    activation_receipt: dict[str, Any] = {}
+    pointer_failure_handled = False
+
+    def _activate_before_public_pointer(
+        pointer_state: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        nonlocal activation_attempted, activation_error, activation_receipt
+        activation_attempted = True
+        try:
+            activation_receipt = dict(
+                activate_build({**activation, **dict(pointer_state or {})}) or {}
+            )
+        except Exception as exc:
+            activation_error = exc
+            raise
+        if not activation_receipt:
+            previous_build_id = str((surface or {}).get("live_build_id") or "").strip().lower()
+            activation_receipt = {
+                "live_build_id": build_id,
+                "previous_build_id": previous_build_id,
+                "previous_servable_until": (
+                    (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+                    if previous_build_id and previous_build_id != build_id
+                    else ""
+                ),
+            }
+        if str(activation_receipt.get("live_build_id") or "").strip().lower() != build_id:
+            raise TakyonError("product build activation returned a mismatched live build id")
+        result["database_build_activated"] = True
+        result["database_activation"] = activation_receipt
+        return activation_receipt
+
+    def _finalize_verified_pointer(receipt: Mapping[str, Any]) -> None:
+        if finalize_build is None:
+            # Direct helper callers/tests predate the durable state machine; the canonical product
+            # publisher always supplies this callback.
+            result["database_activation_finalized"] = True
+            return
+        finalize_build({**activation, **dict(receipt)})
+        result["database_activation_finalized"] = True
+
+    def _rollback_failed_activation(
+        exc: BaseException,
+        receipt: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Restore the edge first, then CAS the durable build pointer back to its prior state."""
+        durable_receipt = dict(receipt or activation_receipt)
+        previous_raw = (
+            durable_receipt.get("previous_build_id")
+            if "previous_build_id" in durable_receipt
+            else (surface or {}).get("live_build_id")
+        )
+        previous_build_id = str(previous_raw or "").strip().lower()
+        edge_safe = True
+        pointer_rollback: dict[str, Any] = {"attempted": False, "restored": False}
+        if storage.r2_configured():
+            try:
+                pointer_rollback = storage.restore_public_site_pointer_from_r2(
+                    slug,
+                    failed_build_id=build_id,
+                    previous_build_id=previous_build_id,
+                    prior_previous_pointer=str(
+                        durable_receipt.get("prior_r2_previous_pointer") or ""
+                    ),
+                )
+                current_build_id = str(
+                    pointer_rollback.get("current_build_id") or ""
+                ).strip().lower()
+                edge_safe = bool(pointer_rollback.get("restored")) or current_build_id == previous_build_id
+            except Exception as rollback_exc:
+                pointer_rollback = {
+                    "attempted": True,
+                    "restored": False,
+                    "error": str(rollback_exc),
+                }
+                edge_safe = False
+        result["r2_pointer_rollback"] = pointer_rollback
+        if not edge_safe:
+            return (
+                f"{exc}; R2 pointer rollback failed: "
+                f"{pointer_rollback.get('error') or pointer_rollback.get('status')}"
+            )
+        if rollback_build is None:
+            return f"{exc}; product build database rollback callback is unavailable"
+        try:
+            rollback_receipt = rollback_build(
+                {
+                    **activation,
+                    **durable_receipt,
+                    "failed_build_id": build_id,
+                    "previous_build_id": previous_build_id,
+                }
+            )
+        except Exception as rollback_exc:
+            return f"{exc}; product build database rollback failed: {rollback_exc}"
+        result["database_activation_rollback"] = rollback_receipt or {"rolled_back": True}
+        result["database_build_activated"] = False
+        return str(exc)
+
+    def _handle_pointer_failure(
+        exc: BaseException,
+        receipt: Mapping[str, Any],
+    ) -> None:
+        nonlocal pointer_failure_handled
+        pointer_failure_handled = True
+        rollback_detail = _rollback_failed_activation(exc, receipt)
+        result["pointer_failure_reconciliation"] = rollback_detail
+        rolled_back = bool(
+            isinstance(result.get("database_activation_rollback"), Mapping)
+            and result["database_activation_rollback"].get("rolled_back")
+        )
+        if not rolled_back and mark_activation_ambiguous is not None:
+            try:
+                mark_activation_ambiguous(
+                    {
+                        **activation,
+                        **dict(receipt),
+                        "error": rollback_detail,
+                    }
+                )
+                result["database_activation_ambiguous"] = True
+            except Exception as mark_exc:
+                result["database_activation_ambiguity_error"] = str(mark_exc)
+
+    # Upload immutable bytes first, activate their exact DB action bundle second, and expose the R2
+    # pointer last. Staged rows are never app-readable, so no request can select unpublished source.
+    if storage.r2_configured():
+        try:
+            mirror = storage.write_public_site_to_r2(
+                slug,
+                build_id,
+                build_root,
+                before_pointer=_activate_before_public_pointer,
+                before_pointer_state=_activate_before_public_pointer,
+                after_pointer=_finalize_verified_pointer,
+                pointer_guard=pointer_guard,
+                on_pointer_failure=_handle_pointer_failure,
+            )
+            if not activation_attempted:
+                raise TakyonError("R2 mirror did not invoke the durable build activation callback")
+            result["r2_mirror"] = mirror
+            logging.getLogger("takyon.r2").info(
+                "mirrored product site to R2: slug=%s build_id=%s files=%d",
+                _slugify(slug),
+                build_id,
+                len(mirror.get("files") or {}),
+            )
+        except Exception as exc:
+            if pointer_failure_handled:
+                reconciliation = str(
+                    result.get("pointer_failure_reconciliation") or exc
+                )
+                result["blocker"] = "r2_pointer_activation_failed: " + reconciliation
+                return result
+            if activation_error is not None and not pointer_failure_handled:
+                result["blocker"] = (
+                    "product build database activation failed: "
+                    + str(activation_error)
+                )
+                return result
+            if activation_attempted and result.get("database_build_activated"):
+                if r2_required:
+                    result["blocker"] = "r2_pointer_activation_failed: " + str(exc)
+                    return result
+            elif r2_required:
+                result["blocker"] = f"r2_mirror_failed: {exc}"
+                return result
+            if not activation_attempted:
+                try:
+                    _activate_before_public_pointer()
+                except Exception:
+                    assert activation_error is not None
+                    result["blocker"] = (
+                        "product build database activation failed: "
+                        + _rollback_failed_activation(activation_error)
+                    )
+                    return result
+            logging.getLogger("takyon.r2").warning(
+                "R2 product-site mirror failed (publish still succeeded via non-R2 target): "
+                "slug=%s build_id=%s err=%s",
+                _slugify(slug),
+                build_id,
+                exc,
+            )
+        # Ensure <slug>.coscale.app is routed to the R2 edge worker, so a freshly
+        # published business is served from R2 at the edge (not the VPS). Idempotent +
+        # fail-soft: needs CLOUDFLARE_API_TOKEN in the safebox; never fails the publish.
+        _ensure_product_edge_route(slug)
+    else:
+        try:
+            with (pointer_guard() if pointer_guard is not None else nullcontext()):
+                receipt = _activate_before_public_pointer()
+                _finalize_verified_pointer(receipt)
+        except Exception:
+            assert activation_error is not None
+            result["blocker"] = (
+                "product build database activation failed: "
+                + _rollback_failed_activation(activation_error)
+            )
+            return result
+
+    # Local fallback may move only after both the public edge pointer and durable database pointer
+    # agree. A failed R2 mirror or DB activation therefore leaves the prior fallback build intact.
     _replace_symlink_atomic(current_root, build_root)
+
     result.update(
         {
             "status": "published",
             "public_url": publish_target,
-            "published_at": _now(),
+            "published_at": published_at,
             "publish_root": str(current_root),
             "publish_build_root": str(build_root),
-            "publish_source_path": f"{rel}/{publish_source_label}" if publish_source_label != "source" else rel,
+            "publish_source_path": publish_source_path,
             "publish_mode": "pointer_static",
             "live_build_id": build_id,
             "live_probe_status": "unknown",
@@ -15417,7 +16219,9 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
         "app.entitlement.upsert",
         "app.plan.upsert",
         "app.profile.upsert",
+        "app.surface.rollback_build_activation",
         "app.surface.publish_result",
+        "app.surface.stage_build",
         "app.surface.upsert",
         "app.usage.record",
     }
@@ -16128,6 +16932,15 @@ class TakyonStore:
               action_bundle_json TEXT NOT NULL DEFAULT '{}',
               action_bundle_sha256 TEXT NOT NULL DEFAULT '',
               status TEXT NOT NULL DEFAULT 'built',
+              activated_at TEXT,
+              servable_until TEXT,
+              activation_state TEXT NOT NULL DEFAULT 'inactive',
+              activation_attempt_id TEXT,
+              activation_previous_build_id TEXT,
+              activation_previous_servable_until TEXT,
+              activation_error TEXT,
+              activation_prior_r2_previous_pointer TEXT,
+              legacy_unbound_until TEXT,
               created_at TEXT NOT NULL,
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
             );
@@ -16331,6 +17144,24 @@ class TakyonStore:
               PRIMARY KEY (business_slug, action_name),
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS app_action_invocations (
+              business_slug TEXT NOT NULL,
+              app_user_id TEXT NOT NULL,
+              reservation_key TEXT NOT NULL,
+              finish_token_hash TEXT NOT NULL,
+              action_name TEXT NOT NULL,
+              live_build_id TEXT NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+              result_json TEXT,
+              run_json TEXT,
+              receipt_path TEXT,
+              error TEXT,
+              claimed_at TEXT NOT NULL,
+              completed_at TEXT,
+              PRIMARY KEY (business_slug, reservation_key),
+              FOREIGN KEY (business_slug, app_user_id)
+                REFERENCES app_users(business_slug, id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS webhook_events (
               id TEXT PRIMARY KEY,
               provider TEXT NOT NULL,
@@ -16425,6 +17256,22 @@ class TakyonStore:
             conn.execute(
                 "ALTER TABLE product_builds ADD COLUMN action_bundle_sha256 TEXT NOT NULL DEFAULT ''"
             )
+        if "activated_at" not in product_build_columns:
+            conn.execute("ALTER TABLE product_builds ADD COLUMN activated_at TEXT")
+        if "servable_until" not in product_build_columns:
+            conn.execute("ALTER TABLE product_builds ADD COLUMN servable_until TEXT")
+        product_build_activation_additions = {
+            "activation_state": "TEXT NOT NULL DEFAULT 'inactive'",
+            "activation_attempt_id": "TEXT",
+            "activation_previous_build_id": "TEXT",
+            "activation_previous_servable_until": "TEXT",
+            "activation_error": "TEXT",
+            "activation_prior_r2_previous_pointer": "TEXT",
+            "legacy_unbound_until": "TEXT",
+        }
+        for column, ddl in product_build_activation_additions.items():
+            if column not in product_build_columns:
+                conn.execute(f"ALTER TABLE product_builds ADD COLUMN {column} {ddl}")
         checkout_intent_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(app_checkout_intents)").fetchall()
@@ -16504,6 +17351,43 @@ class TakyonStore:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_action_invocations (
+              business_slug TEXT NOT NULL,
+              app_user_id TEXT NOT NULL,
+              reservation_key TEXT NOT NULL,
+              finish_token_hash TEXT NOT NULL,
+              action_name TEXT NOT NULL,
+              live_build_id TEXT NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+              result_json TEXT,
+              run_json TEXT,
+              receipt_path TEXT,
+              error TEXT,
+              claimed_at TEXT NOT NULL,
+              completed_at TEXT,
+              PRIMARY KEY (business_slug, reservation_key),
+              FOREIGN KEY (business_slug, app_user_id)
+                REFERENCES app_users(business_slug, id) ON DELETE CASCADE
+            )
+            """
+        )
+        invocation_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(app_action_invocations)").fetchall()
+        }
+        if "finish_token_hash" not in invocation_columns:
+            conn.execute("ALTER TABLE app_action_invocations ADD COLUMN finish_token_hash TEXT")
+            conn.execute(
+                "UPDATE app_action_invocations SET status = CASE WHEN status = 'running' "
+                "THEN 'failed' ELSE status END, error = CASE WHEN status = 'running' "
+                "THEN 'superseded by finish-capability migration' ELSE error END, "
+                "completed_at = CASE WHEN status = 'running' THEN ? ELSE completed_at END, "
+                "finish_token_hash = lower(hex(randomblob(32))) "
+                "WHERE finish_token_hash IS NULL",
+                (_now(),),
+            )
         action_schedule_indexes = {row["name"] for row in conn.execute("PRAGMA index_list(app_action_schedules)").fetchall()}
         if "app_action_schedules_due_idx" not in action_schedule_indexes:
             conn.execute(
@@ -16567,6 +17451,15 @@ class TakyonStore:
               action_bundle_json TEXT NOT NULL DEFAULT '{}',
               action_bundle_sha256 TEXT NOT NULL DEFAULT '',
               status TEXT NOT NULL DEFAULT 'built',
+              activated_at TEXT,
+              servable_until TEXT,
+              activation_state TEXT NOT NULL DEFAULT 'inactive',
+              activation_attempt_id TEXT,
+              activation_previous_build_id TEXT,
+              activation_previous_servable_until TEXT,
+              activation_error TEXT,
+              activation_prior_r2_previous_pointer TEXT,
+              legacy_unbound_until TEXT,
               created_at TEXT NOT NULL,
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
             )
@@ -17540,6 +18433,7 @@ class TakyonStore:
         source_path = str(surface.get("source_path") or "").strip()
         source_revision = self._canonical_workspace_revision(slug)
         product_workflow = _surface_product_workflow_shape(surface)
+        root = self._business_root(slug) / source_path if source_path else None
         inventory = _product_inventory(self._business_root(slug), source_path, surface=surface) if source_path else {}
         if isinstance(inventory, dict):
             inventory = {
@@ -17556,12 +18450,22 @@ class TakyonStore:
             receipt=receipt,
             inventory=inventory,
         )
+        live_action_verification = _requested_live_action_execution_verification_state(
+            conn,
+            business=slug,
+            root=root,
+            surface=surface,
+        )
+        verification_actions = [
+            {"name": name, "trigger": "http"}
+            for name in (live_action_verification.get("actions") or [])
+            if str(name or "").strip()
+        ]
         action_invocations = takyon_app_actions.summarize_action_invocations(
             conn,
             slug,
-            product_workflow.get("actions"),
+            verification_actions or product_workflow.get("actions"),
         )
-        root = self._business_root(slug) / source_path if source_path else None
         has_source_files = bool(root and root.exists() and root.is_dir() and _product_source_files(root, limit=1))
         live_truth = _live_truth_snapshot(surface, business=slug)
         local_work: list[str] = []
@@ -17596,6 +18500,7 @@ class TakyonStore:
             "inventory": inventory or {},
             "operational_facts": operational_facts,
             "action_invocations": action_invocations,
+            "live_action_execution_verification": live_action_verification,
             "local_continuable_work": local_work[:8],
             "source_truth": source_truth,
             "live_truth": live_truth,
@@ -17735,6 +18640,30 @@ class TakyonStore:
                     summary_parts.append(f"{name}={status}")
             if summary_parts:
                 surface_lines.extend(["", "## Action Verification", "", f"- Action invocation status: {', '.join(summary_parts)}"])
+        live_action_verification = (
+            surface_evidence.get("live_action_execution_verification")
+            if isinstance(surface_evidence.get("live_action_execution_verification"), dict)
+            else {}
+        )
+        if live_action_verification.get("action_execution_required"):
+            verification_status = str(
+                live_action_verification.get("status") or "pending"
+            ).strip()
+            verification_lines = [
+                "",
+                "## Live Action Execution Verification",
+                "",
+                f"- Status: {verification_status}",
+                "- Scope: certifies only one current-build signed-in HTTP action execution; full browser workflow E2E remains required.",
+                f"- Live build id: {live_action_verification.get('live_build_id') or 'not set'}",
+                f"- Verified action: {live_action_verification.get('verified_action') or 'none'}",
+                f"- Verified at: {live_action_verification.get('verified_at') or 'not verified'}",
+                f"- Receipt: {live_action_verification.get('receipt_path') or 'not verified'}",
+            ]
+            blocker = str(live_action_verification.get("blocker") or "").strip()
+            if blocker:
+                verification_lines.append(f"- Blocker: {blocker}")
+            surface_lines.extend(verification_lines)
         if inventory:
             surface_lines.extend(["", "## Product Inventory", ""])
             surface_lines.extend([
@@ -20303,6 +21232,22 @@ class TakyonStore:
 
         def _touches_workspace(item: dict[str, Any]) -> str:
             action_name = str(item.get("action") or "").strip()
+            internal_pointer_transition = action_name in {
+                "app.surface.stage_build",
+                "app.surface.finalize_build_activation",
+                "app.surface.mark_build_activation_ambiguous",
+            } or (
+                action_name in {
+                    "app.surface.publish_result",
+                    "app.surface.rollback_build_activation",
+                }
+                and bool(str(item.get("activation_attempt_id") or "").strip())
+            )
+            if internal_pointer_transition:
+                # These DB/R2 state-machine steps run under the short per-business pointer lease.
+                # Their generated commentary/receipt files ride the enclosing refresh commit after
+                # the lease releases; never hold it across workspace object-store uploads.
+                return ""
             skip_workspace_commit = (
                 action_name == "business.upsert"
                 and str(item.get("business_slug") or "").strip()
@@ -20438,7 +21383,11 @@ class TakyonStore:
             "app.connection.set",
             "app.record.delete",
             "app.record.upsert",
+            "app.surface.rollback_build_activation",
+            "app.surface.finalize_build_activation",
+            "app.surface.mark_build_activation_ambiguous",
             "app.surface.publish_result",
+            "app.surface.stage_build",
             "app.surface.upsert",
             "app.usage.record",
             "artifact.patch",
@@ -20973,6 +21922,333 @@ class TakyonStore:
                 "publish_target": publish_target,
             }
 
+        if action == "app.surface.rollback_build_activation":
+            failed_build_id = str(op.get("failed_build_id") or "").strip().lower()
+            previous_build_id = str(op.get("previous_build_id") or "").strip().lower()
+            activation_attempt_id = str(op.get("activation_attempt_id") or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{32}", failed_build_id):
+                raise TakyonError("failed product build_id must be 32 lowercase hex characters")
+            if previous_build_id and not re.fullmatch(r"[0-9a-f]{32}", previous_build_id):
+                raise TakyonError("previous product build_id must be 32 lowercase hex characters")
+            existing = self._stored_app_surface_contract(conn, slug)
+            current_build_id = str(existing.get("live_build_id") or "").strip().lower()
+            if current_build_id != failed_build_id:
+                return {
+                    "action": action,
+                    "business": slug,
+                    "failed_build_id": failed_build_id,
+                    "current_build_id": current_build_id,
+                    "rolled_back": False,
+                    "status": "failed_build_is_not_current",
+                }
+            if activation_attempt_id:
+                failed_row = self._row_to_dict(
+                    conn.execute(
+                        "SELECT activation_attempt_id FROM product_builds "
+                        "WHERE business_slug = ? AND build_id = ?",
+                        (slug, failed_build_id),
+                    ).fetchone()
+                )
+                if str(failed_row.get("activation_attempt_id") or "").strip().lower() != activation_attempt_id:
+                    return {
+                        "action": action,
+                        "business": slug,
+                        "failed_build_id": failed_build_id,
+                        "current_build_id": current_build_id,
+                        "rolled_back": False,
+                        "status": "failed_activation_attempt_is_not_current",
+                    }
+            if previous_build_id:
+                previous_row = self._row_to_dict(
+                    conn.execute(
+                        "SELECT business_slug FROM product_builds WHERE build_id = ?",
+                        (previous_build_id,),
+                    ).fetchone()
+                )
+                if not previous_row or str(previous_row.get("business_slug") or "") != slug:
+                    raise TakyonError("previous product build does not belong to this business")
+            previous_publish_status = str(
+                op.get("previous_publish_status") or "not_published"
+            ).strip().lower()
+            if previous_build_id:
+                previous_publish_status = "published"
+            elif previous_publish_status not in {"not_published", "blocked"}:
+                previous_publish_status = "not_published"
+            previous_public_url = str(op.get("previous_public_url") or "").strip()
+            previous_published_at = str(op.get("previous_published_at") or "").strip()
+            previous_probe_status = str(
+                op.get("previous_live_probe_status") or "unknown"
+            ).strip().lower() or "unknown"
+            previous_probe_detail = str(op.get("previous_live_probe_detail") or "").strip()
+            previous_receipt_path = None
+            if op.get("previous_publish_receipt_path"):
+                previous_receipt_path = _safe_relpath(
+                    str(op.get("previous_publish_receipt_path")),
+                    field="previous_publish_receipt_path",
+                ).as_posix()
+            previous_blocker = str(op.get("previous_publish_blocker") or "").strip()
+            previous_target = _product_publish_target(
+                slug,
+                op.get("previous_publish_target") or existing.get("publish_target"),
+            )
+            existing_metadata = (
+                existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            )
+            metadata = {
+                **existing_metadata,
+                "takyon_publish": {
+                    "status": previous_publish_status,
+                    "public_url": previous_public_url,
+                    "publish_target": previous_target,
+                    "published_at": previous_published_at,
+                    "live_build_id": previous_build_id,
+                    "live_probe_status": previous_probe_status,
+                    "live_probe_detail": previous_probe_detail,
+                    "receipt_path": previous_receipt_path,
+                    "blocker": previous_blocker,
+                    "rolled_back_from_build_id": failed_build_id,
+                },
+            }
+            cursor = conn.execute(
+                """
+                UPDATE app_surface_contracts
+                SET publish_target = ?, public_url = NULLIF(?, ''), publish_status = ?,
+                    published_at = NULLIF(?, ''), live_build_id = NULLIF(?, ''),
+                    live_probe_status = ?, live_probe_detail = NULLIF(?, ''),
+                    publish_receipt_path = ?, publish_blocker = NULLIF(?, ''),
+                    metadata_json = ?, updated_at = ?
+                WHERE business_slug = ? AND live_build_id = ?
+                """,
+                (
+                    previous_target,
+                    previous_public_url,
+                    previous_publish_status,
+                    previous_published_at,
+                    previous_build_id,
+                    previous_probe_status,
+                    previous_probe_detail,
+                    previous_receipt_path,
+                    previous_blocker,
+                    _json_dumps(metadata),
+                    _now(),
+                    slug,
+                    failed_build_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise TakyonError("durable product build pointer changed during rollback")
+            conn.execute(
+                "UPDATE product_builds SET status = 'built', activated_at = NULL, "
+                "servable_until = NULL, activation_state = 'rolled_back', "
+                "activation_error = NULL WHERE business_slug = ? AND build_id = ?",
+                (slug, failed_build_id),
+            )
+            if previous_build_id:
+                conn.execute(
+                    "UPDATE product_builds SET status = 'live', servable_until = NULL, "
+                    "activation_state = 'live', activation_error = NULL "
+                    "WHERE business_slug = ? AND build_id = ?",
+                    (slug, previous_build_id),
+                )
+            self._rewrite_app_files(conn, slug)
+            self._record_event(
+                conn,
+                scope=f"business:{slug}/app",
+                business_slug=slug,
+                event_type=action,
+                payload={
+                    "failed_build_id": failed_build_id,
+                    "restored_build_id": previous_build_id,
+                    "restored_publish_status": previous_publish_status,
+                },
+            )
+            return {
+                "action": action,
+                "business": slug,
+                "failed_build_id": failed_build_id,
+                "current_build_id": previous_build_id,
+                "rolled_back": True,
+                "status": "rolled_back",
+            }
+
+        if action in {
+            "app.surface.finalize_build_activation",
+            "app.surface.mark_build_activation_ambiguous",
+        }:
+            build_id = str(op.get("build_id") or "").strip().lower()
+            activation_attempt_id = str(op.get("activation_attempt_id") or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{32}", build_id):
+                raise TakyonError("product build_id must be 32 lowercase hex characters")
+            if not re.fullmatch(r"[0-9a-f]{32}", activation_attempt_id):
+                raise TakyonError("activation_attempt_id must be 32 lowercase hex characters")
+            existing = self._stored_app_surface_contract(conn, slug)
+            if str(existing.get("live_build_id") or "").strip().lower() != build_id:
+                raise TakyonError("durable product build pointer changed during activation reconciliation")
+            target_state = (
+                "live"
+                if action == "app.surface.finalize_build_activation"
+                else "ambiguous"
+            )
+            activation_error = (
+                ""
+                if target_state == "live"
+                else str(op.get("error") or "public edge pointer state is ambiguous").strip()[:2000]
+            )
+            cursor = conn.execute(
+                "UPDATE product_builds SET activation_state = ?, activation_error = NULLIF(?, '') "
+                "WHERE business_slug = ? AND build_id = ? AND status = 'live' "
+                "AND activation_attempt_id = ? "
+                "AND activation_state IN ('pointer_pending', 'ambiguous', 'live')",
+                (
+                    target_state,
+                    activation_error,
+                    slug,
+                    build_id,
+                    activation_attempt_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise TakyonError("durable product activation generation changed during reconciliation")
+            if target_state == "ambiguous":
+                conn.execute(
+                    "UPDATE app_surface_contracts SET live_probe_status = 'unknown', "
+                    "live_probe_detail = ?, publish_blocker = ?, updated_at = ? "
+                    "WHERE business_slug = ? AND live_build_id = ?",
+                    (activation_error, activation_error, _now(), slug, build_id),
+                )
+            self._record_event(
+                conn,
+                scope=f"business:{slug}/app",
+                business_slug=slug,
+                event_type=action,
+                payload={
+                    "build_id": build_id,
+                    "activation_attempt_id": activation_attempt_id,
+                    "activation_state": target_state,
+                    "error": activation_error,
+                },
+            )
+            return {
+                "action": action,
+                "business": slug,
+                "build_id": build_id,
+                "activation_attempt_id": activation_attempt_id,
+                "activation_state": target_state,
+            }
+
+        if action == "app.surface.stage_build":
+            build_id = str(op.get("build_id") or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{32}", build_id):
+                raise TakyonError("staged product build_id must be 32 lowercase hex characters")
+            action_bundle_json = str(op.get("action_bundle_json") or "").strip()
+            action_bundle_sha256 = str(op.get("action_bundle_sha256") or "").strip().lower()
+            if len(action_bundle_json.encode("utf-8")) > 524288:
+                raise TakyonError("staged product action bundle exceeds 524288 bytes")
+            if hashlib.sha256(action_bundle_json.encode("utf-8")).hexdigest() != action_bundle_sha256:
+                raise TakyonError("staged product action bundle digest mismatch")
+            try:
+                bundle_payload = json.loads(action_bundle_json)
+            except json.JSONDecodeError as exc:
+                raise TakyonError("staged product action bundle is invalid JSON") from exc
+            if not isinstance(bundle_payload, dict) or bundle_payload.get("version") != 1:
+                raise TakyonError("staged product action bundle version is unsupported")
+            existing_build = self._row_to_dict(
+                conn.execute(
+                    "SELECT business_slug, action_bundle_sha256 FROM product_builds WHERE build_id = ?",
+                    (build_id,),
+                ).fetchone()
+            )
+            if existing_build:
+                if str(existing_build.get("business_slug") or "") != slug:
+                    raise TakyonError("staged product build_id belongs to another business")
+                existing_digest = str(
+                    existing_build.get("action_bundle_sha256") or ""
+                ).strip().lower()
+                if existing_digest and existing_digest != action_bundle_sha256:
+                    raise TakyonError("staged product build digest conflicts with existing build")
+            try:
+                source_revision = max(0, int(op.get("source_revision") or 0))
+            except (TypeError, ValueError):
+                source_revision = 0
+            conn.execute(
+                """
+                INSERT INTO product_builds (
+                  build_id, business_slug, source_revision, artifact_prefix,
+                  checkout_branding_params_json, action_bundle_json,
+                  action_bundle_sha256, status, activation_state, created_at
+                )
+                VALUES (?, ?, ?, ?, '{}', ?, ?, 'staged', 'staged', ?)
+                ON CONFLICT(build_id) DO UPDATE SET
+                  source_revision = excluded.source_revision,
+                  artifact_prefix = excluded.artifact_prefix,
+                  action_bundle_json = CASE
+                    WHEN product_builds.action_bundle_sha256 IS NULL
+                      OR trim(product_builds.action_bundle_sha256) = ''
+                    THEN excluded.action_bundle_json
+                    ELSE product_builds.action_bundle_json
+                  END,
+                  action_bundle_sha256 = CASE
+                    WHEN product_builds.action_bundle_sha256 IS NULL
+                      OR trim(product_builds.action_bundle_sha256) = ''
+                    THEN excluded.action_bundle_sha256
+                    ELSE product_builds.action_bundle_sha256
+                  END,
+                  status = CASE
+                    WHEN product_builds.status = 'live' THEN product_builds.status
+                    ELSE 'staged'
+                  END,
+                  activation_state = CASE
+                    WHEN product_builds.status = 'live' THEN product_builds.activation_state
+                    ELSE 'staged'
+                  END,
+                  activation_attempt_id = CASE
+                    WHEN product_builds.status = 'live' THEN product_builds.activation_attempt_id
+                    ELSE NULL
+                  END,
+                  activation_previous_build_id = CASE
+                    WHEN product_builds.status = 'live' THEN product_builds.activation_previous_build_id
+                    ELSE NULL
+                  END,
+                  activation_previous_servable_until = CASE
+                    WHEN product_builds.status = 'live' THEN product_builds.activation_previous_servable_until
+                    ELSE NULL
+                  END,
+                  activation_error = CASE
+                    WHEN product_builds.status = 'live' THEN product_builds.activation_error
+                    ELSE NULL
+                  END,
+                  activation_prior_r2_previous_pointer = CASE
+                    WHEN product_builds.status = 'live'
+                    THEN product_builds.activation_prior_r2_previous_pointer
+                    ELSE NULL
+                  END,
+                  created_at = CASE
+                    WHEN product_builds.status = 'live' THEN product_builds.created_at
+                    ELSE excluded.created_at
+                  END,
+                  servable_until = CASE
+                    WHEN product_builds.status = 'live' THEN product_builds.servable_until
+                    ELSE NULL
+                  END
+                """,
+                (
+                    build_id,
+                    slug,
+                    source_revision,
+                    str(op.get("artifact_prefix") or "").strip(),
+                    action_bundle_json,
+                    action_bundle_sha256,
+                    _now(),
+                ),
+            )
+            return {
+                "action": action,
+                "business": slug,
+                "build_id": build_id,
+                "action_bundle_sha256": action_bundle_sha256,
+                "status": "staged",
+            }
+
         if action == "app.surface.publish_result":
             publish_status = str(op.get("publish_status") or op.get("status") or "").strip().lower()
             if publish_status not in {"not_published", "published", "blocked"}:
@@ -20992,6 +22268,29 @@ class TakyonStore:
             artifact_prefix = str(op.get("artifact_prefix") or "").strip()
             action_bundle_json = str(op.get("action_bundle_json") or "").strip()
             action_bundle_sha256 = str(op.get("action_bundle_sha256") or "").strip().lower()
+            expected_previous_provided = "expected_previous_build_id" in op
+            expected_previous_build_id = str(
+                op.get("expected_previous_build_id") or ""
+            ).strip().lower()
+            activation_attempt_id = str(op.get("activation_attempt_id") or "").strip().lower()
+            activation_prior_r2_previous_pointer = str(
+                op.get("activation_prior_r2_previous_pointer") or ""
+            )
+            if len(activation_prior_r2_previous_pointer.encode("utf-8")) > 4096:
+                raise TakyonError("prior R2 previous-pointer receipt exceeds 4096 bytes")
+            if not activation_attempt_id and live_build_id:
+                # Compatibility for pre-state-machine internal callers. New publication paths pass
+                # a unique attempt id; the deterministic legacy id still gives rollback/finalize a
+                # stable generation instead of leaving an untracked live row.
+                activation_attempt_id = hashlib.sha256(
+                    f"legacy-product-activation:{slug}:{live_build_id}".encode("utf-8")
+                ).hexdigest()[:32]
+            if expected_previous_build_id and not re.fullmatch(
+                r"[0-9a-f]{32}", expected_previous_build_id
+            ):
+                raise TakyonError(
+                    "expected_previous_build_id must be empty or 32 lowercase hex characters"
+                )
             try:
                 source_revision = int(op.get("source_revision") or 0)
             except (TypeError, ValueError):
@@ -21016,6 +22315,33 @@ class TakyonStore:
             effective_live_build_id = existing_live_build_id if preserve_live_state else live_build_id
             effective_live_probe_status = existing_live_probe_status if preserve_live_state else live_probe_status
             effective_live_probe_detail = existing_live_probe_detail if preserve_live_state else live_probe_detail
+            activating_new_build = bool(
+                publish_status == "published"
+                and effective_publish_status == "published"
+                and effective_live_build_id
+                and effective_live_build_id == live_build_id
+            )
+            previous_servable_until = ""
+            if activating_new_build:
+                if not re.fullmatch(r"[0-9a-f]{32}", effective_live_build_id):
+                    raise TakyonError("live product build_id must be 32 lowercase hex characters")
+                if not re.fullmatch(r"[0-9a-f]{32}", activation_attempt_id):
+                    raise TakyonError(
+                        "activation_attempt_id must be 32 lowercase hex characters"
+                    )
+                if (
+                    expected_previous_provided
+                    and existing_live_build_id != expected_previous_build_id
+                ):
+                    raise TakyonError(
+                        "stale product build activation: expected live build "
+                        f"{expected_previous_build_id or '<none>'}, found "
+                        f"{existing_live_build_id or '<none>'}"
+                    )
+                if existing_live_build_id and existing_live_build_id != effective_live_build_id:
+                    previous_servable_until = (
+                        datetime.now(timezone.utc) + timedelta(minutes=10)
+                    ).isoformat()
             last_attempt = {
                 "status": publish_status,
                 "public_url": public_url,
@@ -21048,7 +22374,7 @@ class TakyonStore:
                 },
                 "takyon_publish_last_attempt": last_attempt,
             }
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE app_surface_contracts
                 SET publish_target = ?, public_url = NULLIF(?, ''), publish_status = ?,
@@ -21057,6 +22383,7 @@ class TakyonStore:
                     publish_receipt_path = ?, publish_blocker = NULLIF(?, ''),
                     metadata_json = ?, updated_at = ?
                 WHERE business_slug = ?
+                  AND (? = 0 OR COALESCE(live_build_id, '') = ?)
                 """,
                 (
                     publish_target,
@@ -21071,8 +22398,12 @@ class TakyonStore:
                     _json_dumps(metadata),
                     _now(),
                     slug,
+                    1 if activating_new_build else 0,
+                    existing_live_build_id,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise TakyonError("durable product build pointer changed during activation")
             checkout_branding: dict[str, Any] = {}
             if (
                 publish_status == "published"
@@ -21092,15 +22423,25 @@ class TakyonStore:
                     public_url=effective_public_url,
                     live_build_id=effective_live_build_id,
                 )
-            if effective_live_build_id:
+            if activating_new_build:
+                if existing_live_build_id and existing_live_build_id != effective_live_build_id:
+                    conn.execute(
+                        "UPDATE product_builds SET status = 'previous', servable_until = ?, "
+                        "activation_state = 'previous', activation_error = NULL "
+                        "WHERE business_slug = ? AND build_id = ?",
+                        (previous_servable_until, slug, existing_live_build_id),
+                    )
                 conn.execute(
                     """
                     INSERT INTO product_builds (
                       build_id, business_slug, source_revision, artifact_prefix,
                       checkout_branding_params_json, action_bundle_json,
-                      action_bundle_sha256, status, created_at
+                      action_bundle_sha256, status, activated_at, servable_until,
+                      activation_state, activation_attempt_id,
+                      activation_previous_build_id, activation_previous_servable_until,
+                      activation_error, activation_prior_r2_previous_pointer, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'built', ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'live', ?, NULL, 'pointer_pending', ?, ?, ?, NULL, ?, ?)
                     ON CONFLICT(build_id) DO UPDATE SET
                       business_slug = excluded.business_slug,
                       source_revision = excluded.source_revision,
@@ -21123,7 +22464,16 @@ class TakyonStore:
                         THEN excluded.action_bundle_sha256
                         ELSE product_builds.action_bundle_sha256
                       END,
-                      status = excluded.status
+                      status = 'live',
+                      activated_at = excluded.activated_at,
+                      servable_until = NULL,
+                      activation_state = 'pointer_pending',
+                      activation_attempt_id = excluded.activation_attempt_id,
+                      activation_previous_build_id = excluded.activation_previous_build_id,
+                      activation_previous_servable_until = excluded.activation_previous_servable_until,
+                      activation_error = NULL,
+                      activation_prior_r2_previous_pointer = excluded.activation_prior_r2_previous_pointer,
+                      legacy_unbound_until = NULL
                     """,
                     (
                         effective_live_build_id,
@@ -21133,6 +22483,11 @@ class TakyonStore:
                         _json_dumps(checkout_branding),
                         action_bundle_json,
                         action_bundle_sha256,
+                        _now(),
+                        activation_attempt_id,
+                        existing_live_build_id,
+                        previous_servable_until,
+                        activation_prior_r2_previous_pointer,
                         _now(),
                     ),
                 )
@@ -21166,6 +22521,13 @@ class TakyonStore:
                 "attempted_publish_status": publish_status,
                 "preserved_live_state": preserve_live_state,
                 "checkout_branding_fingerprint": checkout_branding.get("fingerprint"),
+                "activation_attempt_id": activation_attempt_id if activating_new_build else "",
+                "activation_state": "pointer_pending" if activating_new_build else "",
+                "previous_build_id": existing_live_build_id if activating_new_build else "",
+                "previous_servable_until": previous_servable_until if activating_new_build else "",
+                "prior_r2_previous_pointer": (
+                    activation_prior_r2_previous_pointer if activating_new_build else ""
+                ),
             }
 
         if action == "business.money_shape.set":
@@ -22946,6 +24308,9 @@ class TakyonStore:
                 "milestones": milestones_payload,
                 "posted_at": _now(),
             }
+            operator_task = _active_operator_task_receipt_context()
+            if operator_task:
+                event_payload["operator_task"] = operator_task
             event_id = self._record_event(
                 conn,
                 scope=target_scope,
@@ -25049,6 +26414,28 @@ def _finalize_product_surface_refresh(
 
     _assert_active_worker_claim(store, f"product refresh for business:{business}")
 
+    activation_reconciliation = _reconcile_pending_product_build_activation(
+        store,
+        business,
+    )
+    if activation_reconciliation.get("status") == "blocked":
+        blocker = str(
+            activation_reconciliation.get("blocker")
+            or "pending product activation requires reconciliation"
+        )
+        return {
+            "status": "blocked",
+            "kind": "static_site",
+            "source_path": source_path,
+            "receipt_path": receipt_path,
+            "error": blocker,
+            "blocker": blocker,
+            "activation_reconciliation": activation_reconciliation,
+        }
+    reconciled_surface = activation_reconciliation.get("surface")
+    if isinstance(reconciled_surface, Mapping):
+        surface = dict(reconciled_surface)
+
     surface_with_workflow = {
         **surface,
         "product_workflow": _surface_product_workflow_shape(surface),
@@ -25076,6 +26463,7 @@ def _finalize_product_surface_refresh(
         _scaffold_theme_unfinished_blocker(refresh),
         _scaffold_visible_shell_unfinished_blocker(refresh),
         _app_access_gate_null_unfinished_blocker(refresh),
+        _appkit_subscription_cancellation_unfinished_blocker(refresh),
         _requested_workflow_unfinished_blocker(refresh),
     ):
         if blocker:
@@ -25123,14 +26511,196 @@ def _finalize_product_surface_refresh(
         ][:8],
     )
     if refresh.get("status") == "passed":
-        # The build/typecheck may take minutes. Re-check the exact claim generation AFTER it and
-        # immediately before any live artifact upload; a superseded worker may inspect its partial,
-        # but it may never publish it.
+        # The build/typecheck may take minutes. Re-check after it, then upload immutable objects
+        # without a DB row lock; the narrow pointer guard below re-checks and fences only the DB +
+        # R2 live-pointer activation, so heartbeats are never blocked across SSH/copy/object uploads.
         _assert_active_worker_claim(store, f"product publish for business:{business}")
-        with _hold_active_worker_claim_for_publish(
-            store,
-            f"live product pointer activation for business:{business}",
-        ):
+        with nullcontext():
+            publish_attempt_id = uuid.uuid4().hex
+
+            def _stage_immutable_build(build: dict[str, Any]) -> None:
+                build_id = str(build.get("build_id") or "").strip().lower()
+                store.commit(
+                    scope=f"business:{business}/app",
+                    operations=[
+                        {
+                            "action": "app.surface.stage_build",
+                            "business": business,
+                            **build,
+                        }
+                    ],
+                    idempotency_key=f"product-build-stage:{business}:{build_id}",
+                    reason="stage immutable product action bundle before public pointer activation",
+                    actor="runtime",
+                )
+
+            def _activation_result(commit_result: Mapping[str, Any]) -> dict[str, Any]:
+                results = commit_result.get("results")
+                if not isinstance(results, list) or not results or not isinstance(results[0], Mapping):
+                    raise TakyonError("product build activation returned no durable receipt")
+                return dict(results[0])
+
+            def _activate_immutable_build(build: dict[str, Any]) -> Mapping[str, Any]:
+                build_id = str(build.get("build_id") or "").strip().lower()
+                expected_previous_build_id = str(
+                    surface.get("live_build_id") or ""
+                ).strip().lower()
+                if "observed_current_build_id" in build:
+                    observed_current_build_id = str(
+                        build.get("observed_current_build_id") or ""
+                    ).strip().lower()
+                    if observed_current_build_id != expected_previous_build_id:
+                        raise TakyonError(
+                            "public edge pointer drifted before activation: expected "
+                            f"{expected_previous_build_id or '<none>'}, found "
+                            f"{observed_current_build_id or '<none>'}"
+                        )
+                activation_operation = {
+                    "action": "app.surface.publish_result",
+                    "business": business,
+                    "publish_status": "published",
+                    "publish_target": publish_target,
+                    "public_url": build.get("public_url") or publish_target,
+                    "published_at": build.get("published_at") or _now(),
+                    "live_build_id": build_id,
+                    "live_probe_status": "unknown",
+                    "live_probe_detail": "",
+                    "receipt_path": receipt_path,
+                    "publish_source_path": build.get("publish_source_path") or source_path,
+                    "artifact_prefix": build.get("artifact_prefix") or "",
+                    "action_bundle_json": build.get("action_bundle_json") or "",
+                    "action_bundle_sha256": build.get("action_bundle_sha256") or "",
+                    "source_revision": int(build.get("source_revision") or 0),
+                    "expected_previous_build_id": expected_previous_build_id,
+                    "activation_attempt_id": publish_attempt_id,
+                    "activation_prior_r2_previous_pointer": str(
+                        build.get("prior_r2_previous_pointer") or ""
+                    ),
+                    "blocker": "",
+                }
+                commit_result: Mapping[str, Any] | None = None
+                last_activation_error: BaseException | None = None
+                # A connection can fail after COMMIT. The exact same idempotency key either adopts
+                # that committed receipt or repeats the deterministic failure without a second flip.
+                for _attempt in range(2):
+                    try:
+                        commit_result = store.commit(
+                            scope=f"business:{business}/app",
+                            operations=[activation_operation],
+                            idempotency_key=(
+                                f"product-build-activate:{business}:{build_id}:{publish_attempt_id}"
+                            ),
+                            reason="activate immutable product build while publish claim is fenced",
+                            actor="runtime",
+                        )
+                        break
+                    except Exception as exc:
+                        last_activation_error = exc
+                if commit_result is None:
+                    assert last_activation_error is not None
+                    raise last_activation_error
+                durable_receipt = _activation_result(commit_result)
+                # A connection failure after COMMIT is ambiguous. Read the durable pointer before
+                # the caller considers activation complete or rolls the public edge back.
+                with store._connect() as verify_conn:
+                    verified_surface = store._app_surface_contract(verify_conn, business)
+                if str(verified_surface.get("live_build_id") or "").strip().lower() != build_id:
+                    raise TakyonError(
+                        f"durable live build pointer did not activate {build_id}"
+                    )
+                return durable_receipt
+
+            def _finalize_immutable_build(build: dict[str, Any]) -> None:
+                build_id = str(build.get("build_id") or "").strip().lower()
+                store.commit(
+                    scope=f"business:{business}/app",
+                    operations=[
+                        {
+                            "action": "app.surface.finalize_build_activation",
+                            "business": business,
+                            "build_id": build_id,
+                            "activation_attempt_id": publish_attempt_id,
+                        }
+                    ],
+                    idempotency_key=(
+                        f"product-build-finalize:{business}:{build_id}:{publish_attempt_id}"
+                    ),
+                    reason="finalize verified public product pointer",
+                    actor="runtime",
+                )
+
+            def _mark_ambiguous_build_activation(build: dict[str, Any]) -> None:
+                build_id = str(build.get("build_id") or "").strip().lower()
+                store.commit(
+                    scope=f"business:{business}/app",
+                    operations=[
+                        {
+                            "action": "app.surface.mark_build_activation_ambiguous",
+                            "business": business,
+                            "build_id": build_id,
+                            "activation_attempt_id": publish_attempt_id,
+                            "error": str(build.get("error") or "")[:2000],
+                        }
+                    ],
+                    idempotency_key=(
+                        f"product-build-ambiguous:{business}:{build_id}:{publish_attempt_id}"
+                    ),
+                    reason="record unresolved public product pointer state",
+                    actor="runtime",
+                )
+
+            def _rollback_immutable_build(build: dict[str, Any]) -> dict[str, Any]:
+                failed_build_id = str(build.get("failed_build_id") or "").strip().lower()
+                previous_build_id = str(build.get("previous_build_id") or "").strip().lower()
+                commit_result = store.commit(
+                    scope=f"business:{business}/app",
+                    operations=[
+                        {
+                            "action": "app.surface.rollback_build_activation",
+                            "business": business,
+                            "failed_build_id": failed_build_id,
+                            "previous_build_id": previous_build_id,
+                            "activation_attempt_id": publish_attempt_id,
+                            "previous_publish_status": surface.get("publish_status") or "not_published",
+                            "previous_publish_target": surface.get("publish_target") or publish_target,
+                            "previous_public_url": surface.get("public_url") or "",
+                            "previous_published_at": surface.get("published_at") or "",
+                            "previous_live_probe_status": surface.get("live_probe_status") or "unknown",
+                            "previous_live_probe_detail": surface.get("live_probe_detail") or "",
+                            "previous_publish_receipt_path": surface.get("publish_receipt_path") or "",
+                            "previous_publish_blocker": surface.get("publish_blocker") or "",
+                        }
+                    ],
+                    idempotency_key=(
+                        f"product-build-rollback:{business}:{failed_build_id}:"
+                        f"{publish_attempt_id}"
+                    ),
+                    reason="restore the prior durable build after public pointer activation failed",
+                    actor="runtime",
+                )
+                with store._connect() as verify_conn:
+                    verified_surface = store._app_surface_contract(verify_conn, business)
+                verified_build_id = str(
+                    verified_surface.get("live_build_id") or ""
+                ).strip().lower()
+                if verified_build_id != previous_build_id:
+                    raise TakyonError(
+                        "durable build rollback did not restore "
+                        f"{previous_build_id or 'the unpublished state'}"
+                    )
+                return {
+                    "rolled_back": True,
+                    "live_build_id": verified_build_id,
+                    "commit": commit_result,
+                }
+
+            def _pointer_guard():
+                return _hold_active_worker_claim_for_publish(
+                    store,
+                    f"live product pointer activation for business:{business}",
+                    business=business,
+                )
+
             publish = _publish_product_surface_path(
                 business_root=store._business_root(business),
                 slug=business,
@@ -25138,6 +26708,12 @@ def _finalize_product_surface_refresh(
                 publish_target=publish_target,
                 source_revision=getattr(store, "_canonical_workspace_revision", lambda _slug: 0)(business),
                 surface=surface,
+                stage_build=_stage_immutable_build,
+                activate_build=_activate_immutable_build,
+                finalize_build=_finalize_immutable_build,
+                mark_activation_ambiguous=_mark_ambiguous_build_activation,
+                rollback_build=_rollback_immutable_build,
+                pointer_guard=_pointer_guard,
             )
     else:
         publish = {
@@ -25159,12 +26735,31 @@ def _finalize_product_surface_refresh(
         "public_url": publish.get("public_url") or inventory.get("public_url") or "",
         "publish_receipt_path": receipt_path,
     }
-    product_workflow = _surface_product_workflow_shape(surface)
+    verification_surface = {
+        **surface,
+        "live_build_id": str(
+            publish.get("live_build_id") or surface.get("live_build_id") or ""
+        ).strip(),
+    }
+    verification_root = store._business_root(business) / str(
+        refresh.get("source_path") or source_path
+    )
     with store._connect() as conn:
+        live_action_verification = _requested_live_action_execution_verification_state(
+            conn,
+            business=business,
+            root=verification_root,
+            surface=verification_surface,
+        )
+        verification_actions = [
+            {"name": name, "trigger": "http"}
+            for name in (live_action_verification.get("actions") or [])
+            if str(name or "").strip()
+        ]
         action_invocations = takyon_app_actions.summarize_action_invocations(
             conn,
             business,
-            product_workflow.get("actions"),
+            verification_actions or _surface_product_workflow_shape(surface).get("actions"),
         )
     return {
         **refresh,
@@ -25174,6 +26769,7 @@ def _finalize_product_surface_refresh(
         "publish": publish,
         "inventory": inventory,
         "action_invocations": action_invocations,
+        "live_action_execution_verification": live_action_verification,
         "blocker": "" if publish.get("status") == "published" and refresh.get("status") == "passed" else (_surface_refresh_exact_blocker(refresh, publish) or "product surface is not published"),
         "source": refresh_source,
     }
@@ -25236,7 +26832,7 @@ def _product_surface_refresh_operations(
                 "metadata": surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {},
             }
         )
-    if activate_on_success:
+    if activate_on_success and not bool(publish.get("database_build_activated")):
         operations.append(
             {
                 "action": "app.surface.publish_result",
@@ -26515,7 +28111,6 @@ def handle_business_cancel_app_subscription(args: dict, **_: Any) -> str:
                         business_slug=business,
                         app_user_id=user.id,
                         session_token=session_token,
-                        cancel_at_period_end=True,
                     )
                 except LookupError as exc:
                     raise TakyonError("no cancelable Stripe subscription found") from exc
@@ -26527,8 +28122,8 @@ def handle_business_cancel_app_subscription(args: dict, **_: Any) -> str:
                     payload={
                         "app_user_id": user.id,
                         "stripe_subscription_id": outcome.get("stripe_subscription_id"),
-                        "cancel_at_period_end": bool(outcome.get("cancel_at_period_end")),
-                        "already_canceling": bool(outcome.get("already_canceling")),
+                        "effective_immediately": True,
+                        "already_canceled": bool(outcome.get("already_canceled")),
                         "authority": "safebox",
                     },
                 )
@@ -27938,6 +29533,7 @@ def handle_business_invoke_app_action(args: dict, **_: Any) -> str:
             trigger="http",
             idempotency_key=idempotency_key,
             bound_origin=str(args.get("bound_origin") or ""),
+            expected_live_build_id=str(args.get("expected_live_build_id") or ""),
         )
         return tool_result(result)
     except Exception as exc:
@@ -29130,20 +30726,181 @@ def handle_business_x_publish_outreach(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def _record_scoped_bootstrap_x_outcome(
+    store: "TakyonStore",
+    business: str,
+    *,
+    operator_task: Mapping[str, Any],
+    status: str,
+    blocker: str = "",
+    post_id: str = "",
+    post_url: str = "",
+    receipt_path: str = "",
+    receipt_sha256: str = "",
+    receipt_sent: bool = False,
+    external_side_effects: str = "",
+    source: str = "",
+    review_required: bool = False,
+) -> dict[str, Any] | None:
+    """Persist canonical attempt-scoped X outcome evidence without changing provider authority."""
+    task_kind = str(operator_task.get("task_kind") or "").strip().lower()
+    run_id = str(operator_task.get("run_id") or "").strip()
+    try:
+        attempt = int(operator_task.get("attempt") or 0)
+    except (TypeError, ValueError):
+        attempt = 0
+    normalized_status = str(status or "").strip().lower()
+    if task_kind != "ceo_bootstrap" or not run_id or attempt < 1:
+        return None
+    if normalized_status not in {"published", "blocked"}:
+        return None
+    payload = {
+        "status": normalized_status,
+        "operator_task": {
+            "task_kind": task_kind,
+            "run_id": run_id,
+            "attempt": attempt,
+        },
+        "blocker": str(blocker or "").strip(),
+        "post_id": str(post_id or "").strip(),
+        "post_url": str(post_url or "").strip(),
+        "receipt_path": str(receipt_path or "").strip(),
+        "receipt_sha256": str(receipt_sha256 or "").strip().lower(),
+        "receipt_sent": bool(receipt_sent),
+        "external_side_effects": str(external_side_effects or "").strip().lower(),
+        "source": str(source or "").strip(),
+        "review_required": bool(review_required),
+    }
+    outcome_digest = hashlib.sha256(_json_dumps(payload).encode("utf-8")).hexdigest()[:24]
+    payload["recorded_at"] = _now()
+    return store.commit(
+        scope=f"business:{business}",
+        operations=[
+            {
+                "action": "event.record",
+                "business": business,
+                "scope": f"business:{business}",
+                "event_type": "bootstrap.x_launch.outcome",
+                "payload": payload,
+            }
+        ],
+        idempotency_key=(
+            f"bootstrap-x-outcome:{run_id}:{attempt}:{normalized_status}:{outcome_digest}"
+        ),
+        reason="record attempt-scoped bootstrap X launch outcome",
+        actor="runtime",
+    )
+
+
 def _handle_live_business_x_publish_outreach(args: dict) -> str:
     try:
         store = _store()
         business = _resolved_business_slug(args, required=True)
+        operator_task = _active_operator_task_receipt_context()
         # Launch-post dedupe: a ceo_bootstrap turn publishes EXACTLY ONE launch X post. A
         # re-enqueued bootstrap (retry after a crash, or a spill to the fallback worker) would
         # otherwise post a SECOND launch tweet (walkloop double-post, 2026-07-09). If a successful X
-        # post receipt already exists for this business, the launch moment has passed — skip
-        # re-posting and return the existing post. Steady-state wakes (ceo_wake) and explicit chat
-        # posts carry no bootstrap marker, so they are unaffected and post freely.
+        # post receipt already exists for this SAME bootstrap run, the launch moment has passed —
+        # skip re-posting and explicitly adopt it for the current attempt. A business-wide legacy
+        # receipt or a receipt owned by another bootstrap must never become current proof merely
+        # because it is newest; block for review rather than duplicate-post or lie. Steady-state
+        # wakes (ceo_wake) and explicit chat posts carry no bootstrap marker, so they are unaffected.
         if _active_operator_task_kind() == "ceo_bootstrap":
             _existing_x = _x_outreach_receipt_candidates(store, business)
             if _existing_x:
-                _top = _existing_x[0]
+                current_run_id = str(operator_task.get("run_id") or "").strip()
+                try:
+                    current_attempt = int(operator_task.get("attempt") or 0)
+                except (TypeError, ValueError):
+                    current_attempt = 0
+
+                def _receipt_task(item: Mapping[str, Any]) -> dict[str, Any]:
+                    receipt = item.get("receipt") if isinstance(item.get("receipt"), Mapping) else {}
+                    top_level = (
+                        receipt.get("operator_task")
+                        if isinstance(receipt.get("operator_task"), Mapping)
+                        else {}
+                    )
+                    metadata = receipt.get("metadata") if isinstance(receipt.get("metadata"), Mapping) else {}
+                    nested = (
+                        metadata.get("operator_task")
+                        if isinstance(metadata.get("operator_task"), Mapping)
+                        else {}
+                    )
+                    return dict(top_level or nested)
+
+                scoped_match: dict[str, Any] | None = None
+                for candidate in _existing_x:
+                    candidate_task = _receipt_task(candidate)
+                    candidate_run_id = str(candidate_task.get("run_id") or "").strip()
+                    try:
+                        candidate_attempt = int(candidate_task.get("attempt") or 0)
+                    except (TypeError, ValueError):
+                        candidate_attempt = 0
+                    if (
+                        str(candidate_task.get("task_kind") or "").strip().lower()
+                        == "ceo_bootstrap"
+                        and current_run_id
+                        and candidate_run_id == current_run_id
+                        and 0 < candidate_attempt <= current_attempt
+                    ):
+                        scoped_match = candidate
+                        break
+
+                if scoped_match is None:
+                    stale = _existing_x[0]
+                    stale_task = _receipt_task(stale)
+                    stale_owner = str(stale_task.get("run_id") or "unscoped legacy receipt").strip()
+                    blocker = (
+                        f"existing X receipt {stale.get('receipt_rel') or '<unknown>'} belongs to "
+                        f"{stale_owner}, not bootstrap {current_run_id or '<missing>'} attempt "
+                        f"{current_attempt or '<missing>'}; refused stale launch proof and duplicate post"
+                    )
+                    _record_scoped_bootstrap_x_outcome(
+                        store,
+                        business,
+                        operator_task=operator_task,
+                        status="blocked",
+                        blocker=blocker,
+                        receipt_path=str(stale.get("receipt_rel") or ""),
+                        source="stale_receipt_scope_guard",
+                        review_required=True,
+                    )
+                    return tool_result(
+                        {
+                            "success": False,
+                            "blocked": True,
+                            "review_required": True,
+                            "action": "business_x_publish_outreach",
+                            "business": business,
+                            "status": "blocked_stale_x_receipt_scope",
+                            "receipt_path": stale.get("receipt_rel"),
+                            "error": blocker,
+                            "note": (
+                                "No post was sent. Review or explicitly reconcile the historical "
+                                "receipt before treating this bootstrap launch as complete."
+                            ),
+                        }
+                    )
+
+                _top = scoped_match
+                _record_scoped_bootstrap_x_outcome(
+                    store,
+                    business,
+                    operator_task=operator_task,
+                    status="published",
+                    post_id=str(_top.get("post_id") or ""),
+                    post_url=str(_top.get("post_url") or ""),
+                    receipt_path=str(_top.get("receipt_rel") or ""),
+                    receipt_sha256=hashlib.sha256(
+                        Path(_top["receipt_abs"]).read_bytes()
+                    ).hexdigest(),
+                    receipt_sent=bool((_top.get("receipt") or {}).get("sent")),
+                    external_side_effects=str(
+                        (_top.get("receipt") or {}).get("external_side_effects") or ""
+                    ),
+                    source="deduped_existing_receipt",
+                )
                 return tool_result(
                     {
                         "success": True,
@@ -29167,18 +30924,29 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
             business_row = store._ensure_business(conn, business)
             business_mode = _effective_business_mode(business_row.get("mode"))
             canonical_product_url = _canonical_product_url(store, conn, business)
-            canonical_product_url = _canonical_product_url(store, conn, business)
 
         body, canonical_replacements = _canonicalize_business_product_links(
             body,
             business=business,
             canonical_url=canonical_product_url,
         )
-        metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}
+        caller_metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}
+        # Parent-task identity is runtime-owned evidence. Never let a model/tool caller forge the
+        # bootstrap job/attempt by smuggling ``operator_task`` through metadata; the bound runtime
+        # context below is the only source allowed into the queued child and its durable receipt.
+        metadata = {
+            key: value
+            for key, value in caller_metadata.items()
+            if str(key) != "operator_task"
+        }
         metadata = {
             **metadata,
             "canonical_product_url": canonical_product_url,
         }
+        if operator_task:
+            # Runtime-owned provenance overrides any model-supplied metadata. The X child job and
+            # receipt retain this exact parent ``(run_id, attempt)`` after context switches.
+            metadata["operator_task"] = dict(operator_task)
         if canonical_replacements:
             metadata["canonicalized_product_links"] = canonical_replacements
         if media_paths:
@@ -29258,10 +31026,22 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
                 metadata=metadata,
             )
             if not credit_gate.get("success"):
+                _record_scoped_bootstrap_x_outcome(
+                    store,
+                    business,
+                    operator_task=operator_task,
+                    status="blocked",
+                    blocker=str(
+                        credit_gate.get("error") or "x publish blocked on creative credits"
+                    ),
+                    source="creative_credit_preflight",
+                    review_required=True,
+                )
                 return tool_result(
                     {
                         "success": False,
                         "blocked": True,
+                        "review_required": True,
                         "action": "business_x_publish_outreach",
                         "business": business,
                         "channel": channel,
@@ -33298,6 +35078,56 @@ def _inject_umami_snippet(site_root: Path) -> bool:
     return True
 
 
+def _inject_live_build_identity(site_root: Path, build_id: str) -> int:
+    """Bake the immutable build id into every published HTML entrypoint.
+
+    The shared runtime client forwards this id on API calls, binding browser bytes to the matching
+    action bundle while R2 and the database pointers advance through a bounded A/B window.
+    """
+    normalized = str(build_id or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", normalized):
+        raise TakyonError("live build id is invalid")
+    marker = (
+        f'<meta name="takyon-live-build-id" content="{normalized}">'
+        f'<script data-takyon-live-build-id="{normalized}">'
+        f'globalThis.__TAKYON_LIVE_BUILD_ID__={json.dumps(normalized)};'
+        "</script>"
+    )
+    changed = 0
+    for index_path in sorted(site_root.rglob("*.html"))[:200]:
+        if not index_path.is_file() or index_path.is_symlink():
+            continue
+        try:
+            text = index_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        # Re-publishing the same dist is idempotent; a prior marker for another build is replaced.
+        text = re.sub(
+            r'<meta\s+name=["\']takyon-live-build-id["\'][^>]*>\s*',
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r'<script\s+data-takyon-live-build-id=["\'][^"\']+["\'][^>]*>.*?</script>\s*',
+            "",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        close_head = text.lower().find("</head>")
+        if close_head < 0:
+            html_open = re.search(r"<html(?:\s[^>]*)?>", text, flags=re.IGNORECASE)
+            close_head = html_open.end() if html_open else 0
+        index_path.write_text(
+            text[:close_head] + marker + text[close_head:],
+            encoding="utf-8",
+        )
+        changed += 1
+    if changed < 1:
+        raise TakyonError("published product has no HTML entrypoint for build identity")
+    return changed
+
+
 def _republish_live_dist_to_r2(slug: str, live_root: Path) -> dict[str, Any]:
     """Publish the already-built live dist to R2 under a NEW content-addressed build_id and flip
     the pointer. Used by meta_pixel_ensure after injecting the snippet into the live dist: the edge
@@ -35658,11 +37488,17 @@ def handle_business_update_conversation_message_status(args: dict, **_: Any) -> 
 
 
 def handle_business_record_event(args: dict, **_: Any) -> str:
+    event_type = str(args.get("event_type") or "event").strip() or "event"
+    if event_type.lower().startswith("bootstrap."):
+        return tool_error(
+            "event_type namespace bootstrap.* is runtime-reserved and cannot be written by business_record_event",
+            success=False,
+        )
     operation = {
         "action": "event.record",
         "business": args.get("business"),
         "scope": args.get("scope") or _business_scope(args),
-        "event_type": args.get("event_type") or "event",
+        "event_type": event_type,
         "payload": args.get("payload") or {},
     }
     return _commit_tool(args, operation, scope=operation["scope"])
@@ -36249,6 +38085,18 @@ def _run_operator_task_on_worker(
     """Enqueue one worker-executed tool run and attach to it: poll the run row until terminal (return
     the recorded tool result verbatim) or until this caller's wait budget expires (return a detached
     'running' handle; the run keeps executing on the worker)."""
+    worker_payload: dict[str, Any] = {"tool": tool_name, "args": deferred_args}
+    parent_operator_task = _active_operator_task_receipt_context()
+    if (
+        str(parent_operator_task.get("task_kind") or "").strip().lower()
+        == "ceo_bootstrap"
+        and str(parent_operator_task.get("run_id") or "").strip()
+        and int(parent_operator_task.get("attempt") or 0) > 0
+    ):
+        # This exact relationship is the only durable bridge from a parent bootstrap watchdog to a
+        # deferred child. Business-wide child liveness would let an unrelated/stale child for the
+        # same slug pin a newer bootstrap attempt forever.
+        worker_payload["parent_operator_task"] = dict(parent_operator_task)
     commit = store.commit(
         scope=f"business:{business}",
         operations=[
@@ -36257,7 +38105,7 @@ def _run_operator_task_on_worker(
                 "business": business,
                 "kind": kind,
                 "worker_queue": True,
-                "payload": {"tool": tool_name, "args": deferred_args},
+                "payload": worker_payload,
             }
         ],
         idempotency_key=commit_idempotency_key,
@@ -37259,6 +39107,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                                 env=worker_env,
                                 business=business,
                                 workspace_rel=workspace_rel,
+                                claim_store=active_store,
                             )
                             if not _retryable_docker_bind_mount_failure(
                                 proc,
@@ -37290,6 +39139,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             env=worker_env,
                             business=business,
                             workspace_rel=workspace_rel,
+                            claim_store=active_store,
                         )
                 except subprocess.TimeoutExpired:
                     # Wall-clock wedge: the worker subprocess ran past timeoutMs+30s and
@@ -37305,6 +39155,10 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     # path active_store is still the scratch-mounted store (the readback reassignment
                     # only happens on the success path), so the sync persists the partial scratch.
                     worker_actual_cents = None  # don't carry a prior attempt's parsed cost into the estimate settle
+                    _assert_active_worker_claim(
+                        active_store,
+                        f"preserving timed-out Claude worker source for business:{business}",
+                    )
                     try:
                         partial_sync_status = active_store._sync_business_workspace_remote(business)
                     except Exception:
@@ -37373,7 +39227,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             "Claude Agent SDK output blocked because source files were written under a "
                             f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
                         )
-                if sdk_result.get("success") and taste_guidance_active:
+                if (sdk_result.get("success") or sdk_result.get("timed_out")) and taste_guidance_active:
                     design_contract, design_contract_blocker = _read_taste_design_contract(
                         workspace_path
                     )
@@ -37426,6 +39280,10 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     # A worker build that cannot reach durable state is NOT a success: fail
                     # closed with an exact blocker rather than reporting success while the
                     # scratch tree (and its real edits) is discarded on exit.
+                    _assert_active_worker_claim(
+                        active_store,
+                        f"persisting Claude worker source for business:{business}",
+                    )
                     sync_status = active_store._sync_business_workspace_remote(business)
                     sdk_result = {**sdk_result, "workspace_sync_status": sync_status}
                     if sync_status != "synced":
@@ -37512,6 +39370,11 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     bool(sdk_result.get("timed_out"))
                     and str(sdk_result.get("partial_workspace_sync_status") or "") == "synced"
                     and customer_facing_product_workspace
+                    and not str(sdk_result.get("blocker") or "").strip()
+                    and (
+                        not taste_guidance_active
+                        or isinstance(sdk_result.get("taste_design_contract"), dict)
+                    )
                 )
                 if (sdk_result.get("success") or publishable_partial) and refresh_surface:
                     summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"])
@@ -37689,6 +39552,50 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             if surface_refresh and surface_refresh.get("blocker"):
                 status = "blocked"
             record_operations: list[dict[str, Any]] = []
+            taste_review_required = bool(
+                taste_guidance_active
+                and (status != "completed" or bool(sdk_result.get("timed_out")))
+            )
+            taste_review_blocker = ""
+            if taste_review_required:
+                taste_review_blocker = str(
+                    sdk_result.get("error")
+                    or sdk_result.get("summary")
+                    or (surface_refresh or {}).get("blocker")
+                    or _surface_refresh_exact_blocker(surface_refresh or {})
+                    or "the bounded Taste session did not produce a publishable product"
+                ).strip()
+                sdk_result["review_required"] = True
+                sdk_result["review_blocker"] = taste_review_blocker
+                operator_task = _active_operator_task_receipt_context()
+                if (
+                    str(operator_task.get("task_kind") or "").strip().lower()
+                    == "ceo_bootstrap"
+                    and str(operator_task.get("run_id") or "").strip()
+                    and int(operator_task.get("attempt") or 0) > 0
+                ):
+                    # One failed OR timed-out bounded Taste session is terminal for automation, even
+                    # when its preserved partial happens to compile and publish. A passing partial is
+                    # not proof that Taste completed its full preflight. Persist the exact parent
+                    # attempt atomically with the worker record so the CEO watchdog stops before it
+                    # can start a fresh Taste call or requeue the whole bootstrap.
+                    record_operations.append(
+                        {
+                            "action": "event.record",
+                            "business": business,
+                            "scope": f"business:{business}",
+                            "event_type": "bootstrap.human_review_required",
+                            "payload": {
+                                "operator_task": dict(operator_task),
+                                "source": "taste_worker",
+                                "workspace": workspace_rel,
+                                "guidance_skills": resolved_guidance_skills,
+                                "timed_out": bool(sdk_result.get("timed_out")),
+                                "blocker": taste_review_blocker,
+                                "review_required": True,
+                            },
+                        }
+                    )
             if surface_refresh:
                 record_operations.extend(
                     _product_surface_refresh_operations(
@@ -37726,9 +39633,15 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         "workspace_durability": sdk_result.get("workspace_durability"),
                         "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
                         "taste_design_contract": sdk_result.get("taste_design_contract"),
+                        "review_required": bool(sdk_result.get("review_required")),
+                        "review_blocker": sdk_result.get("review_blocker"),
                         "surface_refresh": surface_refresh,
                     },
                 }
+            )
+            _assert_active_worker_claim(
+                active_store,
+                f"recording Claude worker outcome for business:{business}",
             )
             agent_record = active_store.commit(
                 scope=f"business:{business}",
@@ -37801,6 +39714,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "workspace_durability": sdk_result.get("workspace_durability"),
             "taste_design_contract": sdk_result.get("taste_design_contract"),
             "timed_out": bool(sdk_result.get("timed_out")),
+            "review_required": bool(sdk_result.get("review_required")),
+            "review_blocker": sdk_result.get("review_blocker"),
             "partial_workspace_sync_status": sdk_result.get("partial_workspace_sync_status"),
             "error": sdk_result.get("error"),
             "worker_returncode": sdk_result.get("worker_returncode"),

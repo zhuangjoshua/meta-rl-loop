@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -486,6 +487,40 @@ def stripe_request(
         method=stripe_method,
         idempotency_key=idempotency_key,
     )
+
+
+_STRIPE_SUBSCRIPTION_ID_RE = re.compile(r"\Asub_[A-Za-z0-9]+\Z")
+
+
+def cancel_stripe_subscription_immediately(subscription_id: str) -> dict[str, Any]:
+    """Cancel one exact Stripe subscription now and return terminal provider truth.
+
+    This helper is intentionally callable only inside the dedicated app-subscription authority
+    route (or the local Safebox authority path), never through the generic Stripe tunnel. The
+    read-after-error arm closes the small crash/retry window where Stripe committed a prior DELETE
+    but Takyon did not yet persist its response: a retrievable terminal object makes the retry an
+    idempotent success; any other provider error still fails closed.
+    """
+    sid = str(subscription_id or "").strip()
+    if not _STRIPE_SUBSCRIPTION_ID_RE.fullmatch(sid):
+        raise ValueError("invalid Stripe subscription id")
+    from . import stripe_util
+
+    try:
+        return stripe_request(f"subscriptions/{sid}", {}, method="DELETE")
+    except stripe_util.StripeError as cancel_error:
+        try:
+            existing = stripe_request(f"subscriptions/{sid}", {}, method="GET")
+        except stripe_util.StripeError:
+            raise cancel_error
+        if (
+            isinstance(existing, dict)
+            and str(existing.get("id") or "").strip() == sid
+            and str(existing.get("status") or "").strip().lower()
+            in {"canceled", "cancelled"}
+        ):
+            return existing
+        raise cancel_error
 
 
 def send_postmark_email(
@@ -2612,9 +2647,8 @@ def cancel_app_subscription(
     business_slug: str,
     app_user_id: str,
     session_token: str,
-    cancel_at_period_end: bool = True,
 ) -> dict[str, Any]:
-    """Cancel one product-app Stripe subscription through Safebox authority."""
+    """Immediately cancel one product-app Stripe subscription through Safebox authority."""
     business = str(business_slug or "").strip()
     user = str(app_user_id or "").strip()
     token = str(session_token or "").strip()
@@ -2633,7 +2667,6 @@ def cancel_app_subscription(
                     "business_slug": business,
                     "app_user_id": user,
                     "session_token": token,
-                    "cancel_at_period_end": bool(cancel_at_period_end),
                 },
                 timeout=35.0,
             )
@@ -2661,11 +2694,7 @@ def cancel_app_subscription(
             payment_conn,
             business,
             app_user_id=user,
-            cancel_at_period_end=bool(cancel_at_period_end),
-            subscription_updater=lambda subscription_id, should_cancel_at_period_end: stripe_util.stripe_request(
-                f"subscriptions/{subscription_id}",
-                {"cancel_at_period_end": "true" if should_cancel_at_period_end else "false"},
-            ),
+            subscription_canceler=cancel_stripe_subscription_immediately,
         )
 
 

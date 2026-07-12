@@ -20,6 +20,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 import contextlib
 from datetime import datetime, timedelta, timezone
@@ -1746,14 +1747,302 @@ def test_business_owner_user_id_fails_loud_when_row_never_appears(monkeypatch):
     assert "acme" in str(exc.value)
 
 
-# ── ceo_bootstrap_handler done-gate: a completed/published bootstrap must NOT requeue ──────────────
+def test_bootstrap_x_launch_outcome_is_exact_attempt_scoped_and_typed():
+    class _Conn:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def execute(self, _sql, _params):
+            return self
+
+        def fetchall(self):
+            return self.rows
+
+    class _Store:
+        def __init__(self, conn):
+            self.conn = conn
+
+        @contextlib.contextmanager
+        def _connect(self):
+            yield self.conn
+
+    def _row(event_type, payload):
+        return {"event_type": event_type, "payload_json": json.dumps(payload)}
+
+    stale_rows = [
+        _row(
+            "bootstrap.x_launch.outcome",
+            {
+                "status": "published",
+                "operator_task": {"task_kind": "ceo_bootstrap", "run_id": "old-job", "attempt": 1},
+            },
+        ),
+        _row(
+            "bootstrap.x_launch.outcome",
+            {
+                "status": "blocked",
+                "operator_task": {"task_kind": "ceo_bootstrap", "run_id": "job-1", "attempt": 1},
+            },
+        ),
+        # Legacy business-wide blocker has no exact parent identity and must not be inherited.
+        _row(
+            "business.operator_update",
+            {"milestones": [{"category": "LAUNCH", "status": "blocked"}]},
+        ),
+    ]
+    pending = worker._bootstrap_x_launch_outcome(
+        _Store(_Conn(stale_rows)),
+        "acme",
+        bootstrap_job_id="job-1",
+        bootstrap_attempt=2,
+    )
+    assert pending["status"] == "pending"
+
+    published = worker._bootstrap_x_launch_outcome(
+        _Store(
+            _Conn(
+                [
+                    _row(
+                        "bootstrap.x_launch.outcome",
+                        {
+                            "status": "published",
+                            "operator_task": {
+                                "task_kind": "ceo_bootstrap",
+                                "run_id": "job-1",
+                                "attempt": 2,
+                            },
+                            "post_id": "x-123",
+                            "receipt_path": "metrics/receipts/outreach/x.json",
+                            "receipt_sha256": "a" * 64,
+                            "receipt_sent": True,
+                            "external_side_effects": "sent",
+                            "source": "x_publish_receipt",
+                        },
+                    )
+                ]
+            )
+        ),
+        "acme",
+        bootstrap_job_id="job-1",
+        bootstrap_attempt=2,
+    )
+    assert published["status"] == "published"
+    assert published["post_id"] == "x-123"
+    assert published["receipt_sha256"] == "a" * 64
+    assert published["receipt_sent"] is True
+
+    forged_without_receipt = worker._bootstrap_x_launch_outcome(
+        _Store(
+            _Conn(
+                [
+                    _row(
+                        "bootstrap.x_launch.outcome",
+                        {
+                            "status": "published",
+                            "operator_task": {
+                                "task_kind": "ceo_bootstrap",
+                                "run_id": "job-1",
+                                "attempt": 2,
+                            },
+                            "post_id": "made-up",
+                            "receipt_path": "metrics/receipts/outreach/made-up.json",
+                        },
+                    )
+                ]
+            )
+        ),
+        "acme",
+        bootstrap_job_id="job-1",
+        bootstrap_attempt=2,
+    )
+    assert forged_without_receipt["status"] == "pending"
+
+    blocked = worker._bootstrap_x_launch_outcome(
+        _Store(
+            _Conn(
+                [
+                    _row(
+                        "business.operator_update",
+                        {
+                            "operator_task": {
+                                "task_kind": "ceo_bootstrap",
+                                "run_id": "job-1",
+                                "attempt": 2,
+                            },
+                            "summary": "Launch cannot run yet.",
+                            "milestones": [
+                                {
+                                    "category": "LAUNCH",
+                                    "status": "blocked",
+                                    "description": "no X credit",
+                                }
+                            ],
+                        },
+                    )
+                ]
+            )
+        ),
+        "acme",
+        bootstrap_job_id="job-1",
+        bootstrap_attempt=2,
+    )
+    assert blocked["status"] == "blocked"
+    assert blocked["blocker"] == "no X credit"
+    assert blocked["review_required"] is True
+
+
+def test_operator_task_receipt_context_carries_exact_job_attempt():
+    guard = jobs.JobClaimGuard(job_id="bootstrap-job", worker_id="worker-1", attempt=3)
+    with jobs._bound_job_claim(guard):
+        with core._bound_operator_task_context(
+            run_id="bootstrap-job",
+            task_kind="ceo_bootstrap",
+        ):
+            assert core._active_operator_task_receipt_context() == {
+                "run_id": "bootstrap-job",
+                "task_kind": "ceo_bootstrap",
+                "attempt": 3,
+            }
+
+    assert core._active_operator_task_receipt_context() == {}
+
+
+def test_operator_task_receipt_context_can_bind_parent_attempt_across_child_claim():
+    child_guard = jobs.JobClaimGuard(job_id="child-job", worker_id="worker-1", attempt=1)
+    with jobs._bound_job_claim(child_guard):
+        with core._bound_operator_task_context(
+            run_id="bootstrap-job",
+            task_kind="ceo_bootstrap",
+            attempt=4,
+        ):
+            assert core._active_operator_task_receipt_context() == {
+                "run_id": "bootstrap-job",
+                "task_kind": "ceo_bootstrap",
+                "attempt": 4,
+            }
+
+
+def test_bootstrap_completion_grace_requires_full_web_launch_and_never_arms_for_mobile(monkeypatch):
+    state = {"product": True, "x": False}
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_has_durable_live_product",
+        lambda *_a, **_k: state["product"],
+    )
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_x_launch_outcome",
+        lambda *_a, **_k: {"status": "published" if state["x"] else "pending"},
+    )
+
+    assert worker._bootstrap_ready_for_completion_grace(
+        object(), "acme", workflow_requested=True, archetype="web_saas",
+        bootstrap_job_id="job-1", bootstrap_attempt=1,
+    ) is False
+    state["x"] = True
+    assert worker._bootstrap_ready_for_completion_grace(
+        object(), "acme", workflow_requested=True, archetype="web_saas",
+        bootstrap_job_id="job-1", bootstrap_attempt=1,
+    ) is True
+    assert worker._bootstrap_ready_for_completion_grace(
+        object(), "acme", workflow_requested=True, archetype="mobile_app",
+        bootstrap_job_id="job-1", bootstrap_attempt=1,
+    ) is False
+
+
+def test_bootstrap_human_review_blocker_survives_same_job_retry():
+    class _Conn:
+        def execute(self, _sql, _params):
+            return self
+
+        def fetchall(self):
+            return [
+                {
+                    "event_type": "bootstrap.human_review_required",
+                    "payload_json": json.dumps(
+                        {
+                            "operator_task": {
+                                "task_kind": "ceo_bootstrap",
+                                "run_id": "bootstrap-job",
+                                "attempt": 1,
+                            },
+                            "review_required": True,
+                            "source": "taste_worker",
+                            "workspace": "product/site",
+                            "blocker": "bounded Taste session timed out",
+                        }
+                    )
+                },
+            ]
+
+    class _Store:
+        @contextlib.contextmanager
+        def _connect(self):
+            yield _Conn()
+
+    blocker = worker._bootstrap_human_review_blocker(
+        _Store(),
+        "acme",
+        bootstrap_job_id="bootstrap-job",
+        bootstrap_attempt=2,
+    )
+    assert blocker["blocker"] == "bounded Taste session timed out"
+    assert blocker["source"] == "taste_worker"
+    assert blocker["operator_task"]["attempt"] == 1
+
+
+def test_bootstrap_human_review_read_failure_propagates_fail_closed():
+    class _Store:
+        @contextlib.contextmanager
+        def _connect(self):
+            raise OSError("operator database unavailable")
+            yield
+
+    with pytest.raises(OSError, match="operator database unavailable"):
+        worker._bootstrap_human_review_blocker(
+            _Store(),
+            "acme",
+            bootstrap_job_id="bootstrap-job",
+            bootstrap_attempt=2,
+        )
+
+
+def test_delegated_child_refuses_stale_parent_generation():
+    class _Conn:
+        def execute(self, _sql, _params):
+            return self
+
+        def fetchone(self):
+            return {"status": "queued", "attempts": 2}
+
+    class _Store:
+        @contextlib.contextmanager
+        def _connect(self):
+            yield _Conn()
+
+    child_guard = jobs.JobClaimGuard(job_id="child-job", worker_id="worker-1", attempt=1)
+    with jobs._bound_job_claim(child_guard):
+        with core._bound_operator_task_context(
+            run_id="bootstrap-job",
+            task_kind="ceo_bootstrap",
+            attempt=1,
+            deadline_at=time.time() + 60.0,
+        ):
+            with pytest.raises(jobs.JobClaimLost, match="parent bootstrap"):
+                core._assert_active_parent_operator_task(
+                    _Store(),
+                    "starting delegated Taste worker",
+                )
+
+
+# ── ceo_bootstrap_handler done-gate: a terminal launch must NOT requeue ────────────────────────────
 #
 # Regression guard for the build-loop bug: a CEO bootstrap turn that finished cleanly and published
 # the product site was requeued by a raising POST-TURN step (observed on business "simple": the turn
 # ended at finish_reason=stop, then the handler raised JobNotRunning and run_one re-ran the whole
-# 5-minute Docker build, starving the single build lane). The handler must treat "turn completed OR
-# site published" as DONE and make every post-turn step (surface refresh, wake-cron commit, receipt
-# events) non-fatal, so a finished build settles+completes instead of looping.
+# 5-minute Docker build, starving the single build lane). Product publish alone is not terminal: the
+# bootstrap instruction still requires research and an X outcome. Once product + X are terminal,
+# every post-turn bookkeeping step remains non-fatal so a finished launch settles instead of looping.
 
 
 class _BootstrapStubStore:
@@ -1820,6 +2109,35 @@ def _install_bootstrap_handler_stubs(
 
     monkeypatch.setattr(worker, "_run_ceo_turn", run_turn or _default_turn)
 
+    publish = surface_refresh.get("publish") if isinstance(surface_refresh, dict) else {}
+    publish_status = str(
+        (publish or {}).get("status")
+        or (surface_refresh.get("status") if isinstance(surface_refresh, dict) else "")
+        or ""
+    ).strip()
+    # Most tests model a launch whose canonical product and X receipts already exist; individual
+    # incompleteness tests override either probe explicitly. A post-turn refresh exception is also
+    # modeled as canonical product state already proving the prior publish.
+    product_complete = not isinstance(surface_refresh, dict) or publish_status == "published"
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_has_durable_live_product",
+        lambda *_a, **_k: product_complete,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_x_launch_outcome",
+        lambda *_a, **_k: {
+            "status": "published",
+            "bootstrap_job_id": str(_k.get("bootstrap_job_id") or ""),
+            "bootstrap_attempt": int(_k.get("bootstrap_attempt") or 1),
+            "post_id": "x-test",
+            "receipt_path": "metrics/receipts/outreach/x-test.json",
+            "blocker": "",
+            "source": "test",
+        },
+    )
+
     def _fake_refresh(slug, *, job_id, operator_user_id=None):
         captured["refresh_calls"] += 1
         if isinstance(surface_refresh, BaseException):
@@ -1834,6 +2152,8 @@ def _install_bootstrap_handler_stubs(
         captured["events"].append((status, kind))
 
     monkeypatch.setattr(worker, "_record_runtime_event", _capture_event)
+    monkeypatch.setattr(worker, "_bootstrap_human_review_blocker", lambda *_a, **_k: {})
+    monkeypatch.setattr(worker, "_bootstrap_delegated_children", lambda *_a, **_k: [])
     captured["store"] = store
     return captured
 
@@ -1886,11 +2206,19 @@ def test_ceo_bootstrap_handler_binds_owner_before_loading_summary(monkeypatch):
     monkeypatch.setattr(session_context, "clear_session_vars", lambda *_a, **_k: None)
     monkeypatch.setattr(worker, "_record_runtime_event", lambda *_a, **_k: None)
     monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("ok", 0.0, "none", True))
+    monkeypatch.setattr(worker, "_bootstrap_has_durable_live_product", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_x_launch_outcome",
+        lambda *_a, **_k: {"status": "published", "blocker": "", "source": "test"},
+    )
     monkeypatch.setattr(
         worker,
         "_refresh_business_surface_after_bootstrap",
         lambda *_a, **_k: {"publish": {"status": "published"}},
     )
+    monkeypatch.setattr(worker, "_bootstrap_human_review_blocker", lambda *_a, **_k: {})
+    monkeypatch.setattr(worker, "_bootstrap_delegated_children", lambda *_a, **_k: [])
 
     result = worker.ceo_bootstrap_handler(
         SimpleNamespace(id="job-1", business_slug="acme", payload={})
@@ -1919,14 +2247,65 @@ def test_bootstrap_completed_and_published_job_completes_not_requeued(monkeypatc
     assert isinstance(result, jobs.JobRunResult)
     assert result.result["business_slug"] == "acme"
     assert result.actual_cost_cents == 100  # $1.00 → 100c
+    assert result.result["bootstrap_completion_status"] == "completed"
+    assert result.result["x_launch_status"] == "published"
+    assert result.result["x_launch_outcome"]["bootstrap_job_id"] == "job-abc-123"
+    assert result.result["x_launch_outcome"]["bootstrap_attempt"] == 1
     # Wake schedule was committed and the final "completed" receipt event fired.
     assert captured["store"].commits, "wake-cron schedule should have been committed"
     assert ("completed", "ceo_bootstrap") in captured["events"]
 
 
+def test_bootstrap_blocked_x_outcome_stops_immediately_for_human_review(monkeypatch):
+    captured = _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=True,
+        surface_refresh={
+            "publish": {"status": "published", "public_url": "https://acme.coscale.app/"}
+        },
+    )
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_x_launch_outcome",
+        lambda *_a, **_k: {
+            "status": "blocked",
+            "bootstrap_job_id": "job-x-blocked",
+            "bootstrap_attempt": 2,
+            "blocker": "x channel credits exhausted",
+            "source": "creative_credit_preflight",
+            "review_required": True,
+        },
+    )
+
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(
+            id="job-x-blocked",
+            attempts=2,
+            business_slug="acme",
+            payload={"schedule": "every 6h"},
+        )
+    )
+
+    assert result.result["bootstrap_completion_status"] == "needs_human_review"
+    assert result.result["review_required"] is True
+    assert result.result["x_launch_status"] == "blocked"
+    assert result.result["x_launch_outcome"]["bootstrap_attempt"] == 2
+    assert "Bootstrap stopped for human review" in result.result["final_response"]
+    assert "x channel credits exhausted" in result.result["final_response"]
+    assert result.result["wake"] == {
+        "status": "suppressed",
+        "enabled": False,
+        "reason": "bootstrap_human_review_required",
+        "requested_schedule": "every 6h",
+    }
+    assert captured["store"].commits == []
+    assert ("blocked", "ceo_bootstrap") in captured["events"]
+    assert ("completed", "ceo_bootstrap") not in captured["events"]
+
+
 def test_bootstrap_published_but_turn_capped_completes_not_requeued(monkeypatch):
-    # Turn hit the iteration cap (turn_completed=False) but the site PUBLISHED → done-gate is met by
-    # publication. Must complete, not requeue (this is the capped-but-live case).
+    # Turn hit the iteration cap (turn_completed=False), but both the site and X launch are durably
+    # terminal (installed by the shared fixture). It must complete, not requeue.
     _install_bootstrap_handler_stubs(
         monkeypatch,
         turn_completed=False,
@@ -1971,7 +2350,99 @@ def test_bootstrap_incomplete_workflow_continues_in_same_job_and_preserves_ident
     assert "do not restart, rebrand, or redo completed work" in prompts[1]
 
 
-def test_bootstrap_passes_bounded_runtime_and_durable_publish_probe(monkeypatch):
+def test_bootstrap_published_product_without_x_continues_same_job(monkeypatch):
+    prompts: list[str] = []
+    state = {"x": False}
+
+    def _turn(**kwargs):
+        prompts.append(kwargs["user_prompt"])
+        if len(prompts) == 2:
+            state["x"] = True
+        return "continue", 0.10, "exact", False
+
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=False,
+        run_turn=_turn,
+        surface_refresh={
+            "publish": {"status": "published", "public_url": "https://acme.coscale.app/"}
+        },
+    )
+    monkeypatch.setattr(worker, "_bootstrap_has_durable_live_product", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_x_launch_outcome",
+        lambda *_a, **_k: {"status": "published" if state["x"] else "pending"},
+    )
+
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(id="job-needs-x", business_slug="acme", payload={})
+    )
+
+    assert isinstance(result, jobs.JobRunResult)
+    assert len(prompts) == 2
+    assert "exactly one X launch outcome" in prompts[1]
+    assert "do not redo an already-live product" in prompts[1]
+
+
+def test_bootstrap_taste_human_review_blocker_stops_without_continuation_or_refresh(monkeypatch):
+    prompts: list[str] = []
+
+    def _turn(**kwargs):
+        prompts.append(kwargs["user_prompt"])
+        return "Taste worker stopped", 0.25, "exact", False
+
+    captured = _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=False,
+        run_turn=_turn,
+        surface_refresh={
+            "publish": {"status": "published", "public_url": "https://acme.coscale.app/"}
+        },
+    )
+    blocker_reads = {"count": 0}
+
+    def _taste_blocker(*_a, **_k):
+        blocker_reads["count"] += 1
+        if blocker_reads["count"] == 1:
+            return {}
+        return {
+            "review_required": True,
+            "blocker": "Taste design contract missing after the bounded session",
+            "source": "taste_worker",
+            "operator_task": {
+                "task_kind": "ceo_bootstrap",
+                "run_id": "job-taste-review",
+                "attempt": 1,
+            },
+        }
+
+    monkeypatch.setattr(worker, "_bootstrap_human_review_blocker", _taste_blocker)
+
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(
+            id="job-taste-review",
+            attempts=1,
+            business_slug="acme",
+            payload={"schedule": "every 6h"},
+        )
+    )
+
+    assert len(prompts) == 1
+    assert captured["refresh_calls"] == 0
+    assert captured["store"].commits == []
+    assert result.result["bootstrap_completion_status"] == "needs_human_review"
+    assert result.result["review_required"] is True
+    assert result.result["review_source"] == "taste_worker"
+    assert result.result["wake"] == {
+        "status": "suppressed",
+        "enabled": False,
+        "reason": "bootstrap_human_review_required",
+        "requested_schedule": "every 6h",
+    }
+
+
+def test_bootstrap_passes_bounded_runtime_and_full_launch_probe(monkeypatch):
     captured_turn: dict[str, Any] = {}
 
     def _bounded_turn(**kwargs):
@@ -2009,18 +2480,74 @@ def test_bootstrap_child_liveness_uses_fresh_durable_job_claim():
             seen["params"] = params
             return self
 
-        def fetchone(self):
-            return (1,)
+        def fetchall(self):
+            return [("child-1", "queued", None, 0, {})]
 
     class _Store:
         @contextlib.contextmanager
         def _connect(self):
             yield _Conn()
 
-    assert worker._bootstrap_has_live_delegated_child(_Store(), "acme") is True
+    assert worker._bootstrap_has_live_delegated_child(
+        _Store(),
+        "acme",
+        bootstrap_job_id="bootstrap-job",
+        bootstrap_attempt=2,
+    ) is True
     assert "claude.agent_task" in seen["sql"]
-    assert "locked_at" in seen["sql"]
-    assert seen["params"] == ("acme", 60.0)
+    assert "status = ANY" in seen["sql"]
+    assert "parent_operator_task" in seen["sql"]
+    assert seen["params"][:2] == ("acme", ["queued", "running"])
+    assert json.loads(seen["params"][2]) == {
+        "task_kind": "ceo_bootstrap",
+        "run_id": "bootstrap-job",
+        "attempt": 2,
+    }
+
+
+def test_worker_deferred_child_carries_exact_parent_bootstrap_identity(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class _Store:
+        def commit(self, **kwargs):
+            captured.update(kwargs)
+            return {"results": [{"job": "work-request-1", "worker_job": "child-job-1"}]}
+
+    monkeypatch.setattr(core, "_read_work_request_run", lambda *_a, **_k: ("queued", {}))
+    monkeypatch.setattr(core, "_read_worker_job_run", lambda *_a, **_k: ("queued", {}))
+    monkeypatch.setattr(core, "_repair_stale_work_request_from_worker_job", lambda *_a, **_k: None)
+
+    guard = jobs.JobClaimGuard(
+        job_id="bootstrap-job",
+        worker_id="worker-1",
+        attempt=3,
+    )
+    deadline_at = time.time() + 600.0
+    with jobs._bound_job_claim(guard):
+        with core._bound_operator_task_context(
+            run_id="bootstrap-job",
+            task_kind="ceo_bootstrap",
+            deadline_at=deadline_at,
+        ):
+            core._run_operator_task_on_worker(
+                store=_Store(),
+                business="acme",
+                kind="claude.agent_task",
+                tool_name="business_claude_agent_task",
+                deferred_args={"business": "acme", "instruction": "build"},
+                commit_idempotency_key="worker-child",
+                wait_seconds=0,
+                reason="test",
+                actor="agent",
+            )
+
+    payload = captured["operations"][0]["payload"]
+    assert payload["parent_operator_task"] == {
+        "run_id": "bootstrap-job",
+        "task_kind": "ceo_bootstrap",
+        "attempt": 3,
+        "deadline_at": deadline_at,
+    }
 
 
 def test_bootstrap_post_turn_surface_refresh_exception_does_not_requeue(monkeypatch):
@@ -2078,7 +2605,7 @@ def test_bootstrap_capped_before_publish_still_requeues(monkeypatch):
     assert "iteration budget" in str(exc.value)
 
 
-def test_bootstrap_timeout_waits_for_delegated_child_before_outer_requeue(monkeypatch):
+def test_bootstrap_failure_cancels_and_drains_delegated_child_before_outer_requeue(monkeypatch):
     captured = _install_bootstrap_handler_stubs(
         monkeypatch,
         turn_completed=False,
@@ -2087,17 +2614,18 @@ def test_bootstrap_timeout_waits_for_delegated_child_before_outer_requeue(monkey
             TimeoutError("CEO wake for business:acme idle past 600s inactivity limit")
         ),
     )
-    child_checks: list[bool] = []
-    child_states = iter((True, False))
+    child_checks: list[list[dict[str, Any]]] = []
+    child_states = iter(([], [{"id": "child-1", "status": "running"}], []))
     monkeypatch.setattr(
         worker,
-        "_best_effort_terminalize_owned_timeout",
-        lambda *_args, **_kwargs: pytest.fail("handler must not requeue itself before it exits"),
-    )
-    monkeypatch.setattr(
-        worker,
-        "_bootstrap_has_live_delegated_child",
+        "_bootstrap_delegated_children",
         lambda *_args, **_kwargs: child_checks.append(state := next(child_states)) or state,
+    )
+    cancelled: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "_cancel_bootstrap_delegated_children",
+        lambda *_args, reason, **_kwargs: cancelled.append(str(reason)) or 1,
     )
     sleeps: list[float] = []
     monkeypatch.setattr(worker.time, "sleep", lambda seconds: sleeps.append(float(seconds)))
@@ -2106,9 +2634,81 @@ def test_bootstrap_timeout_waits_for_delegated_child_before_outer_requeue(monkey
     with pytest.raises(TimeoutError):
         worker.ceo_bootstrap_handler(job)
 
-    assert child_checks == [True, False]
-    assert sleeps == [5.0]
+    assert child_checks == [[], [{"id": "child-1", "status": "running"}], []]
+    assert len(cancelled) == 1
+    assert "inactivity limit" in cancelled[0]
+    assert sleeps == [1.0]
     assert ("failed", "ceo_bootstrap") in captured["events"]
+
+
+def test_bootstrap_natural_turn_waits_for_detached_child_before_settlement(monkeypatch):
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=True,
+        surface_refresh={
+            "publish": {"status": "published", "public_url": "https://acme.coscale.app/"}
+        },
+    )
+    child = {"id": "child-natural", "status": "running"}
+    states = iter(([], [child], [], []))
+    seen: list[list[dict[str, Any]]] = []
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_delegated_children",
+        lambda *_a, **_k: seen.append(state := next(states)) or state,
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(worker.time, "sleep", lambda seconds: sleeps.append(float(seconds)))
+    monkeypatch.setattr(
+        worker,
+        "_cancel_bootstrap_delegated_children",
+        lambda *_a, **_k: pytest.fail("a healthy child should drain without cancellation"),
+    )
+
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(id="job-natural-child", attempts=1, business_slug="acme", payload={})
+    )
+
+    assert isinstance(result, jobs.JobRunResult)
+    assert seen == [[], [child], [], []]
+    assert sleeps == [1.0]
+
+
+def test_bootstrap_hard_deadline_cancels_child_and_persists_human_stop(monkeypatch):
+    states = iter(([{"id": "child-deadline", "status": "running"}], []))
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_delegated_children",
+        lambda *_a, **_k: next(states),
+    )
+    cancelled: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "_cancel_bootstrap_delegated_children",
+        lambda *_a, reason, **_k: cancelled.append(str(reason)) or 1,
+    )
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "_record_bootstrap_human_review_required",
+        lambda *_a, blocker, **_k: recorded.append(str(blocker))
+        or {"review_required": True, "blocker": str(blocker)},
+    )
+    monkeypatch.setattr(worker.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(worker.time, "sleep", lambda _seconds: None)
+
+    review = worker._wait_for_bootstrap_delegated_children(
+        object(),
+        "acme",
+        bootstrap_job_id="bootstrap-deadline",
+        bootstrap_attempt=1,
+        deadline_monotonic=99.0,
+    )
+
+    assert review["review_required"] is True
+    assert len(cancelled) == 1
+    assert len(recorded) == 1
+    assert "hard deadline" in recorded[0]
 
 
 def test_bootstrap_workflow_goal_published_without_real_action_requeues(monkeypatch):
@@ -2140,10 +2740,64 @@ def test_bootstrap_workflow_goal_published_with_real_action_completes(monkeypatc
         ),
     )
     monkeypatch.setattr(worker, "_bootstrap_real_http_actions", lambda *_a, **_k: {"generate-quote"})
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_live_action_execution_verification",
+        lambda *_a, **_k: {
+            "action_execution_required": True,
+            "status": "pending",
+            "live_build_id": "build-current",
+            "actions": ["generate-quote"],
+            "verified_action": "",
+            "verified_at": "",
+            "receipt_path": "",
+            "blocker": "no successful signed-in live action execution receipt exists",
+        },
+    )
     job = SimpleNamespace(id="job-workflow-ok", business_slug="acme", payload={})
 
     result = worker.ceo_bootstrap_handler(job)
     assert isinstance(result, jobs.JobRunResult)
+    assert result.result["live_action_execution_status"] == "pending"
+    assert result.result["live_action_execution_verification"]["status"] == "pending"
+    assert "Full browser workflow E2E remains required" in result.result["final_response"]
+    assert "exact-ref reopen" in result.result["final_response"]
+
+
+def test_bootstrap_action_verified_result_does_not_claim_full_browser_workflow(monkeypatch):
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=False,
+        surface_refresh={"publish": {"status": "published", "public_url": "https://acme.coscale.app/"}},
+        goal=(
+            "Build a service that helps customers upload messy contractor notes and receive a "
+            "quote-ready scope of work in the signed-in app."
+        ),
+    )
+    monkeypatch.setattr(worker, "_bootstrap_real_http_actions", lambda *_a, **_k: {"generate-quote"})
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_live_action_execution_verification",
+        lambda *_a, **_k: {
+            "action_execution_required": True,
+            "status": "action_verified",
+            "live_build_id": "build-current",
+            "actions": ["generate-quote"],
+            "verified_action": "generate-quote",
+            "verified_at": "2026-07-11T03:00:00+00:00",
+            "receipt_path": "metrics/receipts/app-actions/generate.json",
+            "blocker": "",
+        },
+    )
+
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(id="job-action-verified", business_slug="acme", payload={})
+    )
+
+    assert result.result["live_action_execution_status"] == "action_verified"
+    assert "action-verified for the current build" in result.result["final_response"]
+    assert "Full browser workflow E2E remains required" in result.result["final_response"]
+    assert "workflow is verified" not in result.result["final_response"].lower()
 
 
 def test_channel_tracked_link_tags_without_clobbering_and_meta_delegates():
@@ -2426,3 +3080,137 @@ def test_worker_pool_heartbeat_thread_starts_even_if_initial_registration_fails(
     assert "takyon-pool-heartbeat" in started, (
         "heartbeat/self-heal thread must start even when initial registration fails"
     )
+
+
+def test_worker_pool_preflight_marker_requires_successful_registry_ownership(
+    monkeypatch, tmp_path
+):
+    """The operator shell handshake is database truth, not process-survival truth."""
+    import psycopg as _psycopg
+
+    from plugins.takyon import core, runtime_app
+    from plugins.takyon import worker_pool as wp
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+        def execute(self, *_a, **_k):
+            class _Cur:
+                def fetchone(self):
+                    return ("registered",)
+
+            return _Cur()
+
+    marker = tmp_path / "worker.ready"
+    monkeypatch.setenv("TAKYON_WORKER_READY_FILE", str(marker))
+    monkeypatch.setattr(core, "load_takyon_env", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_app, "resolve_database_url", lambda *a, **k: "postgresql://fake")
+    monkeypatch.setattr(_psycopg, "connect", lambda *a, **k: _FakeConn())
+    monkeypatch.setattr(runtime_app, "assert_takyon_pg_role", lambda *_a, **_k: None)
+    monkeypatch.setattr(runtime_app, "configure_takyon_pg_session", lambda *_a, **_k: None)
+
+    def _fake_drain_tick(_conn, *, stop, **_kw):
+        assert marker.is_file(), "readiness must exist before the pool starts draining"
+        stop.set()
+        return {
+            "dispatched": 0,
+            "requeued": 0,
+            "usage_holds_released": 0,
+            "drained": 0,
+            "completed": 0,
+            "blocked": 0,
+            "failed": 0,
+        }
+
+    monkeypatch.setattr(worker, "drain_tick", _fake_drain_tick)
+
+    wp.WorkerPool(worker_id="w-ready", pool_id="pool-ready", once=True).run()
+
+    assert marker.read_text(encoding="utf-8") == (
+        "worker_id=w-ready\npool_id=pool-ready\n"
+    )
+
+
+def test_worker_pool_preflight_registration_failure_never_claims_ready(
+    monkeypatch, tmp_path
+):
+    import psycopg as _psycopg
+
+    from plugins.takyon import core, runtime_app
+    from plugins.takyon import worker_pool as wp
+
+    class _FailingConn:
+        def close(self):
+            pass
+
+        def execute(self, *_a, **_k):
+            raise RuntimeError("rls denied")
+
+    marker = tmp_path / "worker.ready"
+    monkeypatch.setenv("TAKYON_WORKER_READY_FILE", str(marker))
+    monkeypatch.setattr(core, "load_takyon_env", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_app, "resolve_database_url", lambda *a, **k: "postgresql://fake")
+    monkeypatch.setattr(_psycopg, "connect", lambda *a, **k: _FailingConn())
+    monkeypatch.setattr(runtime_app, "assert_takyon_pg_role", lambda *_a, **_k: None)
+    monkeypatch.setattr(runtime_app, "configure_takyon_pg_session", lambda *_a, **_k: None)
+
+    with pytest.raises(RuntimeError, match="did not register; refusing readiness"):
+        wp.WorkerPool(worker_id="w-dead", pool_id="pool-dead", once=True).run()
+
+    assert not marker.exists()
+
+
+def test_worker_pool_shutdown_joins_inflight_operator_task_lane(monkeypatch):
+    """SIGTERM/drain completion is not truthful until the long product-task lane has returned."""
+    import psycopg as _psycopg
+
+    from plugins.takyon import core, runtime_app
+    from plugins.takyon import worker_pool as wp
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(core, "load_takyon_env", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_app, "resolve_database_url", lambda *a, **k: "postgresql://fake")
+    monkeypatch.setattr(_psycopg, "connect", lambda *a, **k: _FakeConn())
+
+    lane_started = threading.Event()
+    release_lane = threading.Event()
+    lane_finished = threading.Event()
+
+    counts = {
+        "dispatched": 0,
+        "requeued": 0,
+        "usage_holds_released": 0,
+        "drained": 0,
+        "completed": 0,
+        "blocked": 0,
+        "failed": 0,
+    }
+
+    def _fake_drain_tick(_conn, *, kinds, stop, **_kw):
+        if kinds:
+            lane_started.set()
+            assert release_lane.wait(2), "test did not release the operator-task lane"
+            lane_finished.set()
+            return counts
+        assert lane_started.wait(2), "operator-task lane did not start"
+        stop.set()
+        return counts
+
+    monkeypatch.setattr(worker, "drain_tick", _fake_drain_tick)
+    release_timer = threading.Timer(0.25, release_lane.set)
+    release_timer.start()
+    try:
+        wp.WorkerPool(
+            worker_id="w-drain",
+            pool_id="pool-drain",
+            database_url="postgresql://fake",
+            register=False,
+        ).run()
+    finally:
+        release_timer.cancel()
+
+    assert lane_finished.is_set(), "WorkerPool returned before its in-flight product task"

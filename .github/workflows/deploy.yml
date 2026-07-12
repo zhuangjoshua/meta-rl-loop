@@ -125,7 +125,7 @@ jobs:
       - name: Deploy Safebox runtime to VPS
         if: steps.safebox_ssh.outputs.configured == '1' && steps.safebox_ssh.outputs.reachable == '1'
         env:
-          TAKYON_RUN_WEB_BUILD: "0"
+          TAKYON_RUN_WEB_BUILD: "1"
           TAKYON_VPS_HOST: ${{ env.TAKYON_SAFEBOX_DEPLOY_HOST }}
           TAKYON_VPS_KEY: ${{ env.TAKYON_SAFEBOX_DEPLOY_KEY }}
         run: deploy/takyon-safebox/deploy-runtime.sh
@@ -150,7 +150,7 @@ jobs:
         if: steps.operator_ssh.outputs.reachable == '1'
         env:
           TAKYON_APPLY_CADDY: ${{ steps.changes.outputs.operator_caddy }}
-          TAKYON_RUN_WEB_BUILD: "0"
+          TAKYON_RUN_WEB_BUILD: "1"
         run: deploy/argon-alpha-14/deploy-runtime.sh
 
       - name: Prepare sub-user VPS SSH key
@@ -185,7 +185,7 @@ jobs:
         if: steps.subuser_ssh.outputs.configured == '1' && steps.subuser_ssh.outputs.reachable == '1'
         env:
           TAKYON_APPLY_CADDY: ${{ steps.changes.outputs.subuser_caddy }}
-          TAKYON_RUN_WEB_BUILD: "0"
+          TAKYON_RUN_WEB_BUILD: "1"
           TAKYON_VPS_HOST: ${{ env.TAKYON_SUBUSER_DEPLOY_HOST }}
           TAKYON_VPS_KEY: ${{ env.TAKYON_SUBUSER_DEPLOY_KEY }}
         run: deploy/takyon-subuser/deploy-runtime.sh

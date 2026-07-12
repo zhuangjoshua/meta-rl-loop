@@ -838,6 +838,92 @@ def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_
     assert result["workspace_durability"]["matched"] is True
 
 
+def test_mobile_worker_materializes_product_app_before_constructing_docker_mount(tmp_path, monkeypatch):
+    outer_home = tmp_path / "outer-home"
+    workspace = outer_home / "businesses" / "sipstreak" / "product" / "app"
+    captured: dict[str, object] = {}
+    store = _FakeStore(outer_home)
+    store._workspace_root_override = outer_home
+    store._ensure_business = lambda _conn, business: {
+        "owner_user_id": "user-123",
+        "work_focus": "all",
+        "slug": business,
+        "name": "Sipstreak",
+        "goal": "A hydration habit coach",
+        "archetype": "mobile_app",
+    }
+
+    def fake_docker_runner(
+        *,
+        payload: dict[str, object],
+        workspace_path: Path,
+        timeout_ms: int,
+        business: str = "",
+        operator_user_id: str = "",
+    ):
+        # This is the exact seam that used to hand Docker a nonexistent product/app bind source.
+        # Both the seed-completion marker and platform-owned runtime boundary must exist before the
+        # docker command is even constructed.
+        assert workspace_path == workspace
+        assert workspace_path.is_dir()
+        assert (workspace_path / "app.json").is_file()
+        assert (workspace_path / "_takyon" / "runtime-client.ts").is_file()
+        captured["docker_workspace_path"] = workspace_path
+        captured["docker_timeout_ms"] = timeout_ms
+        return ["docker", "run"], payload, str(tmp_path), {}
+
+    def fake_process(*, payload: dict[str, object], **_kwargs):
+        Path(str(payload["cwd"]), "worker-ran.txt").write_text("yes\n", encoding="utf-8")
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"success": True, "summary": "mobile source updated"}),
+            stderr="",
+        )
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "sipstreak")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: True)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(
+        takyon_core,
+        "_reserve_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r-mobile", "reserved_cents": 800},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {
+            "reservation_key": "r-mobile",
+            "reserved_cents": 800,
+            "status": "charged",
+        },
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_in_docker", fake_docker_runner)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "sipstreak",
+                "workspace": "product/app",
+                "instruction": "Build the mobile app.",
+                "idempotency_key": "mobile-materialize-before-mount",
+                "refresh_surface": False,
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["docker_workspace_path"] == workspace
+    assert result["workspace_sync_status"] == "synced"
+    assert result["workspace_durability"]["matched"] is True
+
+
 def test_scoped_workspace_store_uses_workspace_root_override_for_mounted_takyon_homes(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path / ".takyon-home"))
     prototype = takyon_core.TakyonStore(root=tmp_path / "outer-home", operator_user_id="user-123")
@@ -2034,6 +2120,197 @@ def test_taste_success_without_durable_design_contract_blocks_before_publish(tmp
     assert result["taste_design_contract"] is None
     assert "Taste design contract missing" in result["error"]
     assert len(process_calls) == 1
+
+
+def test_taste_timeout_without_design_contract_stops_parent_for_human_review(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    class _CapturingStore(_FakeStore):
+        def __init__(self, root):
+            super().__init__(root)
+            self.commits: list[dict[str, object]] = []
+
+        def commit(self, **kwargs):
+            self.commits.append(dict(kwargs))
+            return {"success": True}
+
+    store = _CapturingStore(tmp_path)
+    process_calls: list[dict[str, object]] = []
+
+    def fake_process(*, payload: dict[str, object], **_kwargs):
+        process_calls.append(dict(payload))
+        Path(str(payload["cwd"]), "index.html").write_text(
+            "<h1>unfinished Taste source</h1>\n",
+            encoding="utf-8",
+        )
+        raise subprocess.TimeoutExpired(cmd=["node"], timeout=1.0)
+
+    _patch_non_docker_product_site(monkeypatch, store)
+    monkeypatch.setattr(
+        takyon_core,
+        "_workspace_needs_runtime_ui_contract",
+        lambda workspace_rel: workspace_rel == "product/site",
+    )
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_reserve_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {
+            "reservation_key": "r1",
+            "reserved_cents": 800,
+            "status": "settled_estimate",
+        },
+    )
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_product_surface_refresh",
+        lambda **_kwargs: pytest.fail("invalid timed-out Taste contract must block before publish"),
+    )
+
+    with takyon_core._bound_operator_task_context(
+        run_id="bootstrap-job",
+        task_kind="ceo_bootstrap",
+        attempt=2,
+    ):
+        result = json.loads(
+            handle_business_claude_agent_task(
+                {
+                    "business": "latexflow",
+                    "workspace": "product/site",
+                    "instruction": "Implement and preflight the landing.",
+                    "guidance_skills": ["taste-frontend"],
+                    "idempotency_key": "taste-timeout-missing-design-contract",
+                    "install": False,
+                    "max_turns": 60,
+                    "timeout_ms": 900_000,
+                    "refresh_surface": True,
+                }
+            )
+        )
+
+    assert result["success"] is False
+    assert result["blocked"] is True
+    assert result["timed_out"] is True
+    assert result["review_required"] is True
+    assert "Taste design contract missing" in result["review_blocker"]
+    assert len(process_calls) == 1
+    operations = store.commits[-1]["operations"]
+    human_review_event = next(
+        op
+        for op in operations
+        if op.get("event_type") == "bootstrap.human_review_required"
+    )
+    assert human_review_event["payload"]["operator_task"] == {
+        "run_id": "bootstrap-job",
+        "task_kind": "ceo_bootstrap",
+        "attempt": 2,
+    }
+    assert human_review_event["payload"]["timed_out"] is True
+    assert any(op.get("action") == "agent.record" for op in operations)
+
+
+def test_taste_timeout_published_partial_still_requires_human_review(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    class _CapturingStore(_FakeStore):
+        def __init__(self, root):
+            super().__init__(root)
+            self.commits: list[dict[str, object]] = []
+
+        def commit(self, **kwargs):
+            self.commits.append(dict(kwargs))
+            return {"success": True}
+
+    store = _CapturingStore(tmp_path)
+
+    def fake_process(*, payload: dict[str, object], **_kwargs):
+        root = Path(str(payload["cwd"]))
+        (root / "index.html").write_text("<h1>publishable partial</h1>\n", encoding="utf-8")
+        (root / "DESIGN.md").write_text(
+            "# Design Read\nEditorial precision for proposal teams.\n\n"
+            "DESIGN_VARIANCE: 6\nMOTION_INTENSITY: 4\nVISUAL_DENSITY: 5\n",
+            encoding="utf-8",
+        )
+        raise subprocess.TimeoutExpired(cmd=["node"], timeout=1.0)
+
+    _patch_non_docker_product_site(monkeypatch, store)
+    monkeypatch.setattr(
+        takyon_core,
+        "_workspace_needs_runtime_ui_contract",
+        lambda workspace_rel: workspace_rel == "product/site",
+    )
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_reserve_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {
+            "reservation_key": "r1",
+            "reserved_cents": 800,
+            "status": "settled_estimate",
+        },
+    )
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_product_surface_refresh",
+        lambda **_kwargs: {
+            "status": "passed",
+            "source_path": "product/site",
+            "receipt_path": "metrics/receipts/product-surface/taste-timeout-partial.json",
+            "runtime_features": [],
+            "inventory": {},
+            "publish": {
+                "status": "published",
+                "public_url": "https://latexflow.coscale.app/",
+            },
+            "blocker": "",
+        },
+    )
+
+    with takyon_core._bound_operator_task_context(
+        run_id="bootstrap-job",
+        task_kind="ceo_bootstrap",
+        attempt=3,
+    ):
+        result = json.loads(
+            handle_business_claude_agent_task(
+                {
+                    "business": "latexflow",
+                    "workspace": "product/site",
+                    "instruction": "Implement and preflight the landing.",
+                    "guidance_skills": ["taste-frontend"],
+                    "idempotency_key": "taste-timeout-published-partial",
+                    "install": False,
+                    "max_turns": 60,
+                    "timeout_ms": 900_000,
+                    "refresh_surface": True,
+                }
+            )
+        )
+
+    assert result["timed_out"] is True
+    assert result["surface_refresh"]["publish"]["status"] == "published"
+    assert result["review_required"] is True
+    operations = store.commits[-1]["operations"]
+    event = next(
+        op for op in operations if op.get("event_type") == "bootstrap.human_review_required"
+    )
+    assert event["payload"]["timed_out"] is True
+    assert event["payload"]["operator_task"]["attempt"] == 3
 
 
 def test_claude_agent_task_bash_wrapper_uses_absolute_env_and_bash_paths():

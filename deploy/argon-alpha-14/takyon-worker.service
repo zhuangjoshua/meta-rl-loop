@@ -86,7 +86,7 @@ RestartSec=5
 # Give the worker time to finish the in-flight CEO turn on stop. If it overruns and is SIGKILLed,
 # the job is left 'running' and the next worker's requeue_stale reclaims it and refunds its
 # reservation — an interrupted wake is safe, never double-billed, never a fake completion.
-TimeoutStopSec=120
+TimeoutStopSec=960
 
 [Install]
 WantedBy=multi-user.target

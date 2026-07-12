@@ -64,7 +64,7 @@ from pathlib import Path
 
 import pytest
 
-from plugins.takyon import ai_gateway, app_actions, app_connections, app_directory, app_email, app_identity, app_media, app_payments, app_usage, core, policy, safebox_app
+from plugins.takyon import ai_gateway, app_actions, app_connections, app_directory, app_email, app_identity, app_media, app_payments, app_usage, core, policy, safebox, safebox_app
 from plugins.takyon.control_plane import ResolvedPrincipal
 
 # --------------------------------------------------------------------------------------
@@ -507,12 +507,20 @@ def test_safebox_db_conn_initializes_authority_rls_session():
 
 def test_app_checkout_commits_intent_before_safebox_stripe_call():
     src = inspect.getsource(core.handle_business_create_app_checkout)
+    port_src = inspect.getsource(app_payments.create_session_checkout_intent)
+    port_sql = (
+        Path(core.__file__).with_name("db")
+        / "migrations"
+        / "0077_app_checkout_intent_session_port.sql"
+    ).read_text(encoding="utf-8")
 
-    intent_pos = src.index("INSERT INTO app_checkout_intents")
+    intent_pos = src.index('leaves["payments"].create_session_checkout_intent(')
     commit_pos = src.index("conn.commit()", intent_pos)
     rebind_pos = src.index("takyon.rls_session_hash", commit_pos)
     stripe_pos = src.index('safebox.stripe_request("checkout/sessions"', intent_pos)
     assert intent_pos < commit_pos < rebind_pos < stripe_pos
+    assert "takyon_app_create_checkout_intent" in port_src
+    assert "insert into app_checkout_intents" in port_sql.lower()
 
 
 def test_pg_app_scope_rejects_operator_session_without_role_change(monkeypatch):
@@ -848,10 +856,8 @@ def test_app_plane_account_read_does_not_reconcile_checkout():
         'if isinstance(conn, _PGConn) and store._database_plane == "app":',
         1,
     )[1].split("\n            else:", 1)[0]
-    account_summary_branch = account_src.split(
-        'if isinstance(conn, _PGConn) and store._database_plane == "app":',
-        2,
-    )[2].split("\n            else:", 1)[0]
+    account_summary_start = account_src.index("session_hash = _hash_token(session_token)")
+    account_summary_branch = account_src[account_summary_start:].split("\n            else:", 1)[0]
     assert "validate_session(leaf, business, session_token)" in account_validation_branch
     assert "app_sessions" not in account_validation_branch
     assert "SELECT * FROM app_users" not in account_validation_branch
@@ -964,11 +970,18 @@ def test_app_plane_checkout_uses_session_bound_user_and_safebox_stripe():
     assert "_require_app_plane_session_token(args)" in src
     assert "validate_session(raw, business, session_token)" in src
     assert "customer_email = str(user.email or \"\")" in src
-    assert "app plan is not configured for Stripe checkout" in src
+    assert "app plan not found:" in src
+    assert "app plan is deprecated or unavailable for new checkout" in src
     assert "safebox.stripe_request(\"checkout/sessions\"" in src
     assert "_stripe_request(\"checkout/sessions\"" not in src
     assert "checkout_url = success_url" in src
-    assert src.index('if store._database_plane == "app":') < src.index("safebox.stripe_request")
+    assert src.index('if store._database_plane == "app":') < src.index("app plan not found:")
+    assert src.index("app plan not found:") < src.index(
+        'leaves["payments"].create_session_checkout_intent('
+    )
+    assert src.index('leaves["payments"].create_session_checkout_intent(') < src.index(
+        "safebox.stripe_request"
+    )
     assert 'raise TakyonError("app checkout requires app-plane database login")' in src
     assert src.index('"client_reference_id": client_reference_id,') < src.index(
         'raise TakyonError("app checkout requires app-plane database login")'
@@ -1062,6 +1075,9 @@ def test_app_plane_subscription_cancel_uses_safebox_authority():
     assert "def cancel_app_subscription(" in safebox_src
     assert "session_token: str" in safebox_src
     assert '"session_token": token' in safebox_src
+    assert "cancel_at_period_end" not in inspect.signature(safebox.cancel_app_subscription).parameters
+    assert "def cancel_stripe_subscription_immediately(" in safebox_src
+    assert 'stripe_request(f"subscriptions/{sid}", {}, method="DELETE")' in safebox_src
     assert "app_identity.validate_session(payment_conn, business, token)" in safebox_src
     assert "app_session_user_mismatch" in safebox_src
     assert '"/v1/stripe/app-subscription/cancel"' in safebox_src
@@ -1073,6 +1089,7 @@ def test_app_plane_subscription_cancel_uses_safebox_authority():
         "app_payments.cancel_subscription"
     )
     assert "app_payments.cancel_subscription" in safebox_app_src
+    assert "subscription_canceler=safebox.cancel_stripe_subscription_immediately" in safebox_app_src
 
 
 def test_app_plane_service_email_uses_service_session_ports():

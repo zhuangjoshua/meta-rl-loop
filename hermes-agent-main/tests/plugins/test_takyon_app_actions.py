@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from typing import Any
 
@@ -277,6 +280,294 @@ def test_summarize_action_invocations_supports_pg_mapping_rows(monkeypatch):
             "last_error": "",
         }
     ]
+
+
+def test_live_action_execution_verification_requires_current_build_customer_receipt():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE app_usage_events ("
+        "id TEXT PRIMARY KEY, business_slug TEXT NOT NULL, purpose TEXT NOT NULL, route TEXT NOT NULL, "
+        "status TEXT NOT NULL, metadata_json TEXT, error TEXT, created_at TEXT NOT NULL, "
+        "completed_at TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE events (business_slug TEXT NOT NULL, event_type TEXT NOT NULL, "
+        "payload_json TEXT NOT NULL, created_at TEXT NOT NULL)"
+    )
+    route = "/api/takyon/apps/mathflow/actions/sync"
+    old_at = "2026-07-11T01:00:00+00:00"
+    service_at = "2026-07-11T02:00:00+00:00"
+    verified_at = "2026-07-11T03:00:00+00:00"
+    rows = [
+        (
+            "evt-old",
+            "mathflow",
+            route,
+            json.dumps(
+                {
+                    "action": "sync",
+                    "trigger": "http",
+                    "principal": "session",
+                    "live_build_id": "old-build",
+                    "receipt_path": "metrics/receipts/app-actions/old.json",
+                }
+            ),
+            old_at,
+        ),
+        (
+            "evt-service",
+            "mathflow",
+            route,
+            json.dumps(
+                {
+                    "action": "sync",
+                    "trigger": "http",
+                    "principal": "service",
+                    "live_build_id": "current-build",
+                    "receipt_path": "metrics/receipts/app-actions/service.json",
+                }
+            ),
+            service_at,
+        ),
+        (
+            "evt-current",
+            "mathflow",
+            route,
+            json.dumps(
+                {
+                    "action": "sync",
+                    "trigger": "http",
+                    "principal": "session",
+                    "live_build_id": "current-build",
+                    "receipt_path": "metrics/receipts/app-actions/current.json",
+                }
+            ),
+            verified_at,
+        ),
+    ]
+    conn.executemany(
+        "INSERT INTO app_usage_events "
+        "(id, business_slug, purpose, route, status, metadata_json, error, created_at, completed_at) "
+        "VALUES (?, ?, 'action_invoke', ?, 'completed', ?, NULL, ?, ?)",
+        [
+            (event_id, business, route_value, metadata, at, at)
+            for event_id, business, route_value, metadata, at in rows
+        ],
+    )
+    conn.execute(
+        "INSERT INTO events (business_slug, event_type, payload_json, created_at) "
+        "VALUES (?, 'app.action.invoke', ?, ?)",
+        (
+            "mathflow",
+            json.dumps(
+                {
+                    "action": "sync",
+                    "trigger": "http",
+                    "principal": "session",
+                    "live_build_id": "current-build",
+                    "receipt_path": "metrics/receipts/app-actions/current.json",
+                    "usage_reservation_key": "evt-current",
+                }
+            ),
+            verified_at,
+        ),
+    )
+
+    verified = app_actions.live_action_execution_verification(
+        conn,
+        "mathflow",
+        [{"name": "sync", "trigger": "http"}],
+        live_build_id="current-build",
+    )
+
+    assert verified == {
+        "action_execution_required": True,
+        "status": "action_verified",
+        "live_build_id": "current-build",
+        "actions": ["sync"],
+        "verified_action": "sync",
+        "verified_at": verified_at,
+        "receipt_path": "metrics/receipts/app-actions/current.json",
+        "blocker": "",
+    }
+
+
+def test_live_action_execution_verification_does_not_accept_old_build_receipt():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE app_usage_events ("
+        "id TEXT PRIMARY KEY, business_slug TEXT NOT NULL, purpose TEXT NOT NULL, route TEXT NOT NULL, "
+        "status TEXT NOT NULL, metadata_json TEXT, error TEXT, created_at TEXT NOT NULL, "
+        "completed_at TEXT)"
+    )
+    at = "2026-07-11T01:00:00+00:00"
+    conn.execute(
+        "INSERT INTO app_usage_events "
+        "(id, business_slug, purpose, route, status, metadata_json, error, created_at, completed_at) "
+        "VALUES (?, ?, 'action_invoke', ?, 'completed', ?, NULL, ?, ?)",
+        (
+            "evt-old",
+            "mathflow",
+            "/api/takyon/apps/mathflow/actions/sync",
+            json.dumps(
+                {
+                    "action": "sync",
+                    "trigger": "http",
+                    "principal": "session",
+                    "live_build_id": "old-build",
+                }
+            ),
+            at,
+            at,
+        ),
+    )
+
+    pending = app_actions.live_action_execution_verification(
+        conn,
+        "mathflow",
+        [{"name": "sync", "trigger": "http"}],
+        live_build_id="current-build",
+    )
+
+    assert pending["status"] == "pending"
+    assert pending["verified_action"] == ""
+    assert pending["live_build_id"] == "current-build"
+    assert "no successful signed-in live action execution receipt" in pending["blocker"]
+
+
+def test_live_action_execution_verification_matches_pg_reservation_key_not_event_uuid(monkeypatch):
+    at = "2026-07-11T04:00:00+00:00"
+    reservation_key = "browser-idempotency-key"
+
+    class _Rows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class _PgLikeConn:
+        def execute(self, query, _params):
+            sql = str(query)
+            if "FROM events" in sql:
+                return _Rows(
+                    [
+                        {
+                            "payload_json": json.dumps(
+                                {
+                                    "action": "sync",
+                                    "trigger": "http",
+                                    "principal": "session",
+                                    "live_build_id": "current-build",
+                                    "receipt_path": "metrics/receipts/app-actions/current.json",
+                                    "usage_reservation_key": reservation_key,
+                                }
+                            ),
+                            "created_at": at,
+                        }
+                    ]
+                )
+            assert "reservation_key AS reservation_key" in sql
+            return _Rows(
+                [
+                    {
+                        "id": "9cb4ef13-e899-4430-b2a5-cb32d90e6e35",
+                        "reservation_key": reservation_key,
+                        "status": "completed",
+                        "error": None,
+                        "created_at": at,
+                        "completed_at": at,
+                        "metadata": {
+                            "action": "sync",
+                            "trigger": "http",
+                            "principal": "session",
+                            "live_build_id": "current-build",
+                            "receipt_path": "metrics/receipts/app-actions/current.json",
+                        },
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(app_actions, "_is_pg_conn", lambda _conn: True)
+
+    verified = app_actions.live_action_execution_verification(
+        _PgLikeConn(),
+        "mathflow",
+        [{"name": "sync", "trigger": "http"}],
+        live_build_id="current-build",
+    )
+
+    assert verified["status"] == "action_verified"
+    assert verified["verified_action"] == "sync"
+    assert verified["receipt_path"] == "metrics/receipts/app-actions/current.json"
+
+
+def test_live_action_execution_verification_supports_pg_json_mapping_rows(monkeypatch):
+    class _Cursor:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class _Conn:
+        def execute(self, query, params):
+            assert "%s" in query
+            if "FROM events" in query:
+                assert params == ("mathflow",)
+                return _Cursor(
+                    [
+                        {
+                            "payload_json": {
+                                "action": "sync",
+                                "trigger": "http",
+                                "principal": "session",
+                                "live_build_id": "build-current",
+                                "receipt_path": "metrics/receipts/app-actions/current.json",
+                                "usage_reservation_key": "browser-idempotency-key",
+                            },
+                            "created_at": "2026-07-11T03:00:01+00:00",
+                        }
+                    ]
+                )
+            assert params == (
+                "mathflow",
+                "/api/takyon/apps/mathflow/actions/sync",
+            )
+            return _Cursor(
+                [
+                    {
+                        "id": "9cb4ef13-e899-4430-b2a5-cb32d90e6e35",
+                        "reservation_key": "browser-idempotency-key",
+                        "status": "completed",
+                        "error": None,
+                        "created_at": "2026-07-11T03:00:00+00:00",
+                        "completed_at": "2026-07-11T03:00:00+00:00",
+                        "metadata": {
+                            "action": "sync",
+                            "trigger": "http",
+                            "principal": "session",
+                            "live_build_id": "build-current",
+                            "receipt_path": "metrics/receipts/app-actions/current.json",
+                        },
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(app_actions, "_is_pg_conn", lambda conn: True)
+
+    verified = app_actions.live_action_execution_verification(
+        _Conn(),
+        "mathflow",
+        [{"name": "sync", "trigger": "http"}],
+        live_build_id="build-current",
+    )
+
+    assert verified["status"] == "action_verified"
+    assert verified["verified_at"] == "2026-07-11T03:00:01+00:00"
+    assert verified["receipt_path"] == "metrics/receipts/app-actions/current.json"
 
 
 def test_get_or_create_service_principal_uses_pg_metadata_column(monkeypatch):
@@ -952,6 +1243,15 @@ def test_product_surface_evidence_and_surface_md_include_action_invocation_statu
     evidence = {
         "inventory": {},
         "operational_facts": {},
+        "live_action_execution_verification": {
+            "action_execution_required": True,
+            "status": "action_verified",
+            "live_build_id": "build-current",
+            "verified_action": "sync",
+            "verified_at": "2026-06-12T19:54:22+00:00",
+            "receipt_path": "metrics/receipts/app-actions/sync.json",
+            "blocker": "",
+        },
         "action_invocations": [
             {
                 "name": "sync",
@@ -1000,6 +1300,10 @@ def test_product_surface_evidence_and_surface_md_include_action_invocation_statu
 
     surface_md = (business_root / "product" / "surface.md").read_text(encoding="utf-8")
     assert "Action invocation status: sync=ok, nightly=failed (boom), draft=never" in surface_md
+    assert "## Live Action Execution Verification" in surface_md
+    assert "Status: action_verified" in surface_md
+    assert "certifies only one current-build signed-in HTTP action execution" in surface_md
+    assert "full browser workflow E2E remains required" in surface_md
 
 
 def test_product_action_handler_executes_shared_executor(monkeypatch):
@@ -1045,7 +1349,8 @@ def test_run_action_subprocess_executes_local_deno_action(tmp_path):
     action_path = tmp_path / "sum.ts"
     action_path.write_text(
         "export default async function (payload, ctx) {\n"
-        "  return { total: Number(payload.a || 0) + Number(payload.b || 0), trigger: ctx.trigger, base: ctx.base_url };\n"
+        "  return { total: Number(payload.a || 0) + Number(payload.b || 0), trigger: ctx.trigger, "
+        "base: ctx.base_url ?? null, token: ctx.session_token ?? null, keys: Object.keys(ctx) };\n"
         "}\n",
         encoding="utf-8",
     )
@@ -1075,10 +1380,87 @@ def test_run_action_subprocess_executes_local_deno_action(tmp_path):
     assert result == {
         "total": 5,
         "trigger": "http",
-        "base": "http://127.0.0.1:9119/api/takyon/apps/mathflow",
+        "base": None,
+        "token": None,
+        "keys": ["business", "trigger", "principal", "live_build_id", "runtime_features", "rail_state", "generate"],
     }
     assert run["timeout_seconds"] == 30
     assert run["isolation"] in {"subprocess", "subprocess-fallback", "systemd-user-scope"}
+
+
+@pytest.mark.skipif(shutil.which("deno") is None, reason="deno is not installed")
+def test_action_cannot_intercept_closure_bearer_by_replacing_fetch_or_headers(tmp_path):
+    observed_authorization: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            observed_authorization.append(str(self.headers.get("Authorization") or ""))
+            payload = json.dumps({"text": "generated"}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    action_path = tmp_path / "steal.ts"
+    action_path.write_text(
+        "export default async function run(_payload: TakyonActionPayload, ctx: TakyonActionContext) {\n"
+        "  const stolen = [];\n"
+        "  try { globalThis.Headers = class EvilHeaders {\n"
+        "    constructor(value) { stolen.push(JSON.stringify(value)); }\n"
+        "    has() { return false; }\n"
+        "    set(_name, value) { stolen.push(String(value)); }\n"
+        "  }; } catch (_error) {}\n"
+        "  try { globalThis.fetch = async (...args) => { stolen.push(JSON.stringify(args)); "
+        "return new Response('{}', { status: 200 }); }; } catch (_error) {}\n"
+        "  String.prototype.startsWith = () => true;\n"
+        "  try { Object.defineProperty(URL.prototype, 'pathname', { get() { return '/api/takyon/apps/mathflow'; } }); } catch (_error) {}\n"
+        "  await fetch(String(_payload.lookalike), { method: 'POST', body: '{}' });\n"
+        "  const generated = await ctx.generate({ messages: [] });\n"
+        "  return { stolen, text: generated.text };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    origin = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result, _run = app_actions._run_action_subprocess(
+            action_path=action_path,
+            base=app_actions.RailsBase(
+                origin=origin,
+                hostport=f"127.0.0.1:{server.server_port}",
+            ),
+            outbound_hosts=[],
+            request={
+                "payload": {
+                    "lookalike": f"{origin}/api/takyon/apps/mathflow-evil/generate",
+                },
+                "ctx": {
+                    "base_url": f"{origin}/api/takyon/apps/mathflow",
+                    "session_token": "sess_secret_123",
+                    "business": "mathflow",
+                    "trigger": "http",
+                    "principal": {"kind": "session", "id": "u_123"},
+                },
+            },
+            timeout_seconds=30,
+            cpu_quota_percent=50,
+            memory_max_mb=256,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert result == {"stolen": [], "text": "generated"}
+    assert observed_authorization == ["", "Bearer sess_secret_123"]
 
 
 def test_run_action_subprocess_requires_user_scope_on_operator(monkeypatch, tmp_path):
@@ -1941,11 +2323,16 @@ def _write_action_file(store, business, name, body):
     (actions / f"{name}.ts").write_text(body, encoding="utf-8")
 
 
-_REAL_HANDLER = "export default async (payload, ctx) => ({ ok: true });\n"
+_REAL_HANDLER = (
+    "export default async (payload: TakyonActionPayload, ctx: TakyonActionContext) "
+    "=> ({ ok: true, payload, callable: ctx.isRailCallable('records') });\n"
+)
 _STUB_HANDLER = 'export const action = "x";\nexport const description = "stub, no handler";\n'
+_LIVE_BUILD_ID = "a" * 32
 _HTTP_SURFACE = {
     "status": "active",
     "source_path": "product/site",
+    "live_build_id": _LIVE_BUILD_ID,
     "runtime_features": ["auth", "account"],
     "product_workflow": {},
     "rail_state": {},
@@ -1959,9 +2346,32 @@ def _principal(uid="u_A", tier="paid"):
 def _stub_runtime_config(monkeypatch):
     def _materialize_fixture(store, *, business_slug, surface, session_token):
         site_root = store._business_root(business_slug, sync=False) / "product" / "site"
-        return site_root, app_actions.site_http_action_names(site_root, surface)
+        return site_root, app_actions.site_http_action_names(site_root, surface), {}
 
-    monkeypatch.setattr(app_actions, "materialize_live_action_bundle", _materialize_fixture)
+    monkeypatch.setattr(app_actions, "_materialize_live_action_bundle", _materialize_fixture)
+    monkeypatch.setattr(
+        app_actions,
+        "_validated_action_user",
+        lambda *_args, **_kwargs: {
+            "id": "u_A",
+            "email": "u_A@e.com",
+            "tier": "paid",
+            "status": "active",
+        },
+    )
+    monkeypatch.setattr(
+        app_actions,
+        "_claim_action_invocation",
+        lambda *a, **k: {
+            "is_new": True,
+            "status": "running",
+            "error": "",
+            "result": None,
+            "run": {},
+            "receipt_path": k.get("receipt_path") or "",
+        },
+    )
+    monkeypatch.setattr(app_actions, "_finish_action_invocation", lambda *a, **k: None)
     monkeypatch.setattr(
         app_actions,
         "_action_runtime_config",
@@ -1980,6 +2390,134 @@ def _stub_runtime_config(monkeypatch):
     )
 
 
+def test_http_invoke_requires_exact_browser_build_identity(tmp_path, monkeypatch):
+    store = _InvokeStore(tmp_path, _HTTP_SURFACE)
+    _write_action_file(store, "biz", "coach", _REAL_HANDLER)
+    _stub_runtime_config(monkeypatch)
+    monkeypatch.setattr(
+        app_actions,
+        "_legacy_unbound_live_build_id",
+        lambda *_args, **_kwargs: "b" * 32,
+    )
+    monkeypatch.setattr(
+        app_actions,
+        "_materialize_live_action_bundle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("missing browser build identity must fail before bundle resolution")
+        ),
+    )
+
+    with pytest.raises(
+        app_actions.ActionContractError,
+        match="expected_live_build_id is required",
+    ):
+        app_actions.invoke_action(
+            store,
+            business_slug="biz",
+            action_name="coach",
+            payload={},
+            principal=_principal(),
+            trigger="http",
+            idempotency_key="missing-build",
+        )
+
+
+def test_legacy_unbound_build_gate_is_session_authenticated_current_and_expiring():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE app_sessions (business_slug TEXT, app_user_id TEXT, token_hash TEXT, "
+        "revoked_at TEXT, expires_at TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE app_users (business_slug TEXT, id TEXT, status TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE app_surface_contracts (business_slug TEXT, live_build_id TEXT, "
+        "publish_status TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE product_builds (business_slug TEXT, build_id TEXT, status TEXT, "
+        "legacy_unbound_until TEXT)"
+    )
+    now = datetime.now(timezone.utc)
+    token = "legacy-session"
+    conn.execute("INSERT INTO app_users VALUES ('biz', 'user-a', 'active')")
+    conn.execute(
+        "INSERT INTO app_sessions VALUES ('biz', 'user-a', ?, NULL, ?)",
+        (
+            hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            (now + timedelta(hours=2)).isoformat(),
+        ),
+    )
+    conn.execute("INSERT INTO app_surface_contracts VALUES ('biz', ?, 'published')", (_LIVE_BUILD_ID,))
+    conn.execute(
+        "INSERT INTO product_builds VALUES ('biz', ?, 'live', ?)",
+        (_LIVE_BUILD_ID, (now + timedelta(hours=1)).isoformat()),
+    )
+
+    def resolve(session_token=token):
+        return app_actions._legacy_unbound_live_build_id(
+            conn,
+            business_slug="biz",
+            session_token=session_token,
+        )
+
+    assert resolve() == _LIVE_BUILD_ID
+    assert resolve("wrong-session") == ""
+
+    conn.execute(
+        "UPDATE product_builds SET legacy_unbound_until = ? WHERE build_id = ?",
+        ((now - timedelta(seconds=1)).isoformat(), _LIVE_BUILD_ID),
+    )
+    assert resolve() == ""
+
+    future_build = "c" * 32
+    conn.execute("UPDATE app_surface_contracts SET live_build_id = ?", (future_build,))
+    conn.execute(
+        "INSERT INTO product_builds VALUES ('biz', ?, 'live', NULL)",
+        (future_build,),
+    )
+    assert resolve() == ""
+
+
+def test_http_invoke_accepts_only_db_authorized_legacy_current_build(tmp_path, monkeypatch):
+    store = _InvokeStore(tmp_path, _HTTP_SURFACE)
+    _write_action_file(store, "biz", "coach", _REAL_HANDLER)
+    _stub_runtime_config(monkeypatch)
+    monkeypatch.setattr(
+        app_actions,
+        "_legacy_unbound_live_build_id",
+        lambda *_args, **_kwargs: _LIVE_BUILD_ID,
+    )
+    monkeypatch.setattr(app_actions, "_reserve_usage", lambda *a, **k: None)
+    monkeypatch.setattr(app_actions, "_settle_usage", lambda *a, **k: None)
+    observed: dict[str, Any] = {}
+
+    def run(**kwargs):
+        observed.update(kwargs)
+        return {"ok": True}, {"isolation": "test"}
+
+    monkeypatch.setattr(
+        app_actions,
+        "_run_action_subprocess",
+        run,
+    )
+
+    result = app_actions.invoke_action(
+        store,
+        business_slug="biz",
+        action_name="coach",
+        payload={},
+        principal=_principal(),
+        trigger="http",
+        idempotency_key="legacy-current",
+    )
+
+    assert result["success"] is True
+    assert observed["request"]["ctx"]["live_build_id"] == _LIVE_BUILD_ID
+
+
 def test_invoke_refuses_undeclared_uncertified_action(tmp_path, monkeypatch):
     """Fix (MEDIUM): an action whose FILE exists but is not in the HTTP-certified set (here a stub
     with no real handler) must be refused at invoke — not run as an undeclared/unexposed action."""
@@ -1995,6 +2533,32 @@ def test_invoke_refuses_undeclared_uncertified_action(tmp_path, monkeypatch):
         app_actions.invoke_action(
             store, business_slug="biz", action_name="ghost", payload={},
             principal=_principal(), trigger="http", idempotency_key="k1",
+            expected_live_build_id=_LIVE_BUILD_ID,
+        )
+
+
+def test_invoke_rejects_unvalidated_principal_before_idempotency_namespace(tmp_path, monkeypatch):
+    store = _InvokeStore(tmp_path, _HTTP_SURFACE)
+    _write_action_file(store, "biz", "coach", _REAL_HANDLER)
+    _stub_runtime_config(monkeypatch)
+    monkeypatch.setattr(
+        app_actions,
+        "_materialize_live_action_bundle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("mismatched principal must fail before bundle execution")
+        ),
+    )
+
+    with pytest.raises(app_actions.AppActionError, match="session_user_mismatch"):
+        app_actions.invoke_action(
+            store,
+            business_slug="biz",
+            action_name="coach",
+            payload={},
+            principal=_principal(uid="attacker-controlled"),
+            trigger="http",
+            idempotency_key="same-key",
+            expected_live_build_id=_LIVE_BUILD_ID,
         )
 
 
@@ -2005,7 +2569,6 @@ def test_invoke_uses_materialized_bundle_without_workspace_sync(tmp_path, monkey
     store.business_root_sync_flags.clear()
     store.resolve_file_sync_flags.clear()
     _stub_runtime_config(monkeypatch)
-    monkeypatch.setattr(app_actions, "_reservation_exists", lambda *a, **k: False)
     monkeypatch.setattr(app_actions, "_reserve_usage", lambda *a, **k: None)
     monkeypatch.setattr(app_actions, "_settle_usage", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -2017,6 +2580,7 @@ def test_invoke_uses_materialized_bundle_without_workspace_sync(tmp_path, monkey
     app_actions.invoke_action(
         store, business_slug="biz", action_name="coach", payload={},
         principal=_principal(), trigger="http", idempotency_key="k-cache",
+        expected_live_build_id=_LIVE_BUILD_ID,
     )
 
     assert store.business_root_sync_flags
@@ -2039,12 +2603,17 @@ def test_live_action_bundle_materializes_build_keyed_verified_artifact(tmp_path)
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
-        "CREATE TABLE product_builds (build_id TEXT, business_slug TEXT, "
-        "action_bundle_json TEXT, action_bundle_sha256 TEXT)"
+        "CREATE TABLE app_surface_contracts (business_slug TEXT PRIMARY KEY, live_build_id TEXT)"
     )
     conn.execute(
-        "INSERT INTO product_builds VALUES (?, ?, ?, ?)",
-        ("build-a", "biz", bundle["json"], bundle["sha256"]),
+        "CREATE TABLE product_builds (build_id TEXT, business_slug TEXT, "
+        "action_bundle_json TEXT, action_bundle_sha256 TEXT, status TEXT, created_at TEXT, "
+        "servable_until TEXT, activation_state TEXT)"
+    )
+    conn.execute("INSERT INTO app_surface_contracts VALUES ('biz', ?)", (_LIVE_BUILD_ID,))
+    conn.execute(
+        "INSERT INTO product_builds VALUES (?, ?, ?, ?, 'live', datetime('now'), NULL, 'live')",
+        (_LIVE_BUILD_ID, "biz", bundle["json"], bundle["sha256"]),
     )
 
     class Store:
@@ -2055,7 +2624,7 @@ def test_live_action_bundle_materializes_build_keyed_verified_artifact(tmp_path)
             yield conn
 
     root, certified = app_actions.materialize_live_action_bundle(
-        Store(), business_slug="biz", surface={"live_build_id": "build-a"}, session_token="session"
+        Store(), business_slug="biz", surface={"live_build_id": _LIVE_BUILD_ID}, session_token="session"
     )
     assert certified == {"coach"}
     assert (root / "actions" / "coach.ts").read_text(encoding="utf-8") == _REAL_HANDLER
@@ -2064,11 +2633,11 @@ def test_live_action_bundle_materializes_build_keyed_verified_artifact(tmp_path)
 
     conn.execute(
         "UPDATE product_builds SET action_bundle_sha256 = ? WHERE build_id = ?",
-        ("0" * 64, "build-a"),
+        ("0" * 64, _LIVE_BUILD_ID),
     )
     with pytest.raises(app_actions.ActionContractError, match="digest mismatch"):
         app_actions.materialize_live_action_bundle(
-            Store(), business_slug="biz", surface={"live_build_id": "build-a"}, session_token="session"
+            Store(), business_slug="biz", surface={"live_build_id": _LIVE_BUILD_ID}, session_token="session"
         )
 
 
@@ -2082,19 +2651,24 @@ def test_invoke_replay_returns_cached_success_without_rerunning(tmp_path, monkey
         app_actions, "_run_action_subprocess",
         lambda **kw: (_ for _ in ()).throw(AssertionError("replay must not re-run the subprocess")),
     )
-    monkeypatch.setattr(app_actions, "_reservation_exists", lambda *a, **k: True)
-
-    receipt_rel = app_actions._receipt_relpath("biz", "coach", "k-dup")
-    receipt_abs = store._resolve_business_file("biz", receipt_rel)
-    receipt_abs.parent.mkdir(parents=True, exist_ok=True)
-    receipt_abs.write_text(
-        json.dumps({"success": True, "result": {"echo": "cached"}, "run": {"isolation": "prior"}, "receipt_path": receipt_rel}),
-        encoding="utf-8",
+    receipt_rel = "metrics/receipts/app-actions/durable.json"
+    monkeypatch.setattr(
+        app_actions,
+        "_claim_action_invocation",
+        lambda *a, **k: {
+            "is_new": False,
+            "status": "completed",
+            "error": "",
+            "result": {"echo": "cached"},
+            "run": {"isolation": "prior"},
+            "receipt_path": receipt_rel,
+        },
     )
 
     out = app_actions.invoke_action(
         store, business_slug="biz", action_name="coach", payload={},
         principal=_principal(), trigger="http", idempotency_key="k-dup",
+        expected_live_build_id=_LIVE_BUILD_ID,
     )
     assert out == {"success": True, "action": "coach", "result": {"echo": "cached"}, "run": {"isolation": "prior"}, "receipt": receipt_rel}
 
@@ -2109,15 +2683,24 @@ def test_invoke_replay_surfaces_prior_failure_without_rerunning(tmp_path, monkey
         app_actions, "_run_action_subprocess",
         lambda **kw: (_ for _ in ()).throw(AssertionError("failed-replay must not re-run")),
     )
-    receipt_rel = app_actions._receipt_relpath("biz", "coach", "k-fail")
-    receipt_abs = store._resolve_business_file("biz", receipt_rel)
-    receipt_abs.parent.mkdir(parents=True, exist_ok=True)
-    receipt_abs.write_text(json.dumps({"success": False, "error": "provider exploded"}), encoding="utf-8")
+    monkeypatch.setattr(
+        app_actions,
+        "_claim_action_invocation",
+        lambda *a, **k: {
+            "is_new": False,
+            "status": "failed",
+            "error": "provider exploded",
+            "result": None,
+            "run": {},
+            "receipt_path": k.get("receipt_path") or "",
+        },
+    )
 
     with pytest.raises(app_actions.ActionReplayConflict, match="provider exploded"):
         app_actions.invoke_action(
             store, business_slug="biz", action_name="coach", payload={},
             principal=_principal(), trigger="http", idempotency_key="k-fail",
+            expected_live_build_id=_LIVE_BUILD_ID,
         )
 
 
@@ -2127,7 +2710,18 @@ def test_invoke_replay_in_flight_reservation_refuses(tmp_path, monkeypatch):
     store = _InvokeStore(tmp_path, _HTTP_SURFACE)
     _write_action_file(store, "biz", "coach", _REAL_HANDLER)
     _stub_runtime_config(monkeypatch)
-    monkeypatch.setattr(app_actions, "_reservation_exists", lambda *a, **k: True)
+    monkeypatch.setattr(
+        app_actions,
+        "_claim_action_invocation",
+        lambda *a, **k: {
+            "is_new": False,
+            "status": "running",
+            "error": "",
+            "result": None,
+            "run": {},
+            "receipt_path": k.get("receipt_path") or "",
+        },
+    )
     monkeypatch.setattr(
         app_actions, "_run_action_subprocess",
         lambda **kw: (_ for _ in ()).throw(AssertionError("in-flight replay must not run")),
@@ -2137,6 +2731,7 @@ def test_invoke_replay_in_flight_reservation_refuses(tmp_path, monkeypatch):
         app_actions.invoke_action(
             store, business_slug="biz", action_name="coach", payload={},
             principal=_principal(), trigger="http", idempotency_key="k-inflight",
+            expected_live_build_id=_LIVE_BUILD_ID,
         )
 
 
@@ -2146,9 +2741,18 @@ def test_invoke_fresh_path_runs_and_writes_receipt(tmp_path, monkeypatch):
     store = _InvokeStore(tmp_path, _HTTP_SURFACE)
     _write_action_file(store, "biz", "coach", _REAL_HANDLER)
     _stub_runtime_config(monkeypatch)
-    monkeypatch.setattr(app_actions, "_reservation_exists", lambda *a, **k: False)
-    monkeypatch.setattr(app_actions, "_reserve_usage", lambda *a, **k: None)
-    monkeypatch.setattr(app_actions, "_settle_usage", lambda *a, **k: None)
+    reserved: list[dict] = []
+    settled: list[dict] = []
+    monkeypatch.setattr(
+        app_actions,
+        "_reserve_usage",
+        lambda *a, **k: reserved.append(k),
+    )
+    monkeypatch.setattr(
+        app_actions,
+        "_settle_usage",
+        lambda *a, **k: settled.append(k),
+    )
     runs: list[int] = []
 
     def _fake_run(**kw):
@@ -2160,16 +2764,129 @@ def test_invoke_fresh_path_runs_and_writes_receipt(tmp_path, monkeypatch):
     out = app_actions.invoke_action(
         store, business_slug="biz", action_name="coach", payload={"q": "x"},
         principal=_principal(), trigger="http", idempotency_key="k-fresh",
+        expected_live_build_id=_LIVE_BUILD_ID,
     )
     assert len(runs) == 1
     assert out["success"] is True
     assert out["result"] == {"answer": 42}
-    receipt_rel = app_actions._receipt_relpath("biz", "coach", "k-fresh")
+    reservation_key = app_actions._action_reservation_key(
+        app_user_id="u_A",
+        principal_kind="session",
+        action_name="coach",
+        live_build_id=_LIVE_BUILD_ID,
+        caller_idempotency_key="k-fresh",
+    )
+    receipt_rel = app_actions._receipt_relpath("biz", "coach", reservation_key)
     receipt = json.loads(store._resolve_business_file("biz", receipt_rel).read_text(encoding="utf-8"))
     assert receipt["success"] is True
     assert receipt["result"] == {"answer": 42}
+    assert receipt["live_build_id"] == _LIVE_BUILD_ID
+    expected_verification_metadata = {
+        "action": "coach",
+        "trigger": "http",
+        "principal": "session",
+        "live_build_id": _LIVE_BUILD_ID,
+        "receipt_path": receipt_rel,
+    }
+    assert reserved[0]["metadata"] == expected_verification_metadata
+    assert settled[0]["metadata"] == expected_verification_metadata
+    assert reserved[0]["reservation_key"] == reservation_key
+    assert settled[0]["reservation_key"] == reservation_key
     # and the run lock was released (per-customer key freed for re-use)
     assert not app_actions._active_business_runs
+
+
+def test_action_reservation_key_is_fixed_size_for_multi_megabyte_caller_key():
+    short = app_actions._action_reservation_key(
+        app_user_id="user-a",
+        principal_kind="session",
+        action_name="generate",
+        live_build_id=_LIVE_BUILD_ID,
+        caller_idempotency_key="small",
+    )
+    long = app_actions._action_reservation_key(
+        app_user_id="user-a",
+        principal_kind="session",
+        action_name="generate",
+        live_build_id=_LIVE_BUILD_ID,
+        caller_idempotency_key="x" * (8 * 1024 * 1024),
+    )
+
+    assert len(short) == len(long)
+    assert len(long.encode("utf-8")) < 256
+    assert long != short
+    assert "x" * 100 not in long
+
+
+def test_invoke_uses_build_frozen_execution_contract_and_propagates_build_to_nested_actions(
+    tmp_path,
+    monkeypatch,
+):
+    surface = {
+        **_HTTP_SURFACE,
+        "runtime_features": ["search"],
+        "rail_state": {"search": "live"},
+        "product_workflow": {
+            "outbound_hosts": ["new.example.com"],
+            "actions": [{"name": "coach", "trigger": "http"}],
+        },
+    }
+    store = _InvokeStore(tmp_path, surface)
+    _write_action_file(store, "biz", "coach", _REAL_HANDLER)
+    _stub_runtime_config(monkeypatch)
+    site_root = store._business_root("biz", sync=False) / "product" / "site"
+    # A mutable local derived file must not influence execution; the authenticated contract
+    # returned with the exact DB bundle is the only contract consumed by invoke_action.
+    (site_root / ".execution-contract.json").write_text(
+        json.dumps(
+            {
+                "action_specs": [{"name": "coach", "trigger": "http"}],
+                "outbound_hosts": ["poison.example.com"],
+                "runtime_features": ["search"],
+                "rail_state": {"search": "live"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        app_actions,
+        "_materialize_live_action_bundle",
+        lambda *_args, **_kwargs: (
+            site_root,
+            {"coach"},
+            {
+                "action_specs": [{"name": "coach", "trigger": "http"}],
+                "outbound_hosts": ["old.example.com"],
+                "runtime_features": ["records"],
+                "rail_state": {"records": "live"},
+            },
+        ),
+    )
+    observed: dict[str, Any] = {}
+
+    def run(**kwargs):
+        observed.update(kwargs)
+        return {"ok": True}, {"isolation": "test"}
+
+    monkeypatch.setattr(app_actions, "_reserve_usage", lambda *a, **k: None)
+    monkeypatch.setattr(app_actions, "_settle_usage", lambda *a, **k: None)
+    monkeypatch.setattr(app_actions, "_run_action_subprocess", run)
+
+    app_actions.invoke_action(
+        store,
+        business_slug="biz",
+        action_name="coach",
+        payload={},
+        principal=_principal(),
+        trigger="http",
+        idempotency_key="frozen",
+        expected_live_build_id=_LIVE_BUILD_ID,
+    )
+
+    assert observed["outbound_hosts"] == ["old.example.com"]
+    assert observed["request"]["ctx"]["live_build_id"] == _LIVE_BUILD_ID
+    assert observed["request"]["ctx"]["runtime_features"] == ["records"]
+    assert observed["request"]["ctx"]["rail_state"]["records"] == "live"
 
 
 def test_run_lock_is_per_customer_not_per_business():

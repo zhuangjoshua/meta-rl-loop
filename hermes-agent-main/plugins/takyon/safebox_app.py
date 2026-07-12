@@ -1576,7 +1576,6 @@ class _AppSubscriptionCancelBody(BaseModel):
     business_slug: str
     app_user_id: str
     session_token: str | None = None
-    cancel_at_period_end: bool = True
 
 
 class _Auth0LoginStateBody(BaseModel):
@@ -5264,11 +5263,7 @@ def build_safebox_app() -> FastAPI:
                     conn,
                     business,
                     app_user_id=app_user_id,
-                    cancel_at_period_end=bool(body.cancel_at_period_end),
-                    subscription_updater=lambda subscription_id, should_cancel_at_period_end: safebox.stripe_request(
-                        f"subscriptions/{subscription_id}",
-                        {"cancel_at_period_end": "true" if should_cancel_at_period_end else "false"},
-                    ),
+                    subscription_canceler=safebox.cancel_stripe_subscription_immediately,
                 )
             except app_payments.CancelableSubscriptionNotFound as exc:
                 raise HTTPException(status_code=404, detail="no_cancelable_subscription") from exc

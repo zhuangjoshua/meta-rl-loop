@@ -8,6 +8,7 @@ from plugins.takyon import turn_runtime
 
 
 SCAFFOLD = Path(takyon_core.__file__).resolve().parent / "subuser_app_kit" / "scaffold"
+MOBILE_SCAFFOLD = Path(takyon_core.__file__).resolve().parent / "mobile_app_kit" / "scaffold"
 HERMES_ROOT = Path(takyon_core.__file__).resolve().parents[2]
 TASTE_SKILL = HERMES_ROOT / "skills" / "creative" / "taste-frontend" / "SKILL.md"
 CLAUDE_DESIGN_SKILL = HERMES_ROOT / "skills" / "creative" / "claude-design" / "SKILL.md"
@@ -197,8 +198,78 @@ def test_optional_style_references_are_explicit_and_cannot_override_an_existing_
 def test_navigation_component_is_force_refreshed_with_appkit_rails():
     assert "src/components/site-navigation.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/components/social-proof-marquee.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
+    assert "src/components/subscription-cancellation.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/lib/interaction-sounds.ts" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/screens/support.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
+
+
+def test_active_subscription_cancel_control_is_starter_owned_and_immediate():
+    main = read("src/main.tsx")
+    component = read("src/components/subscription-cancellation.tsx")
+    hooks = read("src/lib/hooks.ts")
+    runtime = (SCAFFOLD.parent / "runtime-client.js").read_text(encoding="utf-8")
+
+    assert "SubscriptionCancellation" in main
+    assert '<Route path="profile" element={<AccountRoute />} />' in main
+    assert "hasActiveStripeSubscription(access.account)" in component
+    assert "client.cancelSubscription()" in component
+    assert "Cancel subscription now" in component
+    assert "end immediately" in component
+    assert "There is no grace period" in component
+    assert "window.confirm" in component
+    assert "export function hasActiveStripeSubscription" in hooks
+    cancel_method = runtime.split("async cancelSubscription()", 1)[1].split("async deleteAccount", 1)[0]
+    assert 'JSON.stringify({ action: "cancel_subscription" })' in cancel_method
+    assert "payload" not in cancel_method
+
+    contract = takyon_core._subuser_app_kit_contract_block(None)
+    assert "Immediate self-service subscription cancellation is a non-removable AppKit invariant" in contract
+    assert "never tell customers to contact/email/message support" in contract
+
+
+def test_subscription_cancel_conformance_blocks_support_mediation(tmp_path):
+    root = tmp_path / "site"
+    for rel in ("src/main.tsx", "src/components/subscription-cancellation.tsx"):
+        destination = root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(read(rel), encoding="utf-8")
+    profile = root / "src" / "screens" / "profile.tsx"
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    profile.write_text(
+        'export const Profile = () => <p>To cancel or change billing, contact support.</p>;\n',
+        encoding="utf-8",
+    )
+
+    markers = takyon_core._appkit_subscription_cancellation_markers(root)
+    assert [marker["issue"] for marker in markers] == ["support_mediated_subscription_cancel"]
+    blocker = takyon_core._appkit_subscription_cancellation_unfinished_blocker(
+        {"inventory": {"risk_markers": markers}}
+    )
+    assert "remove support-mediated cancellation copy" in blocker
+    assert "no grace period" in blocker
+
+    profile.write_text(
+        'export const Profile = () => <p>Cancel any active plan instantly in Account. Contact support for help understanding an invoice.</p>;\n',
+        encoding="utf-8",
+    )
+    assert takyon_core._appkit_subscription_cancellation_markers(root) == []
+
+
+def test_mobile_profile_exposes_the_same_immediate_self_service_cancel():
+    profile = (MOBILE_SCAFFOLD / "src" / "screens" / "profile.tsx").read_text(
+        encoding="utf-8"
+    )
+    runtime = (MOBILE_SCAFFOLD / "_takyon" / "runtime-client.ts").read_text(
+        encoding="utf-8"
+    )
+    assert "hasPaidSubscription" in profile
+    assert "await client.cancelSubscription()" in profile
+    assert "Cancel subscription now" in profile
+    assert "There is no grace period" in profile
+    assert "cancelSubscription(): Promise<any>" in runtime
+    cancel_method = runtime.split("async cancelSubscription()", 1)[1].split("async profile", 1)[0]
+    assert 'JSON.stringify({ action: "cancel_subscription" })' in cancel_method
+    assert "payload" not in cancel_method
 
 
 def test_landing_has_truthful_coscale_social_proof_and_default_interaction_sounds():

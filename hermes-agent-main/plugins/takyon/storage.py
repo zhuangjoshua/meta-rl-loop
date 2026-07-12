@@ -50,10 +50,10 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Protocol, runtime_checkable
+from typing import Any, Callable, ContextManager, Iterable, Iterator, Mapping, Protocol, runtime_checkable
 
 from takyon_cli.config import load_env
 
@@ -169,6 +169,19 @@ class StorageQuotaExceeded(StorageError):
 
     Raised at sync-up time (the write boundary) so a fail-closed gate refuses the upload BEFORE any
     bytes land, rather than reporting an overflow after the fact."""
+
+
+class PointerStateAmbiguous(StorageError):
+    """A public build pointer write could not be read back to a known value.
+
+    Callers must leave the durable database activation in its explicit reconciliation state; an
+    unknown remote write result can never be treated as either a successful publish or a safe
+    rollback.
+    """
+
+    def __init__(self, message: str, *, observed: str = "") -> None:
+        super().__init__(message)
+        self.observed = str(observed or "").strip().lower()
 
 
 def _env_backed_config_value(name: str) -> str:
@@ -1093,6 +1106,111 @@ def public_site_pointer_key(slug: str) -> str:
     return f"{_safe_slug(slug)}/current"
 
 
+def public_site_previous_pointer_key(slug: str) -> str:
+    """Key the bounded previous-build descriptor used only for immutable asset fallback."""
+    return f"{_safe_slug(slug)}/previous"
+
+
+def _previous_pointer_body(build_id: str, servable_until: str) -> bytes:
+    previous = str(build_id or "").strip().lower()
+    deadline = str(servable_until or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{16,64}", previous):
+        raise UnsafePath(f"unsafe previous build id: {build_id!r}")
+    if not deadline:
+        raise StorageError("previous build servable_until is required")
+    return (
+        json.dumps(
+            {"build_id": previous, "servable_until": deadline},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _read_pointer_value(
+    backend: "StorageBackend",
+    key: str,
+    *,
+    missing_ok: bool = True,
+    retry_missing: bool = False,
+    attempts: int = 4,
+) -> bytes | None:
+    """Read one small pointer with bounded retries; unknown is never collapsed into missing."""
+    last_exc: BaseException | None = None
+    for attempt in range(max(1, int(attempts))):
+        try:
+            return backend.get(key)
+        except ObjectNotFound as exc:
+            if missing_ok and not retry_missing:
+                return None
+            last_exc = exc
+        except Exception as exc:  # storage transports expose provider errors
+            last_exc = exc
+        if attempt + 1 < max(1, int(attempts)):
+            time.sleep((0.0, 0.05, 0.15, 0.35)[min(attempt, 3)])
+    if missing_ok and isinstance(last_exc, ObjectNotFound):
+        return None
+    raise PointerStateAmbiguous(
+        f"could not read back public pointer {key}: {last_exc or 'unknown storage error'}"
+    )
+
+
+def _put_pointer_verified(
+    backend: "StorageBackend",
+    key: str,
+    body: bytes,
+) -> None:
+    """PUT then verify exact bytes, including the ambiguous-response-after-commit case."""
+    put_error: Exception | None = None
+    try:
+        backend.put(key, body, digest=digest_bytes(body))
+    except Exception as exc:  # readback decides whether the remote write landed
+        put_error = exc
+    try:
+        observed_body = _read_pointer_value(
+            backend,
+            key,
+            missing_ok=True,
+            retry_missing=True,
+        )
+    except PointerStateAmbiguous as exc:
+        detail = f"; put error: {put_error}" if put_error is not None else ""
+        raise PointerStateAmbiguous(f"public pointer {key} write is ambiguous{detail}") from exc
+    if observed_body == body:
+        return
+    observed = ""
+    if observed_body is not None:
+        observed = observed_body.decode("utf-8", errors="replace").strip().lower()
+    detail = f"; put error: {put_error}" if put_error is not None else ""
+    raise PointerStateAmbiguous(
+        f"public pointer {key} verification mismatch{detail}", observed=observed
+    )
+
+
+def _delete_pointer_verified(backend: "StorageBackend", key: str) -> None:
+    delete_error: Exception | None = None
+    try:
+        backend.delete(key)
+    except ObjectNotFound:
+        return
+    except Exception as exc:  # readback resolves ambiguous provider responses
+        delete_error = exc
+    try:
+        observed = _read_pointer_value(backend, key, missing_ok=True)
+    except PointerStateAmbiguous as exc:
+        detail = f"; delete error: {delete_error}" if delete_error is not None else ""
+        raise PointerStateAmbiguous(f"public pointer {key} delete is ambiguous{detail}") from exc
+    if observed is None:
+        return
+    detail = f"; delete error: {delete_error}" if delete_error is not None else ""
+    raise PointerStateAmbiguous(
+        f"public pointer {key} still exists after delete{detail}",
+        observed=observed.decode("utf-8", errors="replace").strip().lower(),
+    )
+
+
 def public_site_object_prefix(slug: str) -> str:
     """R2 prefix for one public product site: ``<slug>/``.
 
@@ -1174,19 +1292,56 @@ def public_r2_backend() -> "StorageBackend":
     return SafeboxStorageBackend("r2") if _remote_storage_authority_enabled() else R2StorageBackend()
 
 
+def read_public_site_pointer_from_r2(
+    slug: str,
+    *,
+    backend: "StorageBackend | None" = None,
+) -> str:
+    """Read the exact edge pointer with bounded retry; missing is ``""``, unknown raises."""
+    r2 = backend or public_r2_backend()
+    body = _read_pointer_value(
+        r2,
+        public_site_pointer_key(_safe_slug(slug)),
+        missing_ok=True,
+    )
+    if body is None:
+        return ""
+    value = body.decode("utf-8", errors="replace").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{16,64}", value):
+        raise PointerStateAmbiguous(
+            "public product pointer contains an invalid build id",
+            observed=value,
+        )
+    return value
+
+
 def write_public_site_to_r2(
     slug: str,
     build_id: str,
     build_root: str | os.PathLike[str],
     *,
     backend: "StorageBackend | None" = None,
+    before_pointer: Callable[[], Mapping[str, Any] | None] | None = None,
+    before_pointer_state: (
+        Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None
+    ) = None,
+    after_pointer: Callable[[Mapping[str, Any]], None] | None = None,
+    pointer_guard: Callable[[], ContextManager[None]] | None = None,
+    on_pointer_failure: (
+        Callable[[Exception, Mapping[str, Any]], None] | None
+    ) = None,
 ) -> dict[str, object]:
     """Mirror one finished static build into the PUBLIC R2 bucket for edge serving.
 
     Uploads every file under ``build_root`` to ``<slug>/<build_id>/<rel>`` (digest-tagged), THEN
-    writes the ``<slug>/current`` pointer to ``build_id`` so the pointer flips only after the whole
-    build is present (no torn read at the edge). Public-only: callers must never hand this a private
-    workspace tree — ``build_root`` is the same dist that :func:`write_build_artifact` publishes.
+    invokes ``before_pointer`` (when supplied), writes a bounded ``<slug>/previous`` descriptor from
+    its activation receipt, THEN writes and reads back the ``<slug>/current`` pointer to ``build_id``.
+    ``pointer_guard`` wraps that activation/reconciliation sequence in the durable per-business fence;
+    immutable uploads deliberately happen before that guard. This lets the product publisher
+    durably activate the exact action bundle after all immutable bytes exist but before a browser
+    can load those bytes from the edge. Public-only:
+    callers must never hand this a private workspace tree — ``build_root`` is the same dist that
+    :func:`write_build_artifact` publishes.
 
     ``backend`` is injectable for tests; in production it defaults to a fresh :class:`R2StorageBackend`
     (raising :class:`StorageUnconfigured` if ``R2_*`` is absent). Returns the uploaded
@@ -1201,6 +1356,7 @@ def write_public_site_to_r2(
     root = Path(build_root).expanduser().resolve()
     digests = workspace_file_digests(root)
     pointer_key = public_site_pointer_key(safe_slug)
+    previous_pointer_key = public_site_previous_pointer_key(safe_slug)
     normalized_build_id = str(build_id or "").strip().lower()
     # build_id is content-addressed, so a pointer that already equals it means every object of
     # this exact build is already present and live — re-PUTting the whole dist adds nothing.
@@ -1211,14 +1367,9 @@ def write_public_site_to_r2(
         current_pointer = r2.get(pointer_key).decode("utf-8", errors="replace").strip().lower()
     except Exception:
         current_pointer = ""
-    if normalized_build_id and current_pointer == normalized_build_id:
-        return {
-            "slug": safe_slug,
-            "build_id": normalized_build_id,
-            "files": {},
-            "pointer_key": pointer_key,
-            "skipped": "pointer_already_current",
-        }
+    pointer_already_current = bool(
+        normalized_build_id and current_pointer == normalized_build_id
+    )
     uploaded: dict[str, str] = {}
 
     def _mirror_one(item: tuple[str, str]) -> None:
@@ -1230,15 +1381,150 @@ def write_public_site_to_r2(
         )
 
     items = sorted(digests.items())
-    _map_concurrently(_mirror_one, items)
-    uploaded.update(items)
-    pointer_body = normalized_build_id.encode("utf-8")
-    r2.put(pointer_key, pointer_body, digest=digest_bytes(pointer_body))
-    return {
+    if not pointer_already_current:
+        _map_concurrently(_mirror_one, items)
+        uploaded.update(items)
+    with (pointer_guard() if pointer_guard is not None else nullcontext()):
+        # Snapshot the old bounded-fallback descriptor while the business fence is held so a failed
+        # activation can restore the exact edge state, not a stale pre-build guess.
+        prior_current_body = _read_pointer_value(r2, pointer_key, missing_ok=True)
+        prior_previous_body = _read_pointer_value(r2, previous_pointer_key, missing_ok=True)
+        pointer_state = {
+            "observed_current_build_id": (
+                prior_current_body.decode("utf-8", errors="replace").strip().lower()
+                if prior_current_body is not None
+                else ""
+            ),
+            "prior_r2_previous_pointer": (
+                prior_previous_body.decode("utf-8", errors="replace")
+                if prior_previous_body is not None
+                else ""
+            ),
+        }
+        if before_pointer_state is not None:
+            activation_receipt = dict(before_pointer_state(pointer_state) or {})
+        else:
+            activation_receipt = dict(before_pointer() or {}) if before_pointer is not None else {}
+        activation_receipt.setdefault("prior_r2_previous_pointer", (
+            prior_previous_body.decode("utf-8", errors="replace")
+            if prior_previous_body is not None
+            else ""
+        ))
+        activation_receipt.setdefault(
+            "observed_current_build_id",
+            pointer_state["observed_current_build_id"],
+        )
+        try:
+            if "previous_build_id" in activation_receipt:
+                previous_build_id = str(
+                    activation_receipt.get("previous_build_id") or ""
+                ).strip().lower()
+                previous_servable_until = str(
+                    activation_receipt.get("previous_servable_until") or ""
+                ).strip()
+                if previous_build_id:
+                    previous_body = _previous_pointer_body(
+                        previous_build_id,
+                        previous_servable_until,
+                    )
+                    _put_pointer_verified(r2, previous_pointer_key, previous_body)
+                else:
+                    _delete_pointer_verified(r2, previous_pointer_key)
+            if not pointer_already_current:
+                pointer_body = normalized_build_id.encode("utf-8")
+                _put_pointer_verified(r2, pointer_key, pointer_body)
+            else:
+                # The initial read was an optimization hint outside the fence. Re-read inside it;
+                # another publisher must not make an old build look current between those reads.
+                observed = _read_pointer_value(r2, pointer_key, missing_ok=False)
+                if observed != normalized_build_id.encode("utf-8"):
+                    raise PointerStateAmbiguous(
+                        "public pointer changed before idempotent activation",
+                        observed=(observed or b"").decode("utf-8", errors="replace").strip(),
+                    )
+            if after_pointer is not None:
+                after_pointer(activation_receipt)
+        except Exception as exc:  # caller reconciles while the fence is held
+            if on_pointer_failure is not None and activation_receipt:
+                on_pointer_failure(exc, activation_receipt)
+            raise
+    result: dict[str, object] = {
         "slug": safe_slug,
         "build_id": normalized_build_id,
         "files": uploaded,
         "pointer_key": pointer_key,
+        "previous_pointer_key": previous_pointer_key,
+        "activation": activation_receipt,
+    }
+    if pointer_already_current:
+        result["skipped"] = "pointer_already_current"
+    return result
+
+
+def restore_public_site_pointer_from_r2(
+    slug: str,
+    *,
+    failed_build_id: str,
+    previous_build_id: str = "",
+    prior_previous_pointer: str = "",
+    backend: "StorageBackend | None" = None,
+) -> dict[str, object]:
+    """Conditionally undo a public pointer whose matching DB activation failed.
+
+    The read-before-write guard is essential: an older publisher must never roll back a newer build
+    that advanced ``current`` after it. Under the per-business publish fence the value remains stable;
+    the comparison is defense in depth for manual/concurrent recovery paths.
+    """
+    safe_slug = _safe_slug(slug)
+    failed = str(failed_build_id or "").strip().lower()
+    previous = str(previous_build_id or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{16,64}", failed):
+        raise UnsafePath(f"unsafe failed build id: {failed_build_id!r}")
+    if previous and not re.fullmatch(r"[0-9a-f]{16,64}", previous):
+        raise UnsafePath(f"unsafe previous build id: {previous_build_id!r}")
+    r2 = backend or public_r2_backend()
+    pointer_key = public_site_pointer_key(safe_slug)
+    previous_pointer_key = public_site_previous_pointer_key(safe_slug)
+    try:
+        current = r2.get(pointer_key).decode("utf-8", errors="replace").strip().lower()
+    except ObjectNotFound:
+        current = ""
+    if current != failed:
+        if current == previous:
+            prior_previous_body = str(prior_previous_pointer or "").encode("utf-8")
+            if prior_previous_body:
+                _put_pointer_verified(r2, previous_pointer_key, prior_previous_body)
+            else:
+                _delete_pointer_verified(r2, previous_pointer_key)
+            return {
+                "attempted": True,
+                "restored": True,
+                "status": "current_already_previous",
+                "current_build_id": current,
+            }
+        return {
+            "attempted": True,
+            "restored": False,
+            "status": "pointer_changed",
+            "current_build_id": current,
+        }
+    if previous:
+        body = previous.encode("utf-8")
+        _put_pointer_verified(r2, pointer_key, body)
+        status = "restored_previous"
+    else:
+        _delete_pointer_verified(r2, pointer_key)
+        status = "removed_failed_initial_pointer"
+    prior_previous_body = str(prior_previous_pointer or "").encode("utf-8")
+    if prior_previous_body:
+        _put_pointer_verified(r2, previous_pointer_key, prior_previous_body)
+    else:
+        _delete_pointer_verified(r2, previous_pointer_key)
+    return {
+        "attempted": True,
+        "restored": True,
+        "status": status,
+        "current_build_id": previous,
     }
 
 

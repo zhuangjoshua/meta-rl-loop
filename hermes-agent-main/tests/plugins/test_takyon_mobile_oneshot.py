@@ -228,20 +228,114 @@ def test_mobile_release_audience_registered_on_both_halves():
 # ── X launch-post dedupe across re-enqueued bootstraps ────────────────────────────────────
 
 
-def test_x_launch_post_deduped_on_bootstrap_when_receipt_exists(monkeypatch):
+def test_x_launch_post_deduped_on_bootstrap_when_receipt_exists(monkeypatch, tmp_path):
     import json as _json
     from plugins.takyon import core
 
-    monkeypatch.setattr(core, "_store", lambda: object())
+    commits = []
+
+    class _Store:
+        def commit(self, **kwargs):
+            commits.append(kwargs)
+            return {"success": True}
+
+    receipt_path = tmp_path / "x-receipt.json"
+    receipt_path.write_text('{"sent":true}\n', encoding="utf-8")
+    monkeypatch.setattr(core, "_store", _Store)
     monkeypatch.setattr(core, "_resolved_business_slug", lambda args, required=False: "acme")
     monkeypatch.setattr(core, "_active_operator_task_kind", lambda: "ceo_bootstrap")
     monkeypatch.setattr(
+        core,
+        "_active_operator_task_receipt_context",
+        lambda: {"task_kind": "ceo_bootstrap", "run_id": "bootstrap-job", "attempt": 2},
+    )
+    monkeypatch.setattr(
         core, "_x_outreach_receipt_candidates",
-        lambda store, business: [{"post_id": "111", "post_url": "https://x.com/i/status/111", "receipt_rel": "metrics/receipts/outreach/a.json"}],
+        lambda store, business: [{
+            "post_id": "111",
+            "post_url": "https://x.com/i/status/111",
+            "receipt_rel": "metrics/receipts/outreach/a.json",
+            "receipt_abs": str(receipt_path),
+            "receipt": {
+                "sent": True,
+                "external_side_effects": "sent",
+                "operator_task": {
+                    "task_kind": "ceo_bootstrap",
+                    "run_id": "bootstrap-job",
+                    "attempt": 1,
+                }
+            },
+        }],
     )
     out = _json.loads(core._handle_live_business_x_publish_outreach({"business": "acme", "channel": "x", "provider": "x", "body": "hi"}))
     assert out["success"] is True and out["deduped"] is True
     assert out["post_id"] == "111"
+    assert commits[0]["operations"][0]["event_type"] == "bootstrap.x_launch.outcome"
+
+
+@pytest.mark.parametrize(
+    ("receipt", "owner_text"),
+    [
+        (
+            {
+                "operator_task": {
+                    "task_kind": "ceo_bootstrap",
+                    "run_id": "old-job",
+                    "attempt": 1,
+                }
+            },
+            "old-job",
+        ),
+        ({}, "unscoped legacy receipt"),
+    ],
+)
+def test_x_launch_post_refuses_stale_business_wide_receipt(
+    monkeypatch,
+    receipt,
+    owner_text,
+):
+    import json as _json
+    from plugins.takyon import core
+
+    commits = []
+
+    class _Store:
+        def commit(self, **kwargs):
+            commits.append(kwargs)
+            return {"success": True}
+
+    monkeypatch.setattr(core, "_store", _Store)
+    monkeypatch.setattr(core, "_resolved_business_slug", lambda args, required=False: "acme")
+    monkeypatch.setattr(core, "_active_operator_task_kind", lambda: "ceo_bootstrap")
+    monkeypatch.setattr(
+        core,
+        "_active_operator_task_receipt_context",
+        lambda: {"task_kind": "ceo_bootstrap", "run_id": "new-job", "attempt": 1},
+    )
+    monkeypatch.setattr(
+        core,
+        "_x_outreach_receipt_candidates",
+        lambda store, business: [{
+            "post_id": "old-111",
+            "post_url": "https://x.com/i/status/old-111",
+            "receipt_rel": "metrics/receipts/outreach/old.json",
+            "receipt": receipt,
+        }],
+    )
+
+    out = _json.loads(
+        core._handle_live_business_x_publish_outreach(
+            {"business": "acme", "channel": "x", "provider": "x", "body": "hi"}
+        )
+    )
+
+    assert out["success"] is False
+    assert out["blocked"] is True
+    assert out["review_required"] is True
+    assert out["status"] == "blocked_stale_x_receipt_scope"
+    assert owner_text in out["error"]
+    assert "new-job" in out["error"]
+    assert commits[0]["operations"][0]["event_type"] == "bootstrap.x_launch.outcome"
 
 
 def test_x_launch_post_not_deduped_on_wake(monkeypatch):
@@ -264,3 +358,144 @@ def test_x_launch_post_not_deduped_on_wake(monkeypatch):
     out = _json.loads(core._handle_live_business_x_publish_outreach({"business": "acme", "channel": "x", "provider": "x", "body": "hi"}))
     assert out.get("deduped") is not True
     assert called["n"] == 0  # the dedupe branch was never entered on a wake
+
+
+def test_x_publish_metadata_accepts_only_runtime_owned_operator_task(monkeypatch):
+    import contextlib
+    import json as _json
+    from plugins.takyon import core
+
+    class _Store:
+        @contextlib.contextmanager
+        def _connect(self):
+            yield object()
+
+        @staticmethod
+        def _ensure_business(_conn, _business):
+            return {"mode": "live"}
+
+    runtime_context: dict[str, object] = {}
+    queued: list[dict] = []
+    monkeypatch.setattr(core, "_store", _Store)
+    monkeypatch.setattr(core, "_resolved_business_slug", lambda *_a, **_k: "acme")
+    monkeypatch.setattr(core, "_active_operator_task_kind", lambda: "")
+    monkeypatch.setattr(
+        core,
+        "_active_operator_task_receipt_context",
+        lambda: dict(runtime_context),
+    )
+    monkeypatch.setattr(core, "_canonical_product_url", lambda *_a, **_k: "https://acme.coscale.app/")
+    monkeypatch.setattr(core, "_creative_credit_preflight_gate", lambda *_a, **_k: {"success": True})
+
+    def _capture(_args, operation, **_kwargs):
+        queued.append(operation)
+        return core.tool_result({"success": True})
+
+    monkeypatch.setattr(core, "_run_worker_backed_business_job_and_wait", _capture)
+    forged = {
+        "task_kind": "ceo_bootstrap",
+        "run_id": "caller-forged-job",
+        "attempt": 99,
+    }
+    first = _json.loads(
+        core._handle_live_business_x_publish_outreach(
+            {
+                "business": "acme",
+                "channel": "x",
+                "provider": "x",
+                "body": "hello",
+                "requires_api": ["x"],
+                "idempotency_key": "x-no-runtime-context",
+                "metadata": {"operator_task": forged, "campaign": "launch"},
+            }
+        )
+    )
+    assert first["success"] is True
+    assert queued[-1]["payload"]["metadata"]["campaign"] == "launch"
+    assert "operator_task" not in queued[-1]["payload"]["metadata"]
+
+    runtime_context.update(
+        {"task_kind": "ceo_bootstrap", "run_id": "runtime-job", "attempt": 2}
+    )
+    second = _json.loads(
+        core._handle_live_business_x_publish_outreach(
+            {
+                "business": "acme",
+                "channel": "x",
+                "provider": "x",
+                "body": "hello again",
+                "requires_api": ["x"],
+                "idempotency_key": "x-runtime-context",
+                "metadata": {"operator_task": forged},
+            }
+        )
+    )
+    assert second["success"] is True
+    assert queued[-1]["payload"]["metadata"]["operator_task"] == {
+        "task_kind": "ceo_bootstrap",
+        "run_id": "runtime-job",
+        "attempt": 2,
+    }
+
+
+def test_x_creative_credit_blocker_requires_human_review_on_real_branch(monkeypatch):
+    import contextlib
+    import json as _json
+    from plugins.takyon import core
+
+    class _Store:
+        @contextlib.contextmanager
+        def _connect(self):
+            yield object()
+
+        @staticmethod
+        def _ensure_business(_conn, _business):
+            return {"mode": "live"}
+
+    recorded: dict[str, object] = {}
+    runtime_context = {
+        "task_kind": "ceo_bootstrap",
+        "run_id": "bootstrap-job",
+        "attempt": 3,
+    }
+    monkeypatch.setattr(core, "_store", _Store)
+    monkeypatch.setattr(core, "_resolved_business_slug", lambda *_a, **_k: "acme")
+    monkeypatch.setattr(core, "_active_operator_task_kind", lambda: "ceo_bootstrap")
+    monkeypatch.setattr(core, "_active_operator_task_receipt_context", lambda: runtime_context)
+    monkeypatch.setattr(core, "_x_outreach_receipt_candidates", lambda *_a, **_k: [])
+    monkeypatch.setattr(core, "_canonical_product_url", lambda *_a, **_k: "https://acme.coscale.app/")
+    monkeypatch.setattr(
+        core,
+        "_creative_credit_preflight_gate",
+        lambda *_a, **_k: {
+            "success": False,
+            "status": "blocked_insufficient_creative_credits",
+            "error": "insufficient_creative_credits",
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_record_scoped_bootstrap_x_outcome",
+        lambda *_a, **kwargs: recorded.update(kwargs),
+    )
+
+    result = _json.loads(
+        core._handle_live_business_x_publish_outreach(
+            {
+                "business": "acme",
+                "channel": "x",
+                "provider": "x",
+                "body": "launch",
+                "requires_api": ["x"],
+                "idempotency_key": "x-credit-blocked",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["blocked"] is True
+    assert result["review_required"] is True
+    assert recorded["status"] == "blocked"
+    assert recorded["source"] == "creative_credit_preflight"
+    assert recorded["review_required"] is True
+    assert recorded["operator_task"] == runtime_context

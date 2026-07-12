@@ -4,11 +4,12 @@ import io
 import json
 import os
 import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
 
-from plugins.takyon import cli, core as takyon_core, turn_runtime, worker
+from plugins.takyon import cli, core as takyon_core, jobs as takyon_jobs, turn_runtime, worker
 
 
 class _FakeStore:
@@ -591,18 +592,250 @@ def test_claude_worker_progress_notifies_activity_sink_even_for_duplicates():
     ]
 
 
-def test_claude_worker_heartbeat_updates_context_free_watchdog_clocks():
-    takyon_core._CLAUDE_WORKER_ANY_ACTIVITY[0] = 0.0
-    with takyon_core._CLAUDE_WORKER_BUSINESS_ACTIVITY_LOCK:
-        takyon_core._CLAUDE_WORKER_BUSINESS_ACTIVITY.pop("heartbeat-demo", None)
+def test_claude_worker_heartbeat_isolated_by_business_run_and_attempt_after_600s(monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr(takyon_core.time, "monotonic", lambda: clock["now"])
+    with takyon_core._CLAUDE_WORKER_RUN_ACTIVITY_LOCK:
+        takyon_core._CLAUDE_WORKER_RUN_ACTIVITY.clear()
 
-    takyon_core._claude_worker_heartbeat_tick("heartbeat-demo")
+    takyon_core._claude_worker_heartbeat_tick(
+        "business-a", run_id="job-a", attempt=1
+    )
+    clock["now"] = 601.0
+    takyon_core._claude_worker_heartbeat_tick(
+        "business-b", run_id="job-b", attempt=1
+    )
+    takyon_core._claude_worker_heartbeat_tick(
+        "business-a", run_id="job-a", attempt=2
+    )
 
-    assert takyon_core.claude_worker_seconds_since_activity("heartbeat-demo") < 1.0
-    assert takyon_core.claude_worker_seconds_since_any_activity() < 1.0
+    # A busy concurrent business and a newer attempt for the same business cannot refresh A/1.
+    assert takyon_core.claude_worker_seconds_since_activity(
+        "business-a", run_id="job-a", attempt=1
+    ) == 601.0
+    assert takyon_core.claude_worker_seconds_since_activity(
+        "business-b", run_id="job-b", attempt=1
+    ) == 0.0
+    assert takyon_core.claude_worker_seconds_since_activity(
+        "business-a", run_id="job-a", attempt=2
+    ) == 0.0
+
+    # A's own heartbeat is still a valid keepalive after an accelerated >600-second run.
+    takyon_core._claude_worker_heartbeat_tick(
+        "business-a", run_id="job-a", attempt=1
+    )
+    assert takyon_core.claude_worker_seconds_since_activity(
+        "business-a", run_id="job-a", attempt=1
+    ) == 0.0
 
 
-def test_ceo_turn_bounds_absolute_and_post_publish_tails():
+@pytest.mark.parametrize(
+    ("heartbeat_business", "expect_timeout"),
+    (("business-b", True), ("business-a", False)),
+)
+def test_ceo_watchdog_only_accepts_exact_run_heartbeat_after_600s(
+    monkeypatch,
+    heartbeat_business,
+    expect_timeout,
+):
+    wait_calls = {"count": 0}
+
+    class FakeProgress:
+        def tool_progress(self, *_args, **_kwargs):
+            pass
+
+        def tool_started(self, *_args, **_kwargs):
+            pass
+
+        def tool_generating(self, *_args, **_kwargs):
+            pass
+
+        def tool_completed(self, *_args, **_kwargs):
+            pass
+
+        def activity(self, *_args, **_kwargs):
+            pass
+
+        def stream_delta(self, *_args, **_kwargs):
+            pass
+
+        def finish_stream(self):
+            pass
+
+        def seconds_since_activity(self):
+            return 601.0
+
+    class FakeAgent:
+        def __init__(self):
+            self.session_estimated_cost_usd = 0.0
+            self.session_cost_status = "ok"
+            self._memory_nudge_interval = 0
+            self._skill_nudge_interval = 0
+            self.activity_callback = None
+            self.suppress_status_output = False
+
+        def get_activity_summary(self):
+            return {"seconds_since_activity": 601.0}
+
+        def run_conversation(self, _prompt, stream_callback=None):
+            return {"final_response": "Done", "completed": True}
+
+        def interrupt(self, _reason):
+            pass
+
+    def fake_wait(fs, timeout=None):
+        wait_calls["count"] += 1
+        if wait_calls["count"] == 1:
+            return set(), set(fs)
+        return set(fs), set()
+
+    monkeypatch.setattr(turn_runtime, "_read_model_config", lambda _store: {"provider": "anthropic"})
+    monkeypatch.setattr(
+        turn_runtime,
+        "_require_agent_model_config",
+        lambda _cfg, model_override="": "claude-sonnet-5",
+    )
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-1")
+    monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda _slug, _text: None)
+    monkeypatch.setattr("plugins.takyon.core.load_takyon_env", lambda: None)
+    monkeypatch.setattr("plugins.takyon.core.TakyonStore", lambda: _FakeStore())
+    monkeypatch.setattr(
+        "takyon_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested=None, target_model=None: {
+            "provider": "anthropic",
+            "api_mode": "anthropic_messages",
+        },
+    )
+    monkeypatch.setattr(
+        "plugins.takyon.operator_gateway.build_operator_gateway_agent",
+        lambda **_kwargs: FakeAgent(),
+    )
+    monkeypatch.setattr(concurrent.futures, "wait", fake_wait)
+
+    with takyon_core._CLAUDE_WORKER_RUN_ACTIVITY_LOCK:
+        takyon_core._CLAUDE_WORKER_RUN_ACTIVITY.clear()
+        takyon_core._CLAUDE_WORKER_RUN_ACTIVITY[("business-a", "job-a", 1)] = (
+            takyon_core.time.monotonic() - 601.0
+        )
+    takyon_core._claude_worker_heartbeat_tick(
+        heartbeat_business,
+        run_id="job-a" if heartbeat_business == "business-a" else "job-b",
+        attempt=1,
+    )
+
+    guard = takyon_jobs.JobClaimGuard(job_id="job-a", worker_id="worker-1", attempt=1)
+    run = lambda: worker._run_ceo_turn(
+        slug="business-a",
+        system_prompt="ceo",
+        user_prompt="ship it",
+        toolsets=["takyon"],
+        max_turns=3,
+        inactivity_limit=600,
+        progress=FakeProgress(),
+    )
+    with takyon_jobs._bound_job_claim(guard):
+        with takyon_core._bound_operator_task_context(
+            run_id="job-a",
+            task_kind="ceo_bootstrap",
+        ):
+            if expect_timeout:
+                with pytest.raises(TimeoutError, match="600s inactivity limit"):
+                    run()
+            else:
+                response, _, _, completed = run()
+                assert response == "Done"
+                assert completed is True
+
+
+@pytest.mark.parametrize("probe_mode", ["blocked", "read_error"])
+def test_ceo_turn_interrupts_before_next_model_iteration_on_human_review_blocker(
+    monkeypatch,
+    probe_mode,
+):
+    release = threading.Event()
+    interrupted: list[str] = []
+
+    class FakeAgent:
+        def __init__(self):
+            self.session_estimated_cost_usd = 0.0
+            self.session_cost_status = "exact"
+            self._memory_nudge_interval = 0
+            self._skill_nudge_interval = 0
+            self.activity_callback = None
+            self.suppress_status_output = False
+
+        def get_activity_summary(self):
+            return {"seconds_since_activity": 0.0}
+
+        def run_conversation(self, _prompt, **_kwargs):
+            release.wait(timeout=5.0)
+            return {"final_response": "should not continue", "completed": False}
+
+        def interrupt(self, reason):
+            interrupted.append(str(reason))
+            release.set()
+
+    monkeypatch.setattr(turn_runtime, "_read_model_config", lambda _store: {"provider": "anthropic"})
+    monkeypatch.setattr(
+        turn_runtime,
+        "_require_agent_model_config",
+        lambda _cfg, model_override="": "claude-sonnet-5",
+    )
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-1")
+    monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda _slug, _text: None)
+    monkeypatch.setattr("plugins.takyon.core.load_takyon_env", lambda: None)
+    monkeypatch.setattr("plugins.takyon.core.TakyonStore", lambda: _FakeStore())
+    monkeypatch.setattr(
+        "takyon_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested=None, target_model=None: {
+            "provider": "anthropic",
+            "api_mode": "anthropic_messages",
+        },
+    )
+    monkeypatch.setattr(
+        "plugins.takyon.operator_gateway.build_operator_gateway_agent",
+        lambda **_kwargs: FakeAgent(),
+    )
+    original_wait = concurrent.futures.wait
+    first_wait = {"pending": True}
+
+    def immediate_first_poll(fs, timeout=None):
+        if first_wait["pending"]:
+            first_wait["pending"] = False
+            return set(), set(fs)
+        return original_wait(fs, timeout=timeout)
+
+    monkeypatch.setattr(concurrent.futures, "wait", immediate_first_poll)
+
+    def _terminal_probe():
+        if probe_mode == "read_error":
+            raise OSError("proof database unavailable")
+        return True
+
+    response, _, _, completed = worker._run_ceo_turn(
+        slug="acme",
+        system_prompt="ceo",
+        user_prompt="bootstrap",
+        toolsets=["takyon"],
+        max_turns=30,
+        inactivity_limit=600.0,
+        terminal_review_probe=_terminal_probe,
+    )
+
+    assert completed is False
+    if probe_mode == "read_error":
+        assert "proof read unavailable" in response
+        assert interrupted == [
+            "CEO bootstrap stopped: human-review proof read unavailable: proof database unavailable"
+        ]
+    else:
+        assert "requires human review" in response
+        assert interrupted == [
+            "CEO bootstrap stopped: durable bootstrap blocker requires human review"
+        ]
+
+
+def test_ceo_turn_bounds_absolute_and_post_completion_tails():
     assert worker._ceo_turn_bound_reason(
         now=3001.0,
         started_at=0.0,
@@ -616,7 +849,7 @@ def test_ceo_turn_bounds_absolute_and_post_publish_tails():
         wall_clock_limit=3000.0,
         completion_observed_at=100.0,
         completion_grace_seconds=600.0,
-    ) == "durable product publish remained complete for 600s grace window"
+    ) == "durable bootstrap launch outcome remained complete for 600s grace window"
     assert worker._ceo_turn_bound_reason(
         now=699.0,
         started_at=0.0,
@@ -631,7 +864,7 @@ def test_ceo_turn_bounds_absolute_and_post_publish_tails():
         completion_observed_at=100.0,
         completion_grace_seconds=600.0,
         active_external_work=True,
-    ) == ""
+    ) == "reached 3000s bootstrap wall-clock limit"
 
 
 def test_worker_run_ceo_turn_treats_claude_worker_progress_as_activity_for_inactivity_guard(monkeypatch):
@@ -1319,6 +1552,122 @@ def test_follow_worker_job_interrupts_cleanly_during_initial_priming():
     assert result["detached"] is True
 
 
+def test_follow_worker_job_live_detach_does_not_claim_bootstrap_done(monkeypatch):
+    class _Conn:
+        def execute(self, _sql, _params):
+            return self
+
+        def fetchone(self):
+            return {"live_build_id": "build-current-123456"}
+
+    class _Store:
+        def __init__(self):
+            self.conn = _Conn()
+
+        def read_ceo_turn_events(self, _slug, limit=200):
+            return []
+
+        @contextlib.contextmanager
+        def _connect(self):
+            yield self.conn
+
+        @contextlib.contextmanager
+        def _leaf_conn(self, conn):
+            yield conn
+
+        @staticmethod
+        def _row_to_dict(row):
+            return dict(row)
+
+    monkeypatch.setattr(cli, "_runtime_event_rows_for_business", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        "plugins.takyon.jobs.get_job",
+        lambda *_a, **_k: SimpleNamespace(status="running", result=None, error=None),
+    )
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        result = cli._follow_worker_job(
+            _Store(),
+            "acme",
+            "bootstrap-job",
+            label="bootstrap",
+            tail_logs=False,
+            poll_seconds=0.0,
+            max_seconds=-1.0,
+        )
+
+    output = out.getvalue()
+    assert "product site for business:acme is LIVE" in output
+    assert "bootstrap is still running required launch steps" in output
+    assert "not a clean bootstrap completion" in output
+    assert "effectively done" not in output
+    assert result["site_live_on_detach"] is True
+
+
+@pytest.mark.parametrize("terminal_status", ("failed", "blocked"))
+def test_follow_worker_job_terminal_live_pointer_does_not_claim_job_provenance(
+    monkeypatch,
+    terminal_status,
+):
+    class _Conn:
+        def execute(self, _sql, _params):
+            return self
+
+        def fetchone(self):
+            # This pointer deliberately has no relation to the terminal job below.
+            return {"live_build_id": "preexisting-build-123456"}
+
+    class _Store:
+        def read_ceo_turn_events(self, _slug, limit=200):
+            return []
+
+        @contextlib.contextmanager
+        def _connect(self):
+            yield _Conn()
+
+        @contextlib.contextmanager
+        def _leaf_conn(self, conn):
+            yield conn
+
+        @staticmethod
+        def _row_to_dict(row):
+            return dict(row)
+
+    monkeypatch.setattr(cli, "_runtime_event_rows_for_business", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        "plugins.takyon.jobs.get_job",
+        lambda *_a, **_k: SimpleNamespace(
+            status=terminal_status,
+            result=None,
+            error={"reason": "test terminal"},
+            created_at=None,
+            updated_at=None,
+        ),
+    )
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        result = cli._follow_worker_job(
+            _Store(),
+            "acme",
+            "bootstrap-job",
+            label="bootstrap",
+            tail_logs=False,
+            poll_seconds=0.0,
+            max_seconds=5.0,
+        )
+
+    output = out.getvalue()
+    assert f"this job remains {terminal_status}" in output
+    assert "business currently points at live build preexisting" in output
+    assert "not scoped to this job or attempt" in output
+    assert "does not prove this job published it" in output
+    assert "A later run completed" not in output
+    assert result["status"] == terminal_status
+    assert result["site_published_build"] == "preexisting-build-123456"
+
+
 def test_follow_chat_matches_just_streamed_ceo_text():
     assert cli._follow_chat_matches_stream("Hello\nworld", " Hello world ") is True
     assert (
@@ -1447,6 +1796,144 @@ def test_format_cli_value_preserves_bootstrap_job_summary_for_create_results():
     )
 
     assert rendered == "Create running for business:claimscope0701d. Bootstrap job: job-123."
+
+
+def test_format_cli_value_surfaces_pending_live_action_execution_without_claiming_browser_e2e():
+    rendered = cli._format_cli_value(
+        {
+            "success": True,
+            "business": "pitchweave0711",
+            "bootstrap_job": {"job_id": "job-verify", "status": "queued"},
+            "follow": {
+                "status": "completed",
+                "result": {
+                    "live_action_execution_status": "pending",
+                    "live_action_execution_verification": {
+                        "action_execution_required": True,
+                        "status": "pending",
+                        "blocker": (
+                            "no successful signed-in live action execution receipt exists for live build "
+                            "build-current"
+                        ),
+                    },
+                },
+            },
+        }
+    )
+
+    assert "Create build completed" in rendered
+    assert "live action execution verification is PENDING" in rendered
+    assert "Full browser workflow E2E remains REQUIRED" in rendered
+    assert "exact-ref reopen" in rendered
+    assert "build-current" in rendered
+    assert "Bootstrap job: job-verify" in rendered
+
+
+def test_format_cli_value_action_verified_still_requires_full_browser_e2e():
+    rendered = cli._format_cli_value(
+        {
+            "success": True,
+            "business": "pitchweave0711",
+            "bootstrap_job": {"job_id": "job-verify", "status": "queued"},
+            "follow": {
+                "status": "completed",
+                "result": {
+                    "live_action_execution_status": "action_verified",
+                    "live_action_execution_verification": {
+                        "action_execution_required": True,
+                        "status": "action_verified",
+                        "verified_action": "generate-proposal",
+                    },
+                },
+            },
+        }
+    )
+
+    assert "live action execution verification is ACTION-VERIFIED" in rendered
+    assert "Full browser workflow E2E remains REQUIRED" in rendered
+    assert "Create completed" not in rendered
+
+
+def test_format_cli_value_surfaces_attempt_scoped_blocked_x_launch():
+    rendered = cli._format_cli_value(
+        {
+            "success": True,
+            "business": "pitchweave0711",
+            "bootstrap_job": {"job_id": "job-x-blocked", "status": "queued"},
+            "follow": {
+                "status": "completed",
+                "duration_display": "12m 4s",
+                "result": {
+                    "bootstrap_completion_status": "completed_with_launch_blocker",
+                    "x_launch_status": "blocked",
+                    "x_launch_outcome": {
+                        "status": "blocked",
+                        "bootstrap_job_id": "job-x-blocked",
+                        "bootstrap_attempt": 2,
+                        "blocker": "x channel credits exhausted",
+                        "source": "creative_credit_preflight",
+                        "review_required": True,
+                    },
+                },
+            },
+        }
+    )
+
+    assert "Create product build completed" in rendered
+    assert "X launch is BLOCKED" in rendered
+    assert "x channel credits exhausted" in rendered
+    assert "not a clean bootstrap completion" in rendered
+    assert "Human review is REQUIRED" in rendered
+    assert "job-x-blocked attempt 2" in rendered
+    assert "Create completed" not in rendered
+
+
+def test_format_cli_value_surfaces_attempt_scoped_published_x_launch():
+    rendered = cli._format_cli_value(
+        {
+            "success": True,
+            "business": "pitchweave0711",
+            "bootstrap_job": {"job_id": "job-x-published", "status": "queued"},
+            "follow": {
+                "status": "completed",
+                "result": {
+                    "bootstrap_completion_status": "completed",
+                    "x_launch_status": "published",
+                    "x_launch_outcome": {
+                        "status": "published",
+                        "bootstrap_job_id": "job-x-published",
+                        "bootstrap_attempt": 1,
+                        "post_id": "x-123",
+                        "receipt_path": "metrics/receipts/outreach/x-123.json",
+                    },
+                },
+            },
+        }
+    )
+
+    assert "Create completed for business:pitchweave0711" in rendered
+    assert "X launch is PUBLISHED" in rendered
+    assert "Bootstrap job: job-x-published" in rendered
+
+
+def test_format_cli_value_live_detach_is_truthful_about_required_tail():
+    rendered = cli._format_cli_value(
+        {
+            "success": True,
+            "business": "acme",
+            "bootstrap_job": {"job_id": "job-live", "status": "running"},
+            "follow": {
+                "status": "running",
+                "site_live_on_detach": True,
+                "site_published_build": "build-current-123456",
+            },
+        }
+    )
+
+    assert "product site for business:acme is LIVE" in rendered
+    assert "bootstrap is still running required launch steps" in rendered
+    assert "not a clean bootstrap completion" in rendered
+    assert "effectively done" not in rendered
 
 
 def test_scoped_shell_read_slash_injects_current_business(monkeypatch):

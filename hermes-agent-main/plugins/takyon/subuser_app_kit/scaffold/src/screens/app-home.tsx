@@ -59,7 +59,7 @@ export function AppHomeScreen() {
             </Button>
             {signInBlocked ? (
               <p className="text-sm text-muted-foreground">
-                Sign-in is temporarily unavailable. Please try again shortly.
+                Sign-in is not configured for this product.
               </p>
             ) : null}
           </CardContent>

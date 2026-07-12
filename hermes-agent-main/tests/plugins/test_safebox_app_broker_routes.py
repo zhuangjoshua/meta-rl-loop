@@ -18,7 +18,15 @@ import types
 import pytest
 from starlette.testclient import TestClient
 
-from plugins.takyon import app_entitlements, app_identity, app_payments, business_credits, safebox, safebox_app
+from plugins.takyon import (
+    app_entitlements,
+    app_identity,
+    app_payments,
+    business_credits,
+    safebox,
+    safebox_app,
+    stripe_util,
+)
 from plugins.takyon.safebox_capability import verify_capability
 
 _SIGNING_KEY = "safebox-only-signing-key-not-on-any-client"
@@ -1054,22 +1062,36 @@ def test_app_subscription_cancel_requires_session_user_match(client, monkeypatch
 
 
 def test_app_subscription_cancel_uses_session_bound_user(client, monkeypatch):
-    calls: list[tuple[str, str, bool]] = []
+    calls: list[tuple[str, str]] = []
+    stripe_calls: list[tuple[str, dict, str]] = []
     monkeypatch.setattr(
         app_identity,
         "validate_session",
         lambda c, b, t: types.SimpleNamespace(id="cust_X"),
     )
 
-    def _cancel(conn, business, *, app_user_id, cancel_at_period_end, subscription_updater):
-        calls.append((business, app_user_id, bool(cancel_at_period_end)))
+    def _stripe(path, params, *, method="POST", **_kwargs):
+        stripe_calls.append((path, params, method))
+        return {
+            "id": "sub_123",
+            "object": "subscription",
+            "status": "canceled",
+            "cancel_at_period_end": False,
+        }
+
+    def _cancel(conn, business, *, app_user_id, subscription_canceler):
+        calls.append((business, app_user_id))
+        canceled = subscription_canceler("sub_123")
         return {
             "business_slug": business,
             "app_user_id": app_user_id,
             "stripe_subscription_id": "sub_123",
-            "cancel_at_period_end": bool(cancel_at_period_end),
+            "stripe_subscription_status": canceled["status"],
+            "cancel_at_period_end": False,
+            "effective_immediately": True,
         }
 
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
     monkeypatch.setattr(app_payments, "cancel_subscription", _cancel)
 
     resp = client.post(
@@ -1079,13 +1101,41 @@ def test_app_subscription_cancel_uses_session_bound_user(client, monkeypatch):
             "business_slug": "climblog",
             "app_user_id": "cust_X",
             "session_token": "sess-for-cust-x",
-            "cancel_at_period_end": False,
+            # A legacy client cannot restore grace-period behavior; the dedicated server route
+            # ignores this obsolete field and always performs Stripe DELETE.
+            "cancel_at_period_end": True,
         },
     )
 
     assert resp.status_code == 200, resp.text
-    assert calls == [("climblog", "cust_X", False)]
+    assert calls == [("climblog", "cust_X")]
+    assert stripe_calls == [("subscriptions/sub_123", {}, "DELETE")]
     assert resp.json()["stripe_subscription_id"] == "sub_123"
+    assert resp.json()["effective_immediately"] is True
+
+
+def test_immediate_subscription_cancel_retry_reads_terminal_provider_truth(monkeypatch):
+    calls: list[tuple[str, dict, str]] = []
+
+    def _stripe(path, params, *, method="POST", **_kwargs):
+        calls.append((path, params, method))
+        if method == "DELETE":
+            raise stripe_util.StripeError("Stripe subscriptions/sub_123 failed: 404 resource_missing")
+        return {
+            "id": "sub_123",
+            "object": "subscription",
+            "status": "canceled",
+            "cancel_at_period_end": False,
+        }
+
+    monkeypatch.setattr(safebox, "stripe_request", _stripe)
+    result = safebox.cancel_stripe_subscription_immediately("sub_123")
+
+    assert result["status"] == "canceled"
+    assert calls == [
+        ("subscriptions/sub_123", {}, "DELETE"),
+        ("subscriptions/sub_123", {}, "GET"),
+    ]
 
 
 def test_app_checkout_reconcile_requires_expected_context(client, monkeypatch):

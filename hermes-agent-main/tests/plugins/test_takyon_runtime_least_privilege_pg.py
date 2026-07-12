@@ -29,6 +29,33 @@ from plugins.takyon import billing, business_credits, custody  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _isolate_unrelated_api_key_authority(monkeypatch):
+    """Keep this money-ACL suite independent of the external API-key registry.
+
+    Owner provisioning still writes the real Postgres user/key mirror and opens the real money
+    accounts. Only the opaque Safebox key-registry side effect is replaced: API-key authority is
+    covered by its own suites and is unrelated to the Postgres money-role boundary exercised here.
+    """
+    registered: dict[str, str] = {}
+
+    def register(user_id: str, _raw_key: str, *, key_id: str, **_kwargs):
+        registered[key_id] = user_id
+        return {"id": key_id, "user_id": user_id}
+
+    def delete(key_id: str) -> bool:
+        return registered.pop(key_id, None) is not None
+
+    monkeypatch.setattr(
+        "plugins.takyon.control_plane.safebox.register_user_api_key",
+        register,
+    )
+    monkeypatch.setattr(
+        "plugins.takyon.control_plane.safebox.delete_user_api_key",
+        delete,
+    )
+
+
 def _sub() -> str:
     return f"auth0|{uuid.uuid4().hex}"
 
@@ -176,13 +203,15 @@ def test_billing_ops_write_under_safebox_authority_role(pg_conn):
     uid = _owner(pg_conn)
     billing.open_billing_account(pg_conn, uid)
     billing.grant_allowance(pg_conn, uid, 1000, "grant-1")
-    pg_conn.execute("set role takyon_safebox_authority")
+    # The ledger gate validates both session_user and current_user. SET ROLE changes only the
+    # latter, so use the throwaway superuser connection to model a real Safebox login exactly.
+    pg_conn.execute("set session authorization takyon_safebox_authority")
     try:
         res = billing.reserve(pg_conn, uid, 400, "rk-1")
         assert res.allowance_cents == 400
         billing.settle(pg_conn, "rk-1", 250)
     finally:
-        pg_conn.execute("reset role")
+        pg_conn.execute("reset session authorization")
     bal = billing.get_billing_balances(pg_conn, uid)
     assert bal.allowance_used_cents == 250  # 400 held, settled 250, 150 released
     assert billing.reconcile_billing(pg_conn, uid)["ok"] is True
@@ -197,15 +226,21 @@ def test_safebox_billing_function_acls_are_authority_only(pg_conn):
         "safebox_billing_refund(text)",
     )
     for signature in signatures:
-        authority, operator, app = pg_conn.execute(
+        authority, operator, app, legacy_runtime, app_role, legacy_safebox = pg_conn.execute(
             "select has_function_privilege('takyon_safebox_authority', %s, 'execute'), "
             "has_function_privilege('takyon_operator_runtime', %s, 'execute'), "
-            "has_function_privilege('takyon_app_runtime', %s, 'execute')",
-            (signature, signature, signature),
+            "has_function_privilege('takyon_app_runtime', %s, 'execute'), "
+            "has_function_privilege('takyon_runtime', %s, 'execute'), "
+            "has_function_privilege('takyon_app', %s, 'execute'), "
+            "has_function_privilege('safebox', %s, 'execute')",
+            (signature, signature, signature, signature, signature, signature),
         ).fetchone()
         assert authority is True
         assert operator is False
         assert app is False
+        assert legacy_runtime is False
+        assert app_role is False
+        assert legacy_safebox is False
 
         # PUBLIC is a pseudo-role, not a pg_roles row. Inspect the routine's effective ACL instead of
         # passing "public" to has_function_privilege as though it were a login role. In aclexplode,
@@ -243,13 +278,13 @@ def test_operator_role_cannot_execute_billing_mint_functions(pg_conn):
 def test_credit_ops_write_under_safebox_authority_role(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     business_credits.grant_credits(pg_conn, slug, 50, "grant-1")
-    pg_conn.execute("set role takyon_safebox_authority")
+    pg_conn.execute("set session authorization takyon_safebox_authority")
     try:
         resv = business_credits.reserve_credits(pg_conn, slug, 20, "rk-1")
         assert resv.reserved_credits == 20
         business_credits.commit_credits(pg_conn, "rk-1", actual_credits=12)
     finally:
-        pg_conn.execute("reset role")
+        pg_conn.execute("reset session authorization")
     bal = business_credits.get_business_credit_balances(pg_conn, slug)
     assert bal.balance_credits == 38  # 50 - 20 reserve = 30, commit actual 12 refunds 8 -> 38
     assert bal.reserved_credits == 0

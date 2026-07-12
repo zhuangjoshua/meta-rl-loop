@@ -33,6 +33,7 @@ enabled). Activation is a separate, operator-gated step.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -64,8 +65,10 @@ _DEFAULT_TURN_TIMEOUT = 600.0
 _MOBILE_BOOTSTRAP_TURN_TIMEOUT = 1800.0
 # A bootstrap is one bounded launch transaction, not an unbounded background agent session.  The
 # coding workers inside it retain their own tighter per-call ceilings; these bounds cap the outer
-# CEO choreography even while it remains active.  A durable publish gets a short grace window for
-# launch bookkeeping, then stops; an absolute ceiling catches runs that never reach publish.
+# CEO choreography even while it remains active.  The short completion grace may start only after
+# the whole web launch has a durable outcome (published product plus published/blocked X launch),
+# never at the earlier product-publish milestone; an absolute ceiling catches runs that never reach
+# a terminal launch outcome.
 _DEFAULT_BOOTSTRAP_WALL_TIMEOUT = 3000.0
 _MOBILE_BOOTSTRAP_WALL_TIMEOUT = 3300.0
 _DEFAULT_BOOTSTRAP_POST_PUBLISH_GRACE = 600.0
@@ -407,9 +410,18 @@ def _record_x_publish_result(
         "metadata": dict(metadata),
         "provider_response": dict(provider_response or {}),
     }
+    operator_task = (
+        dict(metadata.get("operator_task"))
+        if isinstance(metadata.get("operator_task"), Mapping)
+        else {}
+    )
+    if operator_task:
+        receipt_payload["operator_task"] = operator_task
     if media:
         receipt_payload["media"] = [dict(item) for item in media]
 
+    receipt_content = json.dumps(receipt_payload, indent=2, sort_keys=True) + "\n"
+    receipt_sha256 = hashlib.sha256(receipt_content.encode("utf-8")).hexdigest()
     operations: list[dict[str, Any]] = [
         {
             "action": "artifact.write",
@@ -421,7 +433,7 @@ def _record_x_publish_result(
             "action": "artifact.write",
             "business": slug,
             "path": receipt_rel,
-            "content": json.dumps(receipt_payload, indent=2, sort_keys=True) + "\n",
+            "content": receipt_content,
         },
         {
             "action": "conversation.thread.upsert",
@@ -446,6 +458,38 @@ def _record_x_publish_result(
             "received_at": published_at,
         },
     ]
+    task_kind = str(operator_task.get("task_kind") or "").strip().lower()
+    bootstrap_run_id = str(operator_task.get("run_id") or "").strip()
+    try:
+        bootstrap_attempt = int(operator_task.get("attempt") or 0)
+    except (TypeError, ValueError):
+        bootstrap_attempt = 0
+    if task_kind == "ceo_bootstrap" and bootstrap_run_id and bootstrap_attempt > 0:
+        operations.append(
+            {
+                "action": "event.record",
+                "business": slug,
+                "scope": f"business:{slug}",
+                "event_type": "bootstrap.x_launch.outcome",
+                "payload": {
+                    "status": "published",
+                    "operator_task": {
+                        "task_kind": task_kind,
+                        "run_id": bootstrap_run_id,
+                        "attempt": bootstrap_attempt,
+                    },
+                    "post_id": post_id,
+                    "post_url": post_url,
+                    "receipt_path": receipt_rel,
+                    "receipt_sha256": receipt_sha256,
+                    "receipt_sent": True,
+                    "external_side_effects": "sent",
+                    "x_worker_job_id": str(job_id),
+                    "source": "x_publish_receipt",
+                    "recorded_at": published_at,
+                },
+            }
+        )
     # Record the receipt + conversation durably. Under the 2-thread worker, a concurrent commit
     # for another job re-materializes this business's local cache mirror with delete_local=True,
     # which can wipe the workspace dir mid-apply and surface as a transient FileNotFoundError. The
@@ -1131,11 +1175,11 @@ def _ceo_turn_bound_reason(
     completion_grace_seconds: float,
     active_external_work: bool = False,
 ) -> str:
-    if active_external_work:
-        return ""
     absolute_limit = max(0.0, float(wall_clock_limit or 0.0))
     if absolute_limit and now - started_at >= absolute_limit:
         return f"reached {int(absolute_limit)}s bootstrap wall-clock limit"
+    if active_external_work:
+        return ""
     completion_grace = max(0.0, float(completion_grace_seconds or 0.0))
     if (
         completion_observed_at is not None
@@ -1143,7 +1187,7 @@ def _ceo_turn_bound_reason(
         and now - completion_observed_at >= completion_grace
     ):
         return (
-            "durable product publish remained complete for "
+            "durable bootstrap launch outcome remained complete for "
             f"{int(completion_grace)}s grace window"
         )
     return ""
@@ -1161,6 +1205,8 @@ def _run_ceo_turn(
     completion_probe: Callable[[], bool] | None = None,
     completion_grace_seconds: float = 0.0,
     external_activity_probe: Callable[[], bool] | None = None,
+    terminal_review_probe: Callable[[], bool] | None = None,
+    hard_stop_callback: Callable[[str], None] | None = None,
     api_retry_floor: int = 0,
     progress: _RuntimeProgress | None = None,
 ) -> tuple[str, float, str, bool]:
@@ -1188,7 +1234,12 @@ def _run_ceo_turn(
         _require_agent_model_config,
         _takyon_reasoning_config,
     )
-    from .core import TakyonStore, _bound_claude_worker_activity, load_takyon_env
+    from .core import (
+        TakyonStore,
+        _bound_claude_worker_activity,
+        _claude_worker_activity_run_identity,
+        load_takyon_env,
+    )
     from .operator_gateway import build_operator_gateway_agent
 
     load_takyon_env()
@@ -1280,6 +1331,9 @@ def _run_ceo_turn(
 
     turn_started = time.time()
     turn_started_monotonic = time.monotonic()
+    watchdog_activity_run_id, watchdog_activity_attempt = (
+        _claude_worker_activity_run_identity()
+    )
 
     def _emit_turn_event(
         status: str,
@@ -1372,30 +1426,41 @@ def _run_ceo_turn(
                             idle = min(idle, float(progress.seconds_since_activity()))
                         except Exception:
                             pass
-                    # Context-free worker clocks: the Claude-worker stderr reader stamps timestamps
-                    # in core directly (no ContextVar routing), so a lost sink binding anywhere in the
-                    # composition can no longer starve this watchdog while worker events stream — that
-                    # false-killed proofline0710/steadyflow0710 at exactly start+~600s with events
-                    # flowing 75/min (sipstreak was the mobile flavor). Two clocks, min of both:
-                    #  - business-keyed (tight, correct when the tool business == this turn's slug)
-                    #  - any-worker (business-agnostic; valid because worker concurrency == 1, so any
-                    #    streaming worker IS this turn's) — the belt-and-suspenders that holds even if
-                    #    the keyed lookup ever misses.
+                    # Context-free worker clock: the Claude-worker stderr reader stamps the exact
+                    # (business, durable run, attempt) directly, so a lost activity-sink binding
+                    # cannot false-kill a healthy run. Never fold in "any worker" activity: the Mac
+                    # and VPS pools run several businesses concurrently, and B must not keep A alive
+                    # or suppress A's wall-clock bound.
                     claude_worker_idle = float("inf")
                     try:
-                        from .core import (
-                            claude_worker_seconds_since_activity,
-                            claude_worker_seconds_since_any_activity,
-                        )
+                        from .core import claude_worker_seconds_since_activity
 
-                        claude_worker_idle = min(
-                            float(claude_worker_seconds_since_activity(slug)),
-                            float(claude_worker_seconds_since_any_activity()),
+                        claude_worker_idle = float(
+                            claude_worker_seconds_since_activity(
+                                slug,
+                                run_id=watchdog_activity_run_id,
+                                attempt=watchdog_activity_attempt,
+                            )
                         )
                         idle = min(idle, claude_worker_idle)
                     except Exception:
                         pass
                     now_monotonic = time.monotonic()
+                    if callable(terminal_review_probe):
+                        try:
+                            if bool(terminal_review_probe()):
+                                bounded_stop_reason = (
+                                    "durable bootstrap blocker requires human review"
+                                )
+                                break
+                        except Exception as exc:
+                            # Unknown proof state cannot authorize another model/tool iteration.
+                            # Interrupt and join this turn; the outer handler pins the parent claim
+                            # while retrying the durable read before any continuation can start.
+                            bounded_stop_reason = (
+                                f"human-review proof read unavailable: {exc}"
+                            )
+                            break
                     active_external_work = claude_worker_idle < 60.0
                     # A delegated child job has its own durable claim heartbeat.  Consult it when
                     # the in-process clocks look quiet or the outer wall limit is due.  This covers
@@ -1445,6 +1510,23 @@ def _run_ceo_turn(
                         active_external_work=active_external_work,
                     )
                     if bounded_stop_reason:
+                        if (
+                            bounded_stop_reason.startswith("reached ")
+                            and callable(hard_stop_callback)
+                        ):
+                            try:
+                                hard_stop_callback(bounded_stop_reason)
+                            except Exception as exc:
+                                # Unknown durable stop state cannot authorize returning/requeueing.
+                                # Keep the parent claim pinned and retry the stop request next poll.
+                                _log.warning(
+                                    "worker: bootstrap hard-stop request failed for business:%s; "
+                                    "pinning the parent claim: %s",
+                                    slug,
+                                    exc,
+                                )
+                                bounded_stop_reason = ""
+                                continue
                         break
                     if idle >= limit:
                         timed_out = True
@@ -1641,13 +1723,48 @@ def _bootstrap_real_http_actions(store: Any, slug: str) -> set[str]:
         return set()
 
 
+def _bootstrap_live_action_execution_verification(store: Any, slug: str) -> dict[str, Any]:
+    """Read current-build signed-in action proof; this is not full browser-workflow proof."""
+    try:
+        from .core import _requested_live_action_execution_verification_state
+    except Exception:
+        from plugins.takyon.core import _requested_live_action_execution_verification_state
+
+    try:
+        with store._connect() as conn:
+            surface = store._app_surface_contract(conn, slug)
+            source_path = str((surface or {}).get("source_path") or "product/site").strip()
+            root = store._business_root(slug) / source_path
+            return _requested_live_action_execution_verification_state(
+                conn,
+                business=slug,
+                root=root,
+                surface=surface if isinstance(surface, dict) else {},
+            )
+    except Exception as exc:
+        return {
+            "action_execution_required": True,
+            "status": "pending",
+            "live_build_id": "",
+            "actions": [],
+            "verified_action": "",
+            "verified_at": "",
+            "receipt_path": "",
+            "blocker": f"live action execution verification evidence could not be read: {exc}",
+        }
+
+
 def _bootstrap_has_durable_live_product(
     store: Any,
     slug: str,
     *,
     workflow_requested: bool,
 ) -> bool:
-    """Canonical completion probe for bounding the post-publish bootstrap tail."""
+    """Whether the required product milestone is durably live.
+
+    This is deliberately not the bootstrap completion predicate: the bootstrap instruction has
+    mandatory research and X-launch phases after product publication.
+    """
     try:
         with store._connect() as conn:
             surface = store._app_surface_contract(conn, slug)
@@ -1667,27 +1784,677 @@ def _bootstrap_has_durable_live_product(
     return True
 
 
+def _bootstrap_x_launch_outcome(
+    store: Any,
+    slug: str,
+    *,
+    bootstrap_job_id: str,
+    bootstrap_attempt: int,
+) -> dict[str, Any]:
+    """Exact-attempt durable truth for the mandatory bootstrap X phase.
+
+    Evidence from another business run or an earlier attempt is never adopted implicitly. A
+    successful publish writes ``bootstrap.x_launch.outcome`` atomically with its X receipt; a
+    current attempt that intentionally dedupes an existing receipt writes a fresh scoped adoption
+    event. A blocked provider/credit gate writes the same scoped event, while a CEO-declared blocker
+    is accepted only from an operator update carrying this exact ``(job_id, attempt)`` context.
+    """
+    run_id = str(bootstrap_job_id or "").strip()
+    try:
+        attempt = int(bootstrap_attempt)
+    except (TypeError, ValueError):
+        attempt = 0
+    pending: dict[str, Any] = {
+        "status": "pending",
+        "bootstrap_job_id": run_id,
+        "bootstrap_attempt": attempt,
+        "post_id": "",
+        "post_url": "",
+        "receipt_path": "",
+        "receipt_sha256": "",
+        "receipt_sent": False,
+        "blocker": "",
+        "source": "",
+        "review_required": False,
+    }
+    if not run_id or attempt < 1:
+        return {**pending, "blocker": "bootstrap job/attempt identity is unavailable"}
+    try:
+        with store._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT event_type, payload_json
+                FROM events
+                WHERE business_slug = ?
+                  AND event_type IN (
+                    'bootstrap.x_launch.outcome',
+                    'business.operator_update'
+                  )
+                ORDER BY created_at DESC
+                LIMIT 100
+                """,
+                (slug,),
+            ).fetchall()
+    except Exception as exc:
+        raise RuntimeError(f"X launch outcome evidence could not be read: {exc}") from exc
+
+    receipt_candidates: list[dict[str, Any]] | None = None
+
+    def _published_receipt_valid(payload: Mapping[str, Any]) -> bool:
+        nonlocal receipt_candidates
+        if receipt_candidates is None:
+            try:
+                from .core import _x_outreach_receipt_candidates
+
+                receipt_candidates = list(_x_outreach_receipt_candidates(store, slug))
+            except Exception:
+                receipt_candidates = []
+        expected_path = str(payload.get("receipt_path") or "").strip()
+        expected_post_id = str(payload.get("post_id") or "").strip()
+        expected_post_url = str(payload.get("post_url") or "").strip()
+        for candidate in receipt_candidates:
+            if expected_path and str(candidate.get("receipt_rel") or "").strip() != expected_path:
+                continue
+            receipt = (
+                candidate.get("receipt")
+                if isinstance(candidate.get("receipt"), Mapping)
+                else {}
+            )
+            receipt_task = (
+                receipt.get("operator_task")
+                if isinstance(receipt.get("operator_task"), Mapping)
+                else (
+                    (receipt.get("metadata") or {}).get("operator_task")
+                    if isinstance(receipt.get("metadata"), Mapping)
+                    and isinstance((receipt.get("metadata") or {}).get("operator_task"), Mapping)
+                    else {}
+                )
+            )
+            try:
+                receipt_attempt = int(receipt_task.get("attempt") or 0)
+            except (TypeError, ValueError):
+                continue
+            if (
+                str(receipt_task.get("task_kind") or "").strip().lower()
+                != "ceo_bootstrap"
+                or str(receipt_task.get("run_id") or "").strip() != run_id
+                or not (0 < receipt_attempt <= attempt)
+                or not bool(receipt.get("sent"))
+                or str(receipt.get("external_side_effects") or "").strip().lower()
+                != "sent"
+            ):
+                continue
+            if expected_post_id and str(candidate.get("post_id") or "").strip() != expected_post_id:
+                continue
+            if expected_post_url and str(candidate.get("post_url") or "").strip() != expected_post_url:
+                continue
+            return True
+        # The parent CEO may be mounted at the workspace revision from before an X child committed,
+        # so its local receipt mirror can legitimately lag the DB event. New runtime-authored events
+        # carry a digest of the exact receipt bytes and the sent-side-effect facts from the same
+        # atomic commit. The bootstrap.* namespace is runtime-reserved, making this a durable proof
+        # commitment rather than a model-authored status label.
+        receipt_digest = str(payload.get("receipt_sha256") or "").strip().lower()
+        return bool(
+            expected_path
+            and expected_post_id
+            and re.fullmatch(r"[0-9a-f]{64}", receipt_digest)
+            and bool(payload.get("receipt_sent"))
+            and str(payload.get("external_side_effects") or "").strip().lower() == "sent"
+        )
+
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            event_type = str(row.get("event_type") or "")
+            raw_payload: Any = row.get("payload_json")
+        else:
+            try:
+                event_type = str(row[0] or "")
+                raw_payload = row[1]
+            except Exception:
+                continue
+        if isinstance(raw_payload, Mapping):
+            payload = dict(raw_payload)
+        else:
+            try:
+                payload = json.loads(str(raw_payload or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        operator_task = (
+            payload.get("operator_task")
+            if isinstance(payload.get("operator_task"), Mapping)
+            else {}
+        )
+        task_run_id = str(operator_task.get("run_id") or "").strip()
+        try:
+            task_attempt = int(operator_task.get("attempt") or 0)
+        except (TypeError, ValueError):
+            task_attempt = 0
+        if (
+            str(operator_task.get("task_kind") or "").strip().lower() != "ceo_bootstrap"
+            or task_run_id != run_id
+            or task_attempt != attempt
+        ):
+            continue
+
+        if event_type == "bootstrap.x_launch.outcome":
+            status = str(payload.get("status") or "").strip().lower()
+            if status not in {"published", "blocked"}:
+                continue
+            if status == "published" and not _published_receipt_valid(payload):
+                # Payload shape is not provider authority. A published launch outcome must resolve
+                # to the immutable sent receipt from this bootstrap run (or a prior attempt that the
+                # current attempt explicitly adopted).
+                continue
+            return {
+                **pending,
+                "status": status,
+                "post_id": str(payload.get("post_id") or "").strip(),
+                "post_url": str(payload.get("post_url") or "").strip(),
+                "receipt_path": str(payload.get("receipt_path") or "").strip(),
+                "receipt_sha256": str(payload.get("receipt_sha256") or "").strip().lower(),
+                "receipt_sent": bool(payload.get("receipt_sent")),
+                "blocker": str(payload.get("blocker") or "").strip(),
+                "source": str(payload.get("source") or event_type).strip(),
+                "review_required": bool(payload.get("review_required")),
+            }
+
+        milestones = payload.get("milestones")
+        if not isinstance(milestones, list):
+            continue
+        launch_blocked = next(
+            (
+                item
+                for item in milestones
+                if isinstance(item, Mapping)
+                and str(item.get("category") or "").strip().upper() == "LAUNCH"
+                and str(item.get("status") or "").strip().lower() == "blocked"
+            ),
+            None,
+        )
+        if launch_blocked is not None:
+            blocker = str(
+                launch_blocked.get("description")
+                or payload.get("summary")
+                or "X launch was explicitly blocked"
+            ).strip()
+            return {
+                **pending,
+                "status": "blocked",
+                "blocker": blocker,
+                "source": "business.operator_update",
+                "review_required": True,
+            }
+    return pending
+
+
+def _bootstrap_human_review_blocker(
+    store: Any,
+    slug: str,
+    *,
+    bootstrap_job_id: str,
+    bootstrap_attempt: int,
+) -> dict[str, Any]:
+    """Durable same-job blocker that forbids every later autonomous bootstrap attempt."""
+    run_id = str(bootstrap_job_id or "").strip()
+    try:
+        attempt = max(1, int(bootstrap_attempt))
+    except (TypeError, ValueError):
+        return {}
+    with store._connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT event_type, payload_json
+            FROM events
+            WHERE business_slug = ?
+              AND event_type IN (
+                'bootstrap.human_review_required',
+                'bootstrap.x_launch.outcome',
+                'business.operator_update'
+              )
+            ORDER BY created_at DESC
+            LIMIT 100
+            """,
+            (slug,),
+        ).fetchall()
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            event_type = str(row.get("event_type") or "bootstrap.human_review_required")
+            raw_payload = row.get("payload_json")
+        else:
+            event_type = str(row[0] or "bootstrap.human_review_required") if len(row) > 1 else "bootstrap.human_review_required"
+            raw_payload = row[1] if len(row) > 1 else row[0]
+        if isinstance(raw_payload, Mapping):
+            payload = dict(raw_payload)
+        else:
+            try:
+                payload = json.loads(str(raw_payload or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        operator_task = (
+            payload.get("operator_task")
+            if isinstance(payload.get("operator_task"), Mapping)
+            else {}
+        )
+        try:
+            event_attempt = int(operator_task.get("attempt") or 0)
+        except (TypeError, ValueError):
+            continue
+        same_job_prior_attempt = bool(
+            str(operator_task.get("task_kind") or "").strip().lower() == "ceo_bootstrap"
+            and str(operator_task.get("run_id") or "").strip() == run_id
+            and 0 < event_attempt <= attempt
+        )
+        if not same_job_prior_attempt:
+            continue
+        review_required = bool(payload.get("review_required"))
+        blocker = str(payload.get("blocker") or "").strip()
+        source = str(payload.get("source") or event_type).strip()
+        if event_type == "bootstrap.x_launch.outcome":
+            review_required = bool(
+                review_required
+                and str(payload.get("status") or "").strip().lower() == "blocked"
+            )
+        elif event_type == "business.operator_update":
+            milestones = payload.get("milestones") if isinstance(payload.get("milestones"), list) else []
+            launch_blocked = next(
+                (
+                    item
+                    for item in milestones
+                    if isinstance(item, Mapping)
+                    and str(item.get("category") or "").strip().upper() == "LAUNCH"
+                    and str(item.get("status") or "").strip().lower() == "blocked"
+                ),
+                None,
+            )
+            review_required = launch_blocked is not None
+            if launch_blocked is not None:
+                blocker = str(
+                    launch_blocked.get("description")
+                    or payload.get("summary")
+                    or "X launch requires human review"
+                ).strip()
+                source = "business.operator_update"
+        if review_required:
+            result = {
+                "review_required": True,
+                "blocker": blocker or "human review required",
+                "source": source or "runtime",
+                "workspace": str(payload.get("workspace") or "").strip(),
+                "operator_task": dict(operator_task),
+            }
+            if event_type == "bootstrap.x_launch.outcome":
+                result["x_launch_outcome"] = {
+                    "status": "blocked",
+                    "blocker": blocker or "X launch requires human review",
+                    "source": source or event_type,
+                    "review_required": True,
+                    "bootstrap_job_id": run_id,
+                    "bootstrap_attempt": event_attempt,
+                }
+            return result
+    return {}
+
+
+def _read_bootstrap_human_review_blocker_pinned(
+    store: Any,
+    slug: str,
+    *,
+    bootstrap_job_id: str,
+    bootstrap_attempt: int,
+) -> dict[str, Any]:
+    """Read terminal proof without ever turning unknown database state into permission to continue."""
+    while True:
+        active_claim = jobs.current_job_claim()
+        if active_claim is not None:
+            active_claim.assert_owned("reading bootstrap human-review proof")
+        try:
+            return _bootstrap_human_review_blocker(
+                store,
+                slug,
+                bootstrap_job_id=bootstrap_job_id,
+                bootstrap_attempt=bootstrap_attempt,
+            )
+        except Exception as exc:
+            _log.warning(
+                "worker: human-review proof read failed for bootstrap %s attempt %s; "
+                "pinning the parent claim: %s",
+                bootstrap_job_id,
+                bootstrap_attempt,
+                exc,
+            )
+            time.sleep(2.0)
+
+
+def _bootstrap_ready_for_completion_grace(
+    store: Any,
+    slug: str,
+    *,
+    workflow_requested: bool,
+    archetype: str,
+    bootstrap_job_id: str,
+    bootstrap_attempt: int,
+) -> bool:
+    """Whether it is safe for the outer CEO completion grace to begin.
+
+    Web bootstraps are terminal only after both the live product and X launch outcome exist. Mobile
+    bootstraps have the store-signed app phase after X, so they intentionally rely on their absolute
+    ceiling and natural turn completion rather than arming this earlier web completion probe.
+    """
+    if str(archetype or "").strip().lower() == "mobile_app":
+        return False
+    product_complete = _bootstrap_has_durable_live_product(
+        store,
+        slug,
+        workflow_requested=workflow_requested,
+    )
+    launch_outcome = _bootstrap_x_launch_outcome(
+        store,
+        slug,
+        bootstrap_job_id=bootstrap_job_id,
+        bootstrap_attempt=bootstrap_attempt,
+    )
+    return product_complete and str(launch_outcome.get("status") or "") in {
+        "published",
+        "blocked",
+    }
+
+
+def _bootstrap_delegated_children(
+    store: Any,
+    slug: str,
+    *,
+    bootstrap_job_id: str,
+    bootstrap_attempt: int,
+    statuses: tuple[str, ...] = ("queued", "running"),
+) -> list[dict[str, Any]]:
+    """Return every unfinished child owned by this exact parent bootstrap generation."""
+    parent_run_id = str(bootstrap_job_id or "").strip()
+    try:
+        parent_attempt = max(1, int(bootstrap_attempt))
+    except (TypeError, ValueError):
+        return []
+    if not parent_run_id:
+        return []
+    parent_identity = json.dumps(
+        {
+            "task_kind": "ceo_bootstrap",
+            "run_id": parent_run_id,
+            "attempt": parent_attempt,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    with store._connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, status, locked_by, attempts, payload
+            FROM jobs
+            WHERE business_slug = ?
+              AND kind IN ('claude.agent_task', 'product.surface_refresh')
+              AND status = ANY(?)
+              AND COALESCE(payload -> 'parent_operator_task', '{}'::jsonb) @> ?::jsonb
+            ORDER BY created_at, id
+            """,
+            (slug, list(statuses), parent_identity),
+        ).fetchall()
+    return [dict(row) if isinstance(row, Mapping) else {
+        "id": row[0],
+        "status": row[1],
+        "locked_by": row[2],
+        "attempts": row[3],
+        "payload": row[4],
+    } for row in (rows or [])]
+
+
 def _bootstrap_has_live_delegated_child(
     store: Any,
     slug: str,
     *,
+    bootstrap_job_id: str,
+    bootstrap_attempt: int,
     freshness_seconds: float = 60.0,
 ) -> bool:
-    """Whether a delegated build child still owns a fresh durable job claim."""
+    """Whether this exact bootstrap attempt still owns queued or running delegated work."""
+    del freshness_seconds  # unfinished ownership, not recent activity, is the safety predicate
+    return bool(
+        _bootstrap_delegated_children(
+            store,
+            slug,
+            bootstrap_job_id=bootstrap_job_id,
+            bootstrap_attempt=bootstrap_attempt,
+        )
+    )
+
+
+def _record_bootstrap_human_review_required(
+    store: Any,
+    slug: str,
+    *,
+    bootstrap_job_id: str,
+    bootstrap_attempt: int,
+    blocker: str,
+    source: str,
+) -> dict[str, Any]:
+    from .core import _assert_active_worker_claim
+
+    _assert_active_worker_claim(store, "recording bootstrap human-review stop")
+    payload = {
+        "operator_task": {
+            "task_kind": "ceo_bootstrap",
+            "run_id": str(bootstrap_job_id),
+            "attempt": int(bootstrap_attempt),
+        },
+        "source": str(source or "runtime"),
+        "blocker": str(blocker or "human review required"),
+        "review_required": True,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:24]
+    store.commit(
+        scope=f"business:{slug}",
+        operations=[
+            {
+                "action": "event.record",
+                "business": slug,
+                "scope": f"business:{slug}",
+                "event_type": "bootstrap.human_review_required",
+                "payload": payload,
+            }
+        ],
+        idempotency_key=(
+            f"bootstrap-human-review:{bootstrap_job_id}:{bootstrap_attempt}:{digest}"
+        ),
+        reason="stop bootstrap automation for human review",
+        actor="runtime",
+    )
+    return payload
+
+
+def _cancel_bootstrap_delegated_children(
+    store: Any,
+    slug: str,
+    *,
+    bootstrap_job_id: str,
+    bootstrap_attempt: int,
+    reason: str,
+) -> int:
+    """Block queued children and request cooperative cancellation of running children."""
+    from .core import _assert_active_worker_claim
+
+    _assert_active_worker_claim(store, "cancelling delegated bootstrap children")
+    parent_identity = json.dumps(
+        {
+            "task_kind": "ceo_bootstrap",
+            "run_id": str(bootstrap_job_id),
+            "attempt": int(bootstrap_attempt),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    cancellation = json.dumps(
+        {
+            "cancel_requested": True,
+            "cancel_reason": str(reason or "parent bootstrap stopped"),
+            "cancel_requested_at": _utc_now_iso(),
+        }
+    )
+    error = json.dumps(
+        {"reason": "parent_bootstrap_cancelled", "error": str(reason or "parent stopped")}
+    )
     with store._connect() as conn:
-        row = conn.execute(
-            """
-            SELECT 1
-            FROM jobs
-            WHERE business_slug = ?
-              AND kind IN ('claude.agent_task', 'product.surface_refresh')
-              AND status = 'running'
-              AND locked_at > now() - make_interval(secs => ?)
-            LIMIT 1
-            """,
-            (slug, max(30.0, float(freshness_seconds))),
-        ).fetchone()
-    return row is not None
+        with conn.transaction():
+            queued = conn.execute(
+                "UPDATE jobs SET status = 'blocked', error = ?::jsonb, "
+                "payload = COALESCE(payload, '{}'::jsonb) || ?::jsonb, "
+                "locked_by = NULL, locked_at = NULL, updated_at = now() "
+                "WHERE business_slug = ? "
+                "AND kind IN ('claude.agent_task', 'product.surface_refresh') "
+                "AND status = 'queued' "
+                "AND COALESCE(payload -> 'parent_operator_task', '{}'::jsonb) @> ?::jsonb",
+                (error, cancellation, slug, parent_identity),
+            ).rowcount
+            running = conn.execute(
+                "UPDATE jobs SET payload = COALESCE(payload, '{}'::jsonb) || ?::jsonb, "
+                "updated_at = now() "
+                "WHERE business_slug = ? "
+                "AND kind IN ('claude.agent_task', 'product.surface_refresh') "
+                "AND status = 'running' "
+                "AND COALESCE(payload -> 'parent_operator_task', '{}'::jsonb) @> ?::jsonb",
+                (cancellation, slug, parent_identity),
+            ).rowcount
+    return int(queued or 0) + int(running or 0)
+
+
+def _wait_for_bootstrap_delegated_children(
+    store: Any,
+    slug: str,
+    *,
+    bootstrap_job_id: str,
+    bootstrap_attempt: int,
+    deadline_monotonic: float,
+    cancel_immediately: bool = False,
+    cancel_reason: str = "parent bootstrap stopped",
+    human_review_on_deadline: bool = True,
+) -> dict[str, Any]:
+    """Pin the parent claim until every exact child is terminal; never requeue alongside it."""
+    cancel_requested = False
+    review_payload: dict[str, Any] = {}
+    while True:
+        active_claim = jobs.current_job_claim()
+        if active_claim is not None:
+            active_claim.assert_owned("draining delegated bootstrap children")
+        try:
+            children = _bootstrap_delegated_children(
+                store,
+                slug,
+                bootstrap_job_id=bootstrap_job_id,
+                bootstrap_attempt=bootstrap_attempt,
+            )
+        except Exception as exc:
+            _log.warning(
+                "worker: could not read delegated children for bootstrap %s attempt %s; "
+                "pinning the parent claim: %s",
+                bootstrap_job_id,
+                bootstrap_attempt,
+                exc,
+            )
+            time.sleep(2.0)
+            continue
+        if not children:
+            return review_payload
+        deadline_reached = time.monotonic() >= float(deadline_monotonic)
+        should_cancel = bool(cancel_immediately or deadline_reached)
+        if should_cancel and not cancel_requested:
+            reason = (
+                f"bootstrap reached its hard deadline with {len(children)} delegated child job(s) unfinished"
+                if deadline_reached and not cancel_immediately
+                else cancel_reason
+            )
+            try:
+                _cancel_bootstrap_delegated_children(
+                    store,
+                    slug,
+                    bootstrap_job_id=bootstrap_job_id,
+                    bootstrap_attempt=bootstrap_attempt,
+                    reason=reason,
+                )
+                if deadline_reached and human_review_on_deadline:
+                    review_payload = _record_bootstrap_human_review_required(
+                        store,
+                        slug,
+                        bootstrap_job_id=bootstrap_job_id,
+                        bootstrap_attempt=bootstrap_attempt,
+                        blocker=reason,
+                        source="bootstrap_hard_deadline",
+                    )
+                cancel_requested = True
+            except Exception as exc:
+                _log.warning(
+                    "worker: delegated-child cancellation failed for bootstrap %s attempt %s; "
+                    "pinning the parent claim: %s",
+                    bootstrap_job_id,
+                    bootstrap_attempt,
+                    exc,
+                )
+                time.sleep(2.0)
+                continue
+        time.sleep(1.0)
+
+
+def _request_bootstrap_hard_stop(
+    store: Any,
+    slug: str,
+    *,
+    bootstrap_job_id: str,
+    bootstrap_attempt: int,
+    reason: str,
+) -> dict[str, Any]:
+    """Persist a stop intent and request cooperative cancellation of every exact child."""
+    _cancel_bootstrap_delegated_children(
+        store,
+        slug,
+        bootstrap_job_id=bootstrap_job_id,
+        bootstrap_attempt=bootstrap_attempt,
+        reason=reason,
+    )
+    return _record_bootstrap_human_review_required(
+        store,
+        slug,
+        bootstrap_job_id=bootstrap_job_id,
+        bootstrap_attempt=bootstrap_attempt,
+        blocker=reason,
+        source="bootstrap_hard_deadline",
+    )
+
+
+def _request_bootstrap_hard_stop_pinned(
+    store: Any,
+    slug: str,
+    *,
+    bootstrap_job_id: str,
+    bootstrap_attempt: int,
+    reason: str,
+) -> dict[str, Any]:
+    while True:
+        try:
+            return _request_bootstrap_hard_stop(
+                store,
+                slug,
+                bootstrap_job_id=bootstrap_job_id,
+                bootstrap_attempt=bootstrap_attempt,
+                reason=reason,
+            )
+        except Exception as exc:
+            _log.warning(
+                "worker: hard-stop persistence failed for bootstrap %s attempt %s; "
+                "pinning the parent claim: %s",
+                bootstrap_job_id,
+                bootstrap_attempt,
+                exc,
+            )
+            time.sleep(2.0)
 
 
 def ceo_wake_handler(job: Job) -> JobRunResult:
@@ -1887,6 +2654,11 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     from .core import TakyonStore, _bound_operator_task_context
 
     slug = job.business_slug
+    bootstrap_job_id = str(job.id)
+    try:
+        bootstrap_attempt = max(1, int(getattr(job, "attempts", 1) or 1))
+    except (TypeError, ValueError):
+        bootstrap_attempt = 1
     owner_user_id = _business_owner_user_id(slug)
     store = TakyonStore(operator_user_id=owner_user_id)
     summary = store.read(scope=f"business:{slug}", query="summary")
@@ -1976,6 +2748,9 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     command = f"/create {slug}"
     progress = _RuntimeProgress(slug=slug, kind="ceo_bootstrap", command=command)
     bootstrap_started_monotonic = time.monotonic()
+    bootstrap_deadline_monotonic = bootstrap_started_monotonic + wall_clock_limit
+    bootstrap_deadline_at = time.time() + wall_clock_limit
+    human_review_blocker: dict[str, Any] = {}
 
     tokens: list[object] = []
     try:
@@ -2006,15 +2781,61 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             )
             # run_id carries the durable job id so every cost/log event inside the turn
             # correlates to this job (operator_cost_events, migration 0070).
-            with _bound_operator_task_context(run_id=str(job.id), task_kind="ceo_bootstrap"):
+            with _bound_operator_task_context(
+                run_id=str(job.id),
+                task_kind="ceo_bootstrap",
+                attempt=bootstrap_attempt,
+                deadline_at=bootstrap_deadline_at,
+            ):
                 final_response = ""
                 cost_usd = 0.0
                 cost_status = "unknown"
                 turn_completed = False
                 next_prompt = user_prompt
                 for same_job_turn in range(1, _BOOTSTRAP_MAX_SAME_JOB_TURNS + 1):
+                    human_review_blocker = _read_bootstrap_human_review_blocker_pinned(
+                        store,
+                        slug,
+                        bootstrap_job_id=bootstrap_job_id,
+                        bootstrap_attempt=bootstrap_attempt,
+                    )
+                    if human_review_blocker:
+                        _wait_for_bootstrap_delegated_children(
+                            store,
+                            slug,
+                            bootstrap_job_id=bootstrap_job_id,
+                            bootstrap_attempt=bootstrap_attempt,
+                            deadline_monotonic=bootstrap_deadline_monotonic,
+                            cancel_immediately=True,
+                            cancel_reason=str(
+                                human_review_blocker.get("blocker")
+                                or "bootstrap requires human review"
+                            ),
+                            human_review_on_deadline=False,
+                        )
+                        break
+                    boundary_review = _wait_for_bootstrap_delegated_children(
+                        store,
+                        slug,
+                        bootstrap_job_id=bootstrap_job_id,
+                        bootstrap_attempt=bootstrap_attempt,
+                        deadline_monotonic=bootstrap_deadline_monotonic,
+                    )
+                    if boundary_review:
+                        human_review_blocker = boundary_review
+                        break
                     elapsed = time.monotonic() - bootstrap_started_monotonic
-                    if same_job_turn > 1 and elapsed >= wall_clock_limit:
+                    if elapsed >= wall_clock_limit:
+                        human_review_blocker = _request_bootstrap_hard_stop_pinned(
+                            store,
+                            slug,
+                            bootstrap_job_id=bootstrap_job_id,
+                            bootstrap_attempt=bootstrap_attempt,
+                            reason=(
+                                "bootstrap reached its hard end-to-end deadline before a bounded "
+                                "continuation could start"
+                            ),
+                        )
                         break
                     response, turn_cost_usd, turn_cost_status, turn_completed = _run_ceo_turn(
                         slug=slug,
@@ -2028,15 +2849,38 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                             if same_job_turn == 1
                             else max(60.0, wall_clock_limit - elapsed)
                         ),
-                        completion_probe=lambda: _bootstrap_has_durable_live_product(
+                        completion_probe=lambda: _bootstrap_ready_for_completion_grace(
                             store,
                             slug,
                             workflow_requested=workflow_requested,
+                            archetype=archetype,
+                            bootstrap_job_id=bootstrap_job_id,
+                            bootstrap_attempt=bootstrap_attempt,
                         ),
                         completion_grace_seconds=completion_grace_seconds,
                         external_activity_probe=lambda: _bootstrap_has_live_delegated_child(
                             store,
                             slug,
+                            bootstrap_job_id=bootstrap_job_id,
+                            bootstrap_attempt=bootstrap_attempt,
+                        ),
+                        terminal_review_probe=lambda: bool(
+                            _bootstrap_human_review_blocker(
+                                store,
+                                slug,
+                                bootstrap_job_id=bootstrap_job_id,
+                                bootstrap_attempt=bootstrap_attempt,
+                            )
+                        ),
+                        hard_stop_callback=lambda reason: _request_bootstrap_hard_stop(
+                            store,
+                            slug,
+                            bootstrap_job_id=bootstrap_job_id,
+                            bootstrap_attempt=bootstrap_attempt,
+                            reason=(
+                                f"bootstrap hard deadline reached: {reason}; automation stopped "
+                                "and every delegated child was cancelled"
+                            ),
                         ),
                         api_retry_floor=_BOOTSTRAP_API_RETRY_FLOOR,
                         progress=progress,
@@ -2044,15 +2888,78 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                     final_response = response
                     cost_usd += turn_cost_usd
                     cost_status = turn_cost_status
+                    if time.monotonic() >= bootstrap_deadline_monotonic:
+                        human_review_blocker = _request_bootstrap_hard_stop_pinned(
+                            store,
+                            slug,
+                            bootstrap_job_id=bootstrap_job_id,
+                            bootstrap_attempt=bootstrap_attempt,
+                            reason=(
+                                "bootstrap reached its hard end-to-end deadline; automation and "
+                                "every delegated child were stopped for human review"
+                            ),
+                        )
+                    boundary_review = _wait_for_bootstrap_delegated_children(
+                        store,
+                        slug,
+                        bootstrap_job_id=bootstrap_job_id,
+                        bootstrap_attempt=bootstrap_attempt,
+                        deadline_monotonic=bootstrap_deadline_monotonic,
+                    )
+                    if boundary_review:
+                        human_review_blocker = boundary_review
+                    durable_review_blocker = _read_bootstrap_human_review_blocker_pinned(
+                        store,
+                        slug,
+                        bootstrap_job_id=bootstrap_job_id,
+                        bootstrap_attempt=bootstrap_attempt,
+                    )
+                    if durable_review_blocker:
+                        human_review_blocker = durable_review_blocker
+                    if human_review_blocker:
+                        break
                     try:
-                        durable_complete = _bootstrap_has_durable_live_product(
+                        durable_product_complete = _bootstrap_has_durable_live_product(
                             store,
                             slug,
                             workflow_requested=workflow_requested,
                         )
                     except Exception:
-                        durable_complete = False
-                    if durable_complete or (turn_completed and not workflow_requested):
+                        durable_product_complete = False
+                    try:
+                        x_launch_outcome = _bootstrap_x_launch_outcome(
+                            store,
+                            slug,
+                            bootstrap_job_id=bootstrap_job_id,
+                            bootstrap_attempt=bootstrap_attempt,
+                        )
+                    except Exception:
+                        x_launch_outcome = {"status": "pending"}
+                    x_launch_status = str(x_launch_outcome.get("status") or "").strip().lower()
+                    if x_launch_status == "blocked" and bool(
+                        x_launch_outcome.get("review_required")
+                    ):
+                        human_review_blocker = {
+                            "review_required": True,
+                            "blocker": str(
+                                x_launch_outcome.get("blocker")
+                                or "X launch requires human review"
+                            ).strip(),
+                            "source": str(
+                                x_launch_outcome.get("source") or "x_launch"
+                            ).strip(),
+                            "operator_task": {
+                                "task_kind": "ceo_bootstrap",
+                                "run_id": bootstrap_job_id,
+                                "attempt": bootstrap_attempt,
+                            },
+                            "x_launch_outcome": dict(x_launch_outcome),
+                        }
+                        break
+                    mobile_bootstrap = str(archetype or "").strip().lower() == "mobile_app"
+                    if durable_product_complete and x_launch_status in {"published", "blocked"} and (
+                        turn_completed or not mobile_bootstrap
+                    ):
                         break
                     if same_job_turn >= _BOOTSTRAP_MAX_SAME_JOB_TURNS:
                         break
@@ -2062,51 +2969,147 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                         "business/product name already stored for this business. Inspect and reuse "
                         "the existing product files, surface contract, receipts, actions, and build "
                         "artifacts; do not restart, rebrand, or redo completed work. Resolve the "
-                        "current publish/completeness blocker and continue immediately. Do not "
+                        "current completeness blocker and continue immediately. Complete every "
+                        "remaining phase from the original bootstrap instruction, including the "
+                        "evidence pass and exactly one X launch outcome; do not redo an already-live "
+                        "product. If X is blocked by its credit/provider gate, post the required "
+                        "customer-visible LAUNCH blocked milestone with the exact blocker. Do not "
                         "conclude with a status report or next-step suggestion until the public "
-                        "product is published and every customer workflow requested in the original "
-                        "goal is implemented with real runtime-backed actions and verified."
+                        "product is published, every requested customer workflow is implemented "
+                        "with real runtime-backed actions, and the launch phase is terminal."
                     )
     except Exception as exc:
-        if _is_ceo_inactivity_timeout(exc):
-            # The agent thread has been interrupted and joined by _run_ceo_turn, but a fire-and-
-            # continue delegated build may still own a separate durable claim.  Keep THIS parent
-            # handler alive (and therefore heartbeating in run_one) until every child claim ends;
-            # only then may the normal outer failure path requeue the bootstrap.  The previous
-            # early ``fail_if_still_owned`` transition was the BriefVault overlap: attempt 2 began
-            # while attempt 1's delegated child kept editing through revisions r10→r13.
-            while True:
-                try:
-                    delegated_child_alive = _bootstrap_has_live_delegated_child(
-                        store,
-                        slug,
-                        freshness_seconds=120.0,
-                    )
-                except Exception:
-                    # Unknown liveness fails closed against duplicate generation.  run_one keeps
-                    # this claim fresh and the next bounded poll retries the canonical read.
-                    delegated_child_alive = True
-                if not delegated_child_alive:
-                    break
-                time.sleep(5.0)
+        # Every exceptional parent path—not only inactivity—must cancel and drain its exact queued/
+        # running children before run_one is allowed to requeue the parent. Otherwise an API error or
+        # lost claim can start attempt 2 while attempt 1's detached child is still editing.
+        boundary_review = _wait_for_bootstrap_delegated_children(
+            store,
+            slug,
+            bootstrap_job_id=bootstrap_job_id,
+            bootstrap_attempt=bootstrap_attempt,
+            deadline_monotonic=bootstrap_deadline_monotonic,
+            cancel_immediately=True,
+            cancel_reason=f"parent bootstrap failed: {exc}",
+            human_review_on_deadline=True,
+        )
+        if boundary_review:
+            human_review_blocker = boundary_review
+        durable_review_blocker = _read_bootstrap_human_review_blocker_pinned(
+            store,
+            slug,
+            bootstrap_job_id=bootstrap_job_id,
+            bootstrap_attempt=bootstrap_attempt,
+        )
+        if durable_review_blocker:
+            human_review_blocker = durable_review_blocker
+        if human_review_blocker:
+            final_response = str(exc)
+        else:
+            _record_runtime_event(
+                slug,
+                kind="ceo_bootstrap",
+                status="failed",
+                detail=str(exc),
+                command=command,
+                trace={
+                    "kind": "turn",
+                    "entry_key": "turn:ceo_bootstrap",
+                    "label": "CEO bootstrap",
+                    "detail": str(exc),
+                    "status": "failed",
+                },
+            )
+            raise
+    finally:
+        if tokens:
+            clear_session_vars(tokens)
+
+    if time.monotonic() >= bootstrap_deadline_monotonic and not human_review_blocker:
+        human_review_blocker = _request_bootstrap_hard_stop_pinned(
+            store,
+            slug,
+            bootstrap_job_id=bootstrap_job_id,
+            bootstrap_attempt=bootstrap_attempt,
+            reason=(
+                "bootstrap reached its hard end-to-end deadline before authoritative settlement"
+            ),
+        )
+    final_boundary_review = _wait_for_bootstrap_delegated_children(
+        store,
+        slug,
+        bootstrap_job_id=bootstrap_job_id,
+        bootstrap_attempt=bootstrap_attempt,
+        deadline_monotonic=bootstrap_deadline_monotonic,
+        cancel_immediately=bool(human_review_blocker),
+        cancel_reason=str(
+            human_review_blocker.get("blocker") or "bootstrap is stopping"
+        ),
+        human_review_on_deadline=True,
+    )
+    if final_boundary_review:
+        human_review_blocker = final_boundary_review
+    durable_review_blocker = _read_bootstrap_human_review_blocker_pinned(
+        store,
+        slug,
+        bootstrap_job_id=bootstrap_job_id,
+        bootstrap_attempt=bootstrap_attempt,
+    )
+    if durable_review_blocker:
+        human_review_blocker = durable_review_blocker
+
+    if human_review_blocker:
+        blocker_text = str(
+            human_review_blocker.get("blocker") or "human review is required"
+        ).strip()
+        final_response = (
+            final_response.rstrip()
+            + ("\n\n" if final_response.strip() else "")
+            + f"Bootstrap stopped for human review: {blocker_text}"
+        )
+        wake_result: dict[str, object] = {
+            "status": "suppressed",
+            "enabled": False,
+            "reason": "bootstrap_human_review_required",
+            "requested_schedule": schedule,
+        }
+        cents = max(0, int(round(cost_usd * 100)))
         _record_runtime_event(
             slug,
             kind="ceo_bootstrap",
-            status="failed",
-            detail=str(exc),
+            status="blocked",
+            detail=f"CEO bootstrap stopped for human review: {blocker_text}",
             command=command,
             trace={
                 "kind": "turn",
                 "entry_key": "turn:ceo_bootstrap",
                 "label": "CEO bootstrap",
-                "detail": str(exc),
-                "status": "failed",
+                "detail": blocker_text,
+                "status": "blocked",
             },
         )
-        raise
-    finally:
-        if tokens:
-            clear_session_vars(tokens)
+        blocked_x_outcome = (
+            human_review_blocker.get("x_launch_outcome")
+            if isinstance(human_review_blocker.get("x_launch_outcome"), Mapping)
+            else {}
+        )
+        return JobRunResult(
+            result={
+                "business_slug": slug,
+                "final_response": final_response[:4000],
+                "cost_usd": round(cost_usd, 6),
+                "cost_status": cost_status,
+                "bootstrap_completion_status": "needs_human_review",
+                "review_required": True,
+                "review_blocker": blocker_text,
+                "review_source": str(human_review_blocker.get("source") or "runtime"),
+                "x_launch_status": str(
+                    blocked_x_outcome.get("status") or "pending"
+                ).strip().lower(),
+                "x_launch_outcome": dict(blocked_x_outcome),
+                "wake": wake_result,
+            },
+            actual_cost_cents=cents,
+        )
 
     # ── Post-turn finalization (NON-FATAL by contract) ──────────────────────────────────────────
     # The CEO bootstrap turn has already returned. Everything below is bookkeeping: a final trusted
@@ -2120,8 +3123,9 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     # whole product and PUBLISHED the site, then a post-turn step raised and run_one requeued it —
     # observed on business "simple": turn ended 04:31:42, requeued 04:31:49 (reason=handler_error,
     # error == the bare job id == JobNotRunning), attempt 2 re-ran the full 287s Docker build and
-    # blocked a fresh business behind it. The done-gate below makes "turn completed OR site
-    # published" terminal; only a genuine pre-publish iteration-cap exhaustion may requeue.
+    # blocked a fresh business behind it. The done-gate below still trusts canonical product/X
+    # state when this bookkeeping refresh wobbles, but never mistakes product publish alone for the
+    # end of the required launch choreography.
     surface_refresh: dict[str, Any] | None = None
     publish_status = "unknown"
     try:
@@ -2161,13 +3165,41 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             command=command,
         )
 
-    # The done-gate. A bootstrap is DONE the moment its CEO turn finished cleanly (turn_completed)
-    # OR its product site published — unless the goal explicitly requested a real signed-in workflow
-    # and the published source still has no real HTTP action backing `/app`. In that workflow case a
-    # published access shell is incomplete and must requeue rather than settling a fake "done".
+    # The done-gate. Product publication is an intermediate bootstrap milestone: research and the X
+    # launch still follow it. A web bootstrap is terminal only when the product requirement and a
+    # durable X outcome both hold. Mobile additionally requires the CEO turn to finish naturally,
+    # because its store-signed app phase follows X and must never be cut off by the web completion
+    # probe. This prevents an interrupted/capped post-product turn from settling as fake "done".
     real_http_actions = _bootstrap_real_http_actions(store, slug) if workflow_requested else set()
-    bootstrap_done = (bool(turn_completed) or publish_status == "published") and (
+    try:
+        durable_product_complete = _bootstrap_has_durable_live_product(
+            store,
+            slug,
+            workflow_requested=workflow_requested,
+        )
+    except Exception:
+        durable_product_complete = False
+    try:
+        x_launch_outcome = _bootstrap_x_launch_outcome(
+            store,
+            slug,
+            bootstrap_job_id=bootstrap_job_id,
+            bootstrap_attempt=bootstrap_attempt,
+        )
+    except Exception as exc:
+        x_launch_outcome = {
+            "status": "pending",
+            "bootstrap_job_id": bootstrap_job_id,
+            "bootstrap_attempt": bootstrap_attempt,
+            "blocker": f"X launch outcome evidence could not be read: {exc}",
+        }
+    x_launch_status = str(x_launch_outcome.get("status") or "pending").strip().lower()
+    product_complete = (publish_status == "published" or durable_product_complete) and (
         not workflow_requested or bool(real_http_actions)
+    )
+    mobile_bootstrap = str(archetype or "").strip().lower() == "mobile_app"
+    bootstrap_done = product_complete and x_launch_status in {"published", "blocked"} and (
+        bool(turn_completed) or not mobile_bootstrap
     )
     if not bootstrap_done:
         if workflow_requested and publish_status == "published" and not real_http_actions:
@@ -2175,13 +3207,104 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 f"bootstrap for business:{slug} published the access shell but never materialized "
                 "a real /app workflow action"
             )
+        if product_complete and x_launch_status not in {"published", "blocked"}:
+            raise RuntimeError(
+                f"bootstrap for business:{slug} published its product but never completed or "
+                f"explicitly blocked the mandatory X launch phase in bootstrap job "
+                f"{bootstrap_job_id} attempt {bootstrap_attempt}"
+            )
+        if product_complete and mobile_bootstrap and not turn_completed:
+            raise RuntimeError(
+                f"bootstrap for business:{slug} stopped before its mobile launch phases completed"
+            )
         raise RuntimeError(
             f"bootstrap for business:{slug} exhausted its iteration budget before publishing "
             f"(surface status={publish_status})"
         )
 
+    launch_blocked = x_launch_status == "blocked"
+    launch_blocker = str(
+        x_launch_outcome.get("blocker") or "the X launch gate blocked publication"
+    ).strip()
+    launch_review_required = bool(x_launch_outcome.get("review_required"))
+    bootstrap_completion_status = (
+        "completed_with_launch_blocker" if launch_blocked else "completed"
+    )
+    if launch_blocked:
+        final_response = (
+            final_response.rstrip()
+            + ("\n\n" if final_response.strip() else "")
+            + f"X launch blocked for this bootstrap attempt: {launch_blocker}."
+            + (" Human review is required." if launch_review_required else "")
+        )
+
+    live_action_verification: dict[str, Any] = {
+        "action_execution_required": False,
+        "status": "not_required",
+        "live_build_id": "",
+        "actions": [],
+        "verified_action": "",
+        "verified_at": "",
+        "receipt_path": "",
+        "blocker": "",
+    }
+    if workflow_requested:
+        live_action_verification = _bootstrap_live_action_execution_verification(store, slug)
+    action_execution_verified = (
+        not workflow_requested
+        or str(live_action_verification.get("status") or "").strip().lower() == "action_verified"
+    )
+    live_action_execution_status = (
+        "action_verified"
+        if action_execution_verified
+        else "pending"
+    )
+    if workflow_requested and not action_execution_verified:
+        verification_blocker = str(
+            live_action_verification.get("blocker")
+            or "no successful signed-in live action execution receipt exists for the current live build"
+        ).strip()
+        final_response = (
+            final_response.rstrip()
+            + ("\n\n" if final_response.strip() else "")
+            + "Signed-in live action execution verification is pending: "
+            + verification_blocker
+            + ". Full browser workflow E2E remains required: save, exact-ref reopen, revise, copy, export, and delete."
+        )
+    elif workflow_requested:
+        final_response = (
+            final_response.rstrip()
+            + ("\n\n" if final_response.strip() else "")
+            + "Signed-in live action execution is action-verified for the current build. "
+            + "Full browser workflow E2E remains required: save, exact-ref reopen, revise, copy, export, and delete."
+        )
+
     wake_result: dict[str, object] | None = None
-    if schedule:
+    if schedule and launch_blocked and launch_review_required:
+        # A human-review launch blocker is terminal for automation, not a reason to arm a cron
+        # loop that will repeatedly hit the same authority gate. Keep the requested schedule in
+        # the job result for operator visibility, but do not create/enable a wake schedule.
+        wake_result = {
+            "status": "suppressed",
+            "enabled": False,
+            "reason": "launch_human_review_required",
+            "requested_schedule": schedule,
+        }
+        _record_runtime_event(
+            slug,
+            kind="ceo_bootstrap",
+            status="output",
+            detail=(
+                "wake schedule suppressed: X launch blocker requires human review before "
+                "automation can continue"
+            ),
+            line=(
+                "wake schedule suppressed: X launch blocker requires human review before "
+                "automation can continue"
+            ),
+            command=command,
+        )
+    elif schedule:
         try:
             wake_result = store.commit(
                 scope=f"business:{slug}",
@@ -2227,18 +3350,34 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             )
 
     cents = max(0, int(round(cost_usd * 100)))
+    completion_detail = (
+        "CEO bootstrap build completed; signed-in live action execution is action-verified, but full browser workflow E2E remains unverified."
+        if action_execution_verified and workflow_requested
+        else (
+            "CEO bootstrap build completed; signed-in live action execution verification is pending, and full browser workflow E2E remains unverified."
+            if workflow_requested
+            else "CEO bootstrap completed."
+        )
+    )
+    runtime_completion_status = "completed"
+    if launch_blocked:
+        runtime_completion_status = "blocked"
+        completion_detail = (
+            "CEO bootstrap product work completed, but the X launch is blocked for this exact "
+            f"attempt: {launch_blocker}"
+        )
     _record_runtime_event(
         slug,
         kind="ceo_bootstrap",
-        status="completed",
-        detail="CEO bootstrap completed.",
+        status=runtime_completion_status,
+        detail=completion_detail,
         command=command,
         trace={
             "kind": "turn",
             "entry_key": "turn:ceo_bootstrap",
             "label": "CEO bootstrap",
             "detail": final_response[:280].strip() or "CEO bootstrap completed.",
-            "status": "completed",
+            "status": runtime_completion_status,
         },
     )
     return JobRunResult(
@@ -2248,6 +3387,11 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             "cost_usd": round(cost_usd, 6),
             "cost_status": cost_status,
             "surface_refresh": surface_refresh,
+            "bootstrap_completion_status": bootstrap_completion_status,
+            "x_launch_status": x_launch_status,
+            "x_launch_outcome": x_launch_outcome,
+            "live_action_execution_status": live_action_execution_status,
+            "live_action_execution_verification": live_action_verification,
             "wake": wake_result,
         },
         actual_cost_cents=cents,
@@ -2564,7 +3708,34 @@ def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobR
         from gateway.session_context import clear_session_vars, set_session_vars
 
         from .turn_runtime import _business_workspace_execution_context
-        from .core import _bound_operator_task_context
+        from .core import (
+            TakyonStore,
+            _assert_active_parent_operator_task,
+            _bound_operator_task_context,
+        )
+
+        parent_operator_task = (
+            payload.get("parent_operator_task")
+            if isinstance(payload.get("parent_operator_task"), Mapping)
+            else {}
+        )
+        parent_run_id = str(parent_operator_task.get("run_id") or "").strip()
+        parent_task_kind = str(parent_operator_task.get("task_kind") or "").strip().lower()
+        try:
+            parent_attempt = int(parent_operator_task.get("attempt") or 0)
+        except (TypeError, ValueError):
+            parent_attempt = 0
+        try:
+            parent_deadline_at = max(
+                0.0, float(parent_operator_task.get("deadline_at") or 0.0)
+            )
+        except (TypeError, ValueError):
+            parent_deadline_at = 0.0
+        if parent_task_kind != "ceo_bootstrap" or not parent_run_id or parent_attempt < 1:
+            parent_run_id = ""
+            parent_task_kind = ""
+            parent_attempt = 0
+            parent_deadline_at = 0.0
 
         with _business_workspace_execution_context(
             slug,
@@ -2577,11 +3748,32 @@ def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobR
                 business_slug=slug,
                 task_kind=tool_name,
             )
-            with _bound_operator_task_context(run_id=work_request_id, task_kind=tool_name):
+            # A deferred bootstrap child executes under its runtime-authored parent identity, not
+            # the child work-request id. This lets bounded rails such as Taste persist an exact
+            # parent-attempt blocker that the outer CEO watchdog can observe before another call.
+            bound_context: dict[str, Any] = {
+                "run_id": parent_run_id or work_request_id,
+                "task_kind": parent_task_kind or tool_name,
+            }
+            if parent_attempt > 0:
+                bound_context["attempt"] = parent_attempt
+            if parent_deadline_at > 0.0:
+                bound_context["deadline_at"] = parent_deadline_at
+            with _bound_operator_task_context(**bound_context):
+                if parent_run_id:
+                    _assert_active_parent_operator_task(
+                        TakyonStore(operator_user_id=owner_user_id),
+                        f"starting delegated {tool_name}",
+                    )
                 raw = handler_fn(dict(args))
                 active_claim = jobs.current_job_claim()
                 if active_claim is not None:
                     active_claim.assert_owned(f"recording {tool_name} result")
+                if parent_run_id:
+                    _assert_active_parent_operator_task(
+                        TakyonStore(operator_user_id=owner_user_id),
+                        f"recording delegated {tool_name} result",
+                    )
         result = _parse_jsonish_output(str(raw or ""))
         if not isinstance(result, dict) or not result:
             result = {"success": False, "error": f"{tool_name} returned no parseable result"}

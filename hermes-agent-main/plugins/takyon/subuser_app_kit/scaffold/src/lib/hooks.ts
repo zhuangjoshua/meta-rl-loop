@@ -96,6 +96,15 @@ function activePaidEntitlement(entitlement: Record<string, unknown>): boolean {
   return false;
 }
 
+export function hasActiveStripeSubscription(payload: AccountPayload | null): boolean {
+  return accountEntitlements(payload).some((entitlement) => {
+    const subscriptionId = String(
+      entitlement.stripe_subscription_id ?? entitlement.stripeSubscriptionId ?? "",
+    ).trim();
+    return Boolean(subscriptionId) && activePaidEntitlement(entitlement);
+  });
+}
+
 export function isAccountEntitled(payload: AccountPayload | null): boolean {
   if (!payload || !isObject(payload)) return false;
   if (accountEntitlements(payload).some((entitlement) => activePaidEntitlement(entitlement))) {

@@ -56,6 +56,19 @@ function recordRefFromRecord(record) {
   const type = String(record.type || record.record_type || "").trim();
   const id = String(record.id || record.record_id || "").trim();
   if (!type || !id) return "";
+  // Prefer the runtime's exact canonical handle when it supplies one. Older record APIs expose
+  // only type/id, so the deterministic v1 encoding remains the compatibility fallback. Never
+  // replace a valid server ref with a freshly serialized lookalike: product state must preserve
+  // the opaque value byte-for-byte across save/read/update/delete.
+  const existingRef = typeof record.ref === "string" ? record.ref : "";
+  if (existingRef) {
+    try {
+      const existingKey = recordKeyFromRef(existingRef);
+      if (existingKey.type === type && existingKey.id === id) return existingRef;
+    } catch {
+      // A stale/malformed legacy response ref cannot become the locator; synthesize from type/id.
+    }
+  }
   return `${RECORD_REF_PREFIX}${encodeURIComponent(JSON.stringify([1, type, id]))}`;
 }
 
@@ -95,7 +108,17 @@ function recordWithRef(record) {
 function payloadWithRecordRefs(payload) {
   if (!isObject(payload)) return payload;
   const out = { ...payload };
-  if (isObject(payload.record)) out.record = recordWithRef(payload.record);
+  if (isObject(payload.record)) {
+    const record = recordWithRef(payload.record);
+    out.record = record;
+    // Record mutations historically returned an envelope (`{ record }`), while a large class of
+    // generated screens consumed the result as the record itself. Keep the envelope for existing
+    // products and mirror its record fields at the top level so both shapes preserve the SAME
+    // runtime-owned ref. This is compatibility normalization, not a second record identity.
+    for (const [key, value] of Object.entries(record)) {
+      out[key] = value;
+    }
+  }
   if (Array.isArray(payload.records)) out.records = payload.records.map(recordWithRef);
   return out;
 }
@@ -105,12 +128,30 @@ export function resolveSubuserRuntimeBase(config = {}) {
   return runtimeApiBase.replace(/\/+$/, "");
 }
 
+function publishedBuildId() {
+  try {
+    const globalValue = String(globalThis.__TAKYON_LIVE_BUILD_ID__ || "").trim();
+    if (globalValue) return globalValue;
+  } catch {
+    // Non-browser runtimes have no global build marker.
+  }
+  try {
+    return String(
+      document.querySelector('meta[name="takyon-live-build-id"]')?.getAttribute("content") || "",
+    ).trim();
+  } catch {
+    return "";
+  }
+}
+
 async function jsonRequest(url, init = {}) {
+  const buildId = publishedBuildId();
   const response = await fetch(url, {
     credentials: "same-origin",
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(buildId ? { "X-Takyon-Live-Build-Id": buildId } : {}),
       ...(init.headers || {}),
     },
   });
@@ -254,14 +295,11 @@ export function createSubuserRuntimeClient(context = {}) {
       ensureRail("account");
       return jsonRequest(routeUrl("account"), { method: "GET" });
     },
-    async cancelSubscription(payload = {}) {
+    async cancelSubscription() {
       ensureRail("account");
       return jsonRequest(routeUrl("account"), {
         method: "POST",
-        body: JSON.stringify({
-          ...payload,
-          action: "cancel_subscription",
-        }),
+        body: JSON.stringify({ action: "cancel_subscription" }),
       });
     },
     // Apple 5.1.1(v) account deletion. The server resolves the target user from the session — no
@@ -364,18 +402,57 @@ export function createSubuserRuntimeClient(context = {}) {
     },
     async saveRecord(payload = {}) {
       ensureRail("records");
-      const recordType = String(payload.record_type || payload.type || "").trim();
+      if (!Object.prototype.hasOwnProperty.call(payload, "data") || payload.data == null) {
+        throw new TypeError("data is required");
+      }
+      const suppliedRefs = [payload.ref, payload.record_ref]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      if (new Set(suppliedRefs).size > 1) {
+        throw new TypeError("ref does not match the supplied record_ref");
+      }
+      const suppliedRef = suppliedRefs[0] || "";
+      const refKey = suppliedRef ? recordKeyFromRef(suppliedRef) : null;
+      const suppliedTypes = [payload.record_type, payload.type]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      const legacyRecordIds = [payload.record_id, payload.id]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      if (new Set(suppliedTypes).size > 1) {
+        throw new TypeError("record_type does not match the supplied type");
+      }
+      if (new Set(legacyRecordIds).size > 1) {
+        throw new TypeError("record_id does not match the supplied id");
+      }
+      const suppliedType = suppliedTypes[0] || "";
+      const legacyRecordId = legacyRecordIds[0] || "";
+      if (refKey && suppliedTypes.some((value) => value !== refKey.type)) {
+        throw new TypeError("record_type does not match the supplied record ref");
+      }
+      if (refKey && legacyRecordIds.some((value) => value !== refKey.id)) {
+        throw new TypeError("record_id does not match the supplied record ref");
+      }
+      const recordType = refKey ? refKey.type : suppliedType;
       if (!recordType) {
         throw new Error("record_type is required");
       }
-      const recordId = String(payload.record_id || payload.id || "").trim();
+      // New generated code updates with the opaque ref it received from save/list/read. The raw-id
+      // path remains runtime-only compatibility for already-published products; the TypeScript SDK
+      // deliberately does not expose it.
+      const recordId = refKey ? refKey.id : legacyRecordId;
       const route = recordId
         ? `records/${encodeRoutePart(recordType)}/${encodeRoutePart(recordId)}`
         : "records";
+      const {
+        ref: _ref,
+        record_ref: _recordRef,
+        ...recordPayload
+      } = payload;
       return payloadWithRecordRefs(await jsonRequest(routeUrl(route), {
         method: "POST",
         body: JSON.stringify({
-          ...payload,
+          ...recordPayload,
           record_type: recordType,
           record_id: recordId || undefined,
         }),

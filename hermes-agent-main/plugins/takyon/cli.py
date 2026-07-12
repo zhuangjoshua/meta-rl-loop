@@ -602,6 +602,31 @@ def _format_cli_value(value: Any) -> str:
                 slug = str(business_ref or "<unknown>")
             follow = value.get("follow") if isinstance(value.get("follow"), dict) else {}
             status = str(follow.get("status") or bootstrap_job.get("status") or "queued")
+            follow_job_result = follow.get("result") if isinstance(follow.get("result"), dict) else {}
+            live_action_verification = (
+                follow_job_result.get("live_action_execution_verification")
+                if isinstance(follow_job_result.get("live_action_execution_verification"), dict)
+                else {}
+            )
+            action_execution_required = bool(
+                live_action_verification.get("action_execution_required")
+            )
+            action_execution_status = str(
+                live_action_verification.get("status") or "pending"
+            ).strip().lower()
+            x_launch_outcome = (
+                follow_job_result.get("x_launch_outcome")
+                if isinstance(follow_job_result.get("x_launch_outcome"), dict)
+                else {}
+            )
+            x_launch_status = str(
+                follow_job_result.get("x_launch_status")
+                or x_launch_outcome.get("status")
+                or ""
+            ).strip().lower()
+            bootstrap_completion_status = str(
+                follow_job_result.get("bootstrap_completion_status") or ""
+            ).strip().lower()
             took = str(follow.get("duration_display") or "").strip()
             took_suffix = f" in {took}" if took else ""
             # Durable-state truth for a failed/blocked job record: if the site is actually
@@ -614,19 +639,83 @@ def _format_cli_value(value: Any) -> str:
                 if published_build and status in {"failed", "blocked"}
                 else ""
             )
-            # The follow-tail capped out while the job kept running its background tail, but the
-            # product site is already published. Do NOT report "Create running" (reads as "still
-            # bootstrapping" — operator complaint): the business is LIVE, the tail is background.
+            # The follow-tail capped out while the job kept running its required launch tail, but
+            # the product site is already published. State both facts without presenting the live
+            # product milestone as a clean end-to-end bootstrap completion.
             if follow.get("site_live_on_detach") and status not in {"failed", "blocked"}:
                 live_suffix = f" (live build {published_build[:12]})" if published_build else ""
                 return (
-                    f"business:{slug} is LIVE{live_suffix}{took_suffix} — bootstrap effectively done; "
-                    "remaining setup finishes in the background. Use /use "
-                    f"{slug} to work it, or `takyon logs -f` to watch the tail."
+                    f"The product site for business:{slug} is LIVE{live_suffix}{took_suffix}, but "
+                    "the bootstrap is still running required launch steps. This is not a clean "
+                    "bootstrap completion. Use /use "
+                    f"{slug} to inspect it, or `takyon logs -f` to watch the required tail."
                 )
             if value.get("detached"):
                 return f"Create {status} for business:{slug}. Use /use {slug} to attach."
             job_id = str(bootstrap_job.get("job_id") or "").strip()
+            if status == "completed" and bootstrap_completion_status == "needs_human_review":
+                blocker = str(
+                    follow_job_result.get("review_blocker")
+                    or "a bounded bootstrap rail requires human review"
+                ).strip()
+                job_suffix = f" Bootstrap job: {job_id}." if job_id else ""
+                return (
+                    f"Create STOPPED for business:{slug}{took_suffix}: HUMAN REVIEW REQUIRED — "
+                    f"{blocker}. Automation and wake scheduling are suppressed.{job_suffix}"
+                )
+            if status == "completed" and (
+                x_launch_status == "blocked"
+                or bootstrap_completion_status == "completed_with_launch_blocker"
+            ):
+                blocker = str(
+                    x_launch_outcome.get("blocker") or "the X launch gate blocked publication"
+                ).strip()
+                attempt = str(x_launch_outcome.get("bootstrap_attempt") or "").strip()
+                attempt_suffix = f" attempt {attempt}" if attempt else ""
+                job_suffix = f" Bootstrap job: {job_id}{attempt_suffix}." if job_id else ""
+                action_suffix = ""
+                review_suffix = (
+                    " Human review is REQUIRED."
+                    if x_launch_outcome.get("review_required")
+                    else ""
+                )
+                if action_execution_required:
+                    action_label = (
+                        "ACTION-VERIFIED"
+                        if action_execution_status == "action_verified"
+                        else "PENDING"
+                    )
+                    action_suffix = (
+                        f" Signed-in live action execution verification is {action_label}; full "
+                        "browser workflow E2E remains REQUIRED."
+                    )
+                return (
+                    f"Create product build completed for business:{slug}{took_suffix}, but the X "
+                    f"launch is BLOCKED: {blocker}. This is not a clean bootstrap completion."
+                    f"{review_suffix}{action_suffix}{job_suffix}"
+                )
+            if status == "completed" and action_execution_required:
+                blocker = str(live_action_verification.get("blocker") or "").strip()
+                blocker_suffix = f" Blocker: {blocker}." if blocker else ""
+                job_suffix = f" Bootstrap job: {job_id}." if job_id else ""
+                launch_clause = " X launch is PUBLISHED;" if x_launch_status == "published" else ""
+                action_label = (
+                    "ACTION-VERIFIED"
+                    if action_execution_status == "action_verified"
+                    else "PENDING"
+                )
+                return (
+                    f"Create build completed for business:{slug}{took_suffix};{launch_clause} signed-in live "
+                    f"action execution verification is {action_label}.{blocker_suffix} Full browser "
+                    f"workflow E2E remains REQUIRED (save, exact-ref reopen, revise, copy, export, "
+                    f"delete).{job_suffix}"
+                )
+            if status == "completed" and x_launch_status == "published":
+                job_suffix = f" Bootstrap job: {job_id}." if job_id else ""
+                return (
+                    f"Create completed for business:{slug}{took_suffix}; X launch is PUBLISHED."
+                    f"{job_suffix}"
+                )
             if job_id:
                 return f"Create {status} for business:{slug}{took_suffix}{published_suffix}. Bootstrap job: {job_id}."
             return f"Create {status} for business:{slug}{took_suffix}{published_suffix}."
@@ -2669,13 +2758,9 @@ def _follow_worker_job(
                 )
                 queued_warned = True
             if elapsed > max_seconds:
-                # The follow-tail hit its cap, but a bootstrap keeps a long background TAIL
-                # (research, wake scheduling, launch post) running LONG after the one thing the
-                # operator waits for — the live product site — is already published. Leaving
-                # "[bootstrap] ... job still running" as the last line reads as "stuck / still
-                # bootstrapping" even though the business is usable (operator complaint, ching).
-                # Check the DURABLE live-build pointer: once the site is live, drop the bootstrap
-                # framing entirely and say the business is LIVE — the tail is just background.
+                # The follow-tail hit its cap while the required bootstrap launch tail may still
+                # be running after product publication. Check the durable live-build pointer and
+                # state both truths; a live product is not evidence of clean E2E completion.
                 detach_live_build = ""
                 try:
                     with store._connect() as conn:
@@ -2690,9 +2775,10 @@ def _follow_worker_job(
                 if detach_live_build:
                     detached_live_build = detach_live_build
                     print(
-                        f"\n✓ business:{slug} is LIVE (build {detach_live_build[:12]}). The "
-                        "bootstrap is effectively done — its remaining background steps continue on "
-                        "the worker; you don't need to wait. (`takyon logs -f` to watch them.)",
+                        f"\n✓ The product site for business:{slug} is LIVE (build "
+                        f"{detach_live_build[:12]}), but the bootstrap is still running required "
+                        "launch steps. This is not a clean bootstrap completion. "
+                        "(`takyon logs -f` to watch the required tail.)",
                         flush=True,
                     )
                 else:
@@ -2729,11 +2815,9 @@ def _follow_worker_job(
                 + (f" (worker phases: {phase_bits})" if phase_bits else ""),
                 flush=True,
             )
-    # A terminal 'failed'/'blocked' JOB record is not the whole truth: the business's durable
-    # outcome can still be good (a retry or recovery run published the site while the job record
-    # kept the first failure — observed on test-2 2026-07-08: job failed on a watchdog kill, yet
-    # the site was built, published, and R2-mirrored 16 minutes later). Verdicts the operator
-    # reads must reflect DURABLE STATE, so check the canonical live-build pointer and say so.
+    # A terminal failed/blocked job and the business's current live pointer are two independent
+    # durable facts. The pointer is business-wide and carries no job/attempt provenance, so never
+    # infer that this job published it or that a later run completed this job's missing phases.
     live_build_id = ""
     if (last_status or "") in {"failed", "blocked"}:
         try:
@@ -2748,10 +2832,10 @@ def _follow_worker_job(
             live_build_id = ""
         if live_build_id:
             print(
-                f"[{label}] NOTE: the job record says {last_status}, but the product site IS "
-                f"built and published (live build {live_build_id[:12]}). A later run completed "
-                "the site work; only this job's remaining steps may be missing. The business is "
-                "usable — re-run a wake (or the CEO will on its schedule) to finish the tail.",
+                f"[{label}] NOTE: this job remains {last_status}. The business currently points "
+                f"at live build {live_build_id[:12]}, but that business-wide pointer is not scoped "
+                "to this job or attempt and does not prove this job published it. Required "
+                "bootstrap steps may still be missing.",
                 flush=True,
             )
     return {

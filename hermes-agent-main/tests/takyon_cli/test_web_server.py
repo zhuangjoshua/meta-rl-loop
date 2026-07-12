@@ -24,6 +24,18 @@ from takyon_cli.config import (
 )
 
 
+def _allow_dashboard_business_access(monkeypatch, web_server) -> None:
+    """Route-behavior tests stub the separately tested database ownership authority."""
+    monkeypatch.setattr(
+        web_server,
+        "_dashboard_principal_owns_business",
+        lambda _request, principal, slug: (
+            str(getattr(principal, "user_id", "") or "") == "user-123"
+            and slug == "alpha"
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # reload_env tests
 # ---------------------------------------------------------------------------
@@ -440,7 +452,6 @@ def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
 
     import plugins.takyon.ai_gateway as ai_gateway
     import plugins.takyon.core as core
-    import psycopg
     import takyon_cli.web_server as web_server
 
     calls: list[tuple[object, ...]] = []
@@ -453,12 +464,12 @@ def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
 
             return _Result()
 
-        def close(self):
-            calls.append(("close",))
+    conn = _Conn()
 
-    def _fake_connect(url, autocommit=True, prepare_threshold=None):
-        calls.append(("connect", url, autocommit, prepare_threshold))
-        return _Conn()
+    class _Pool:
+        def release(self, released):
+            assert released is conn
+            calls.append(("release",))
 
     def _fake_broker(conn, *, business_slug, raw_session_token, body, audit_route, caller=object()):
         calls.append(("broker", business_slug, raw_session_token, body, audit_route, conn.__class__.__name__))
@@ -477,7 +488,12 @@ def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
 
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
     monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda **_kwargs: "postgres://runtime")
-    monkeypatch.setattr(psycopg, "connect", _fake_connect)
+    monkeypatch.setattr(
+        web_server,
+        "_takyon_app_pool_acquire",
+        lambda url: calls.append(("acquire", url)) or conn,
+    )
+    monkeypatch.setattr(web_server, "_takyon_app_pool", lambda _url: _Pool())
     monkeypatch.setattr(ai_gateway, "broker_message_for_business", _fake_broker)
 
     client = TestClient(web_server.app)
@@ -490,7 +506,7 @@ def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
     assert resp.status_code == 200
     assert resp.json()["success"] is True
     assert resp.json()["text"] == "brokered"
-    assert calls[0] == ("connect", "postgres://runtime", True, None)
+    assert calls[0] == ("acquire", "postgres://runtime")
     assert calls[1][0] == "broker"
     assert calls[1][1:5] == (
         "mathflow",
@@ -498,7 +514,7 @@ def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
         {"prompt": "hi"},
         "/api/takyon/apps/mathflow/generate",
     )
-    assert calls[-1] == ("close",)
+    assert calls[-1] == ("release",)
 
 
 def test_app_generate_accepts_bearer_app_session_token(monkeypatch):
@@ -506,7 +522,6 @@ def test_app_generate_accepts_bearer_app_session_token(monkeypatch):
 
     import plugins.takyon.ai_gateway as ai_gateway
     import plugins.takyon.core as core
-    import psycopg
     import takyon_cli.web_server as web_server
 
     calls: list[tuple[object, ...]] = []
@@ -519,12 +534,12 @@ def test_app_generate_accepts_bearer_app_session_token(monkeypatch):
 
             return _Result()
 
-        def close(self):
-            calls.append(("close",))
+    conn = _Conn()
 
-    def _fake_connect(url, autocommit=True, prepare_threshold=None):
-        calls.append(("connect", url, autocommit, prepare_threshold))
-        return _Conn()
+    class _Pool:
+        def release(self, released):
+            assert released is conn
+            calls.append(("release",))
 
     def _fake_broker(conn, *, business_slug, raw_session_token, body, audit_route, caller=object()):
         calls.append(("broker", business_slug, raw_session_token, body, audit_route, conn.__class__.__name__))
@@ -532,7 +547,12 @@ def test_app_generate_accepts_bearer_app_session_token(monkeypatch):
 
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
     monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda **_kwargs: "postgres://runtime")
-    monkeypatch.setattr(psycopg, "connect", _fake_connect)
+    monkeypatch.setattr(
+        web_server,
+        "_takyon_app_pool_acquire",
+        lambda url: calls.append(("acquire", url)) or conn,
+    )
+    monkeypatch.setattr(web_server, "_takyon_app_pool", lambda _url: _Pool())
     monkeypatch.setattr(ai_gateway, "broker_message_for_business", _fake_broker)
 
     client = TestClient(web_server.app)
@@ -550,7 +570,7 @@ def test_app_generate_accepts_bearer_app_session_token(monkeypatch):
         {"prompt": "hi"},
         "/api/takyon/apps/mathflow/generate",
     )
-    assert calls[-1] == ("close",)
+    assert calls[-1] == ("release",)
 
 
 def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
@@ -707,7 +727,12 @@ def test_local_dashboard_principal_falls_back_to_platform_owner(monkeypatch):
 
     request = types.SimpleNamespace(
         state=types.SimpleNamespace(auth0_user=None),
-        headers={"host": "127.0.0.1:9119"},
+        headers={
+            "host": "127.0.0.1:9119",
+            web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN,
+        },
+        url=types.SimpleNamespace(path="/"),
+        query_params={},
     )
 
     resolved = web_server._resolve_dashboard_request_principal(request)
@@ -969,6 +994,7 @@ def test_creative_credit_checkout_route_skips_redundant_db_lookup(monkeypatch):
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    _allow_dashboard_business_access(monkeypatch, web_server)
     monkeypatch.setattr(
         web_server,
         "_resolve_runtime_database_url",
@@ -1204,6 +1230,7 @@ def test_business_traction_endpoint_reads_owned_business_directly(monkeypatch):
             }
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    _allow_dashboard_business_access(monkeypatch, web_server)
     monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
 
     client = TestClient(web_server.app)
@@ -1255,6 +1282,7 @@ def test_business_home_endpoint_reads_owned_shell_directly(monkeypatch):
         return fn(*args, **kwargs)
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    _allow_dashboard_business_access(monkeypatch, web_server)
     monkeypatch.setattr(web_server, "_read_takyon_business_home", _fake_home_payload)
     monkeypatch.setattr(web_server.asyncio, "to_thread", _fake_to_thread)
 
@@ -1313,6 +1341,7 @@ def test_business_site_preview_falls_back_to_published_public_url_when_local_htm
             }
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    _allow_dashboard_business_access(monkeypatch, web_server)
     monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
 
     client = TestClient(web_server.app)
@@ -1416,6 +1445,7 @@ def test_business_site_preview_prefers_published_public_url_over_local_html(monk
             }
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    _allow_dashboard_business_access(monkeypatch, web_server)
     monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
 
     client = TestClient(web_server.app)
@@ -1446,6 +1476,7 @@ def test_site_preview_document_wraps_live_public_url(monkeypatch):
     )
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    _allow_dashboard_business_access(monkeypatch, web_server)
     monkeypatch.setattr(
         web_server,
         "_read_takyon_business_site_preview",
@@ -1511,6 +1542,7 @@ def test_business_site_preview_uses_public_url_even_when_publish_status_is_not_p
             }
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    _allow_dashboard_business_access(monkeypatch, web_server)
     monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
 
     client = TestClient(web_server.app)
@@ -1564,6 +1596,7 @@ def test_business_site_preview_uses_inline_html_for_unpublished_local_site(monke
             return {"app": {"surface_contract": {"publish_status": "draft", "public_url": ""}}}
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    _allow_dashboard_business_access(monkeypatch, web_server)
     monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
 
     client = TestClient(web_server.app)
@@ -1616,6 +1649,7 @@ def test_business_site_preview_reports_unpublished_app_source_tree_truthfully(mo
             return {"app": {"surface_contract": {"publish_status": "not_published", "public_url": ""}}}
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    _allow_dashboard_business_access(monkeypatch, web_server)
     monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
 
     client = TestClient(web_server.app)
@@ -1683,6 +1717,7 @@ def test_business_site_preview_does_not_mask_missing_explicit_html_path_with_pub
             }
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    _allow_dashboard_business_access(monkeypatch, web_server)
     monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
 
     client = TestClient(web_server.app)
@@ -1894,6 +1929,7 @@ def test_outreach_start_endpoint_enqueues_channel_request(tmp_path, monkeypatch)
         "_resolve_dashboard_principal",
         lambda _user, runtime_database_url=None: principal,
     )
+    _allow_dashboard_business_access(monkeypatch, web_server)
 
     def _fake_enqueue_job(args, **_kwargs):
         captured.update(args)
@@ -1945,6 +1981,7 @@ def test_outreach_start_endpoint_defaults_to_start_when_no_campaign_exists(tmp_p
         "_resolve_dashboard_principal",
         lambda _user, runtime_database_url=None: principal,
     )
+    _allow_dashboard_business_access(monkeypatch, web_server)
 
     def _fake_enqueue_job(args, **_kwargs):
         captured.update(args)
@@ -2317,29 +2354,43 @@ def test_product_subdomain_pointer_timeout_returns_503(tmp_path, monkeypatch):
     monkeypatch.setattr(web_server, "_PRODUCT_SITE_POINTER_RESOLVE_TIMEOUT_SECONDS", 0.01)
     _clear_product_serving_caches(web_server)
 
+    pointer_entered = threading.Event()
+    release_pointer = threading.Event()
+    pointer_finished = threading.Event()
+
     def slow_pointer(_slug: str):
-        time.sleep(0.2)
+        pointer_entered.set()
+        release_pointer.wait()
+        pointer_finished.set()
         return True, "build123"
 
     monkeypatch.setattr(web_server, "_resolve_live_build_pointer", slow_pointer)
 
-    async def _exercise() -> tuple[httpx.Response, float]:
+    async def _exercise() -> httpx.Response:
         transport = httpx.ASGITransport(app=web_server.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            started = time.perf_counter()
-            response = await client.get("/", headers={"Host": "latexflow.coscale.app"})
-            elapsed = time.perf_counter() - started
-            return response, elapsed
+            request_task = asyncio.create_task(
+                client.get("/", headers={"Host": "latexflow.coscale.app"})
+            )
+            try:
+                while not pointer_entered.is_set():
+                    await asyncio.sleep(0)
+                response = await request_task
+                assert not pointer_finished.is_set()
+                return response
+            finally:
+                release_pointer.set()
+                if not request_task.done():
+                    await request_task
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
-        response, elapsed = asyncio.run(_exercise())
+        response = asyncio.run(_exercise())
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
 
     assert response.status_code == 503
-    assert elapsed < 0.15
 
 
 def test_product_subdomain_materialize_timeout_returns_503(tmp_path, monkeypatch):
@@ -2355,29 +2406,43 @@ def test_product_subdomain_materialize_timeout_returns_503(tmp_path, monkeypatch
     _clear_product_serving_caches(web_server)
     monkeypatch.setattr(web_server, "_resolve_live_build_pointer", lambda _slug: (True, "build123"))
 
+    materialize_entered = threading.Event()
+    release_materialize = threading.Event()
+    materialize_finished = threading.Event()
+
     def slow_materialize(_business: str, _build_id: str):
-        time.sleep(0.2)
+        materialize_entered.set()
+        release_materialize.wait()
+        materialize_finished.set()
         return None
 
     monkeypatch.setattr(web_server, "_materialize_product_site_from_storage", slow_materialize)
 
-    async def _exercise() -> tuple[httpx.Response, float]:
+    async def _exercise() -> httpx.Response:
         transport = httpx.ASGITransport(app=web_server.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            started = time.perf_counter()
-            response = await client.get("/", headers={"Host": "latexflow.coscale.app"})
-            elapsed = time.perf_counter() - started
-            return response, elapsed
+            request_task = asyncio.create_task(
+                client.get("/", headers={"Host": "latexflow.coscale.app"})
+            )
+            try:
+                while not materialize_entered.is_set():
+                    await asyncio.sleep(0)
+                response = await request_task
+                assert not materialize_finished.is_set()
+                return response
+            finally:
+                release_materialize.set()
+                if not request_task.done():
+                    await request_task
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
-        response, elapsed = asyncio.run(_exercise())
+        response = asyncio.run(_exercise())
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
 
     assert response.status_code == 503
-    assert elapsed < 0.15
 
 
 def test_reserved_public_host_does_not_resolve_as_product_business():
@@ -3158,6 +3223,7 @@ def test_app_actions_route_dispatches_session_scoped_handler(monkeypatch):
             headers={
                 "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
+                "X-Takyon-Live-Build-Id": "a" * 32,
             },
         )
     finally:
@@ -3173,6 +3239,7 @@ def test_app_actions_route_dispatches_session_scoped_handler(monkeypatch):
         "payload": {"subject": "Hello"},
         "idempotency_key": "idem_123",
         "bound_origin": "http://mathflow.coscale.app",
+        "expected_live_build_id": "a" * 32,
     }]
 
 
@@ -3387,11 +3454,15 @@ def test_product_tls_ask_does_not_block_status_route(monkeypatch):
 
     import takyon_cli.web_server as web_server
 
-    original_checker = web_server._product_host_has_business
+    checker_entered = threading.Event()
+    release_checker = threading.Event()
+    checker_finished = threading.Event()
 
     def _slow_checker(domain: str) -> tuple[bool, str]:
-        time.sleep(0.25)
-        return original_checker(domain)
+        checker_entered.set()
+        release_checker.wait()
+        checker_finished.set()
+        return False, "business_not_found"
 
     monkeypatch.setattr(web_server, "_product_host_has_business", _slow_checker)
     monkeypatch.setattr(web_server, "check_config_version", lambda: (23, 23))
@@ -3399,24 +3470,27 @@ def test_product_tls_ask_does_not_block_status_route(monkeypatch):
     monkeypatch.setattr(web_server, "read_runtime_status", lambda: None)
     monkeypatch.setattr(web_server, "_GATEWAY_HEALTH_URL", "")
 
-    async def _exercise() -> tuple[httpx.Response, float]:
+    async def _exercise() -> httpx.Response:
         transport = httpx.ASGITransport(app=web_server.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             ask_task = asyncio.create_task(
                 client.get("/api/product-tls/ask?domain=missing.coscale.app")
             )
-            await asyncio.sleep(0.02)
-            started = time.perf_counter()
-            status_resp = await client.get("/api/status")
-            elapsed = time.perf_counter() - started
-            ask_resp = await ask_task
+            try:
+                while not checker_entered.is_set():
+                    await asyncio.sleep(0)
+                assert not checker_finished.is_set()
+                status_resp = await client.get("/api/status")
+                assert not checker_finished.is_set()
+            finally:
+                release_checker.set()
+                ask_resp = await ask_task
             assert ask_resp.status_code == 404
-            return status_resp, elapsed
+            return status_resp
 
-    status_resp, elapsed = asyncio.run(_exercise())
+    status_resp = asyncio.run(_exercise())
 
     assert status_resp.status_code == 200
-    assert elapsed < 0.2
 
 
 def test_product_site_materialize_does_not_block_status_route(monkeypatch, tmp_path):
@@ -3427,8 +3501,14 @@ def test_product_site_materialize_does_not_block_status_route(monkeypatch, tmp_p
     publish_root = tmp_path / "product-sites"
     publish_root.mkdir(parents=True, exist_ok=True)
 
+    materialize_entered = threading.Event()
+    release_materialize = threading.Event()
+    materialize_finished = threading.Event()
+
     def _slow_materialize(_business: str, _build_id: str):
-        time.sleep(0.25)
+        materialize_entered.set()
+        release_materialize.wait()
+        materialize_finished.set()
         return None
 
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
@@ -3443,24 +3523,27 @@ def test_product_site_materialize_does_not_block_status_route(monkeypatch, tmp_p
     monkeypatch.setattr(web_server, "_GATEWAY_HEALTH_URL", "")
     _clear_product_serving_caches(web_server)
 
-    async def _exercise() -> tuple[httpx.Response, float]:
+    async def _exercise() -> httpx.Response:
         transport = httpx.ASGITransport(app=web_server.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             product_task = asyncio.create_task(
                 client.get("/", headers={"Host": "plannerly.coscale.app"})
             )
-            await asyncio.sleep(0.02)
-            started = time.perf_counter()
-            status_resp = await client.get("/api/status")
-            elapsed = time.perf_counter() - started
-            product_resp = await product_task
+            try:
+                while not materialize_entered.is_set():
+                    await asyncio.sleep(0)
+                assert not materialize_finished.is_set()
+                status_resp = await client.get("/api/status")
+                assert not materialize_finished.is_set()
+            finally:
+                release_materialize.set()
+                product_resp = await product_task
             assert product_resp.status_code == 503
-            return status_resp, elapsed
+            return status_resp
 
-    status_resp, elapsed = asyncio.run(_exercise())
+    status_resp = asyncio.run(_exercise())
 
     assert status_resp.status_code == 200
-    assert elapsed < 0.2
 
 
 def test_product_host_assets_route_serves_published_product_assets(monkeypatch, tmp_path):
@@ -3490,7 +3573,7 @@ def test_product_host_assets_route_serves_published_product_assets(monkeypatch, 
     assert "plannerly" in response.text
 
 
-def test_operator_root_redirects_to_chat(monkeypatch):
+def test_operator_root_serves_embedded_workspace(monkeypatch):
     from starlette.testclient import TestClient
 
     import takyon_cli.web_server as web_server
@@ -3500,11 +3583,11 @@ def test_operator_root_redirects_to_chat(monkeypatch):
 
     response = client.get("/?business=dashboardsly", follow_redirects=False)
 
-    assert response.status_code == 307
-    assert response.headers["location"] == "/chat?business=dashboardsly"
+    assert response.status_code == 200
+    assert "window.__TAKYON_DASHBOARD_EMBEDDED_CHAT__=true" in response.text
 
 
-def test_skill_lab_root_redirects_to_chat_like_operator_host(monkeypatch):
+def test_skill_lab_root_serves_embedded_workspace_like_operator_host(monkeypatch):
     from starlette.testclient import TestClient
 
     import takyon_cli.web_server as web_server
@@ -3514,11 +3597,11 @@ def test_skill_lab_root_redirects_to_chat_like_operator_host(monkeypatch):
 
     response = client.get("/", headers={"Host": "skills.fourmanifold.com"}, follow_redirects=False)
 
-    assert response.status_code == 307
-    assert response.headers["location"] == "/chat"
+    assert response.status_code == 200
+    assert "window.__TAKYON_DASHBOARD_EMBEDDED_CHAT__=true" in response.text
 
 
-def test_skill_lab_routes_redirect_to_chat_instead_of_serving_legacy_shell(monkeypatch):
+def test_skill_lab_routes_serve_embedded_workspace_instead_of_legacy_shell(monkeypatch):
     from starlette.testclient import TestClient
 
     import takyon_cli.web_server as web_server
@@ -3532,8 +3615,8 @@ def test_skill_lab_routes_redirect_to_chat_instead_of_serving_legacy_shell(monke
         follow_redirects=False,
     )
 
-    assert response.status_code == 307
-    assert response.headers["location"] == "/chat"
+    assert response.status_code == 200
+    assert "window.__TAKYON_DASHBOARD_EMBEDDED_CHAT__=true" in response.text
 
 
 def test_operator_chat_serves_litebulb_assets_from_litebulb_prefix(monkeypatch):
