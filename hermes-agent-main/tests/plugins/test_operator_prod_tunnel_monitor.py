@@ -127,6 +127,10 @@ def test_shared_tunnel_monitor_and_initial_start_use_one_reconciler():
     assert "occupied by an unowned listener" in script
     assert 'nohup "$0" "$command" </dev/null' in script
     assert "register_managed_tunnel_consumer_locked" in script
+    assert "exact_tracked_tunnel_listener_pid" in script
+    assert '[[ "$actual" == "$expected"' in script
+    assert '"$executable" == "$(command -v ssh)"' in script
+    assert 'adopt_exact_tracked_tunnel_locked "$command" "$port" "$pid_file"' in script
 
 
 def test_shared_tunnel_restart_lock_has_one_live_owner(tmp_path):

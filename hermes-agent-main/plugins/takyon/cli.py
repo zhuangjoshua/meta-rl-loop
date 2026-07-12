@@ -663,6 +663,16 @@ def _format_cli_value(value: Any) -> str:
                     f"Create STOPPED for business:{slug}{took_suffix}: HUMAN REVIEW REQUIRED — "
                     f"{blocker}. Automation and wake scheduling are suppressed.{job_suffix}"
                 )
+            if status == "completed" and bootstrap_completion_status == "platform_blocked":
+                blocker = str(
+                    follow_job_result.get("review_blocker")
+                    or "the platform publish rail blocked activation"
+                ).strip()
+                job_suffix = f" Bootstrap job: {job_id}." if job_id else ""
+                return (
+                    f"Create STOPPED for business:{slug}{took_suffix}: PLATFORM PUBLISH BLOCKED — "
+                    f"{blocker}. No automatic retry or human-review claim was made.{job_suffix}"
+                )
             if status == "completed" and (
                 x_launch_status == "blocked"
                 or bootstrap_completion_status == "completed_with_launch_blocker"

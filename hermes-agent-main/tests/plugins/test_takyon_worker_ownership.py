@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextvars
+import json
 import signal
 import subprocess
 import threading
@@ -11,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from plugins.takyon import core, jobs
+from plugins.takyon import core, jobs, worker
 from plugins.takyon import claim_scope
 
 _REAL_RUNTIME_RELEASE_SHA = claim_scope.runtime_release_sha
@@ -47,6 +48,96 @@ class _RowsStore:
 
     def _connect(self):
         return _RowsConn(self.row)
+
+
+def test_platform_publish_blocker_requires_a_new_validation_passed_refresh():
+    payload = {
+        "status": "passed",
+        "publish": {"status": "blocked", "blocker": "database activation failed"},
+    }
+    store = _RowsStore({"id": "event-2", "payload_json": payload})
+
+    assert worker._product_publish_blocker_after(store, "demo", "event-1") == (
+        "event-2",
+        "database activation failed",
+    )
+    assert worker._product_publish_blocker_after(store, "demo", "event-2") == (
+        "event-2",
+        "",
+    )
+
+
+def test_product_worker_uses_an_immutable_claimed_release_snapshot(tmp_path, monkeypatch):
+    release = "a" * 40
+    runtime = tmp_path / "runtime"
+    (runtime / "scripts").mkdir(parents=True)
+    files = {
+        "package.json": b'{"dependencies":{"@anthropic-ai/claude-agent-sdk":"1.0.0"}}',
+        "package-lock.json": b'{"lockfileVersion":3,"packages":{}}',
+        "scripts/takyon-claude-agent-task.mjs": b"console.log('sealed');\n",
+    }
+    for relative, content in files.items():
+        (runtime / relative).write_bytes(content)
+    (runtime / ".takyon-deploy-artifact.json").write_text(
+        json.dumps({"source_revision": release}), encoding="utf-8"
+    )
+    monkeypatch.setattr(claim_scope, "runtime_release_sha", lambda **_kwargs: release)
+    monkeypatch.setattr(core, "get_default_takyon_root", lambda: tmp_path / "home")
+    monkeypatch.setattr(core, "_resolve_runtime_executable", lambda _name: "/usr/bin/npm")
+    monkeypatch.setattr(core, "_shared_npm_cache_dir", lambda: tmp_path / "npm-cache")
+
+    def fake_run(command, **kwargs):
+        assert command[1:3] == ["ci", "--ignore-scripts"]
+        sdk = Path(kwargs["cwd"]) / "node_modules" / "@anthropic-ai" / "claude-agent-sdk"
+        sdk.mkdir(parents=True)
+        (sdk / "package.json").write_text('{"version":"1.0.0"}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(core.subprocess, "run", fake_run)
+    snapshot = core._product_worker_runtime_snapshot(runtime)
+    (runtime / "scripts" / "takyon-claude-agent-task.mjs").write_text(
+        "console.log('mutated');\n", encoding="utf-8"
+    )
+
+    assert core._product_worker_runtime_snapshot(runtime) == snapshot
+    assert (snapshot / "scripts" / "takyon-claude-agent-task.mjs").read_bytes() == files[
+        "scripts/takyon-claude-agent-task.mjs"
+    ]
+
+
+def test_existing_business_upsert_does_not_hydrate_workspace(tmp_path, monkeypatch):
+    store = object.__new__(core.TakyonStore)
+    monkeypatch.setattr(store, "_business", lambda *_args: {"slug": "latexflow"})
+    monkeypatch.setattr(store, "_business_workspace_base", lambda: tmp_path / "businesses")
+    monkeypatch.setattr(store, "_record_event", lambda *_args, **_kwargs: "event")
+    monkeypatch.setattr(
+        store,
+        "_business_root",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("workspace hydrated")),
+    )
+    executed: list[tuple[str, tuple]] = []
+
+    class Conn:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+            return SimpleNamespace(rowcount=1)
+
+    result = store._apply_operation(
+        Conn(),
+        {"raw": "business:latexflow", "business": "latexflow"},
+        {
+            "action": "business.upsert",
+            "business": "latexflow",
+            "business_slug": "latexflow",
+            "target_scope": "business:latexflow",
+            "name": "Latex Flow",
+        },
+        reason="metadata-only-update",
+        actor="test",
+    )
+
+    assert result["business"] == "latexflow"
+    assert any("UPDATE businesses" in sql for sql, _params in executed)
 
 
 def test_durable_write_fence_rejects_same_worker_newer_attempt():

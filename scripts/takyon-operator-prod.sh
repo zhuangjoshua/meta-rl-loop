@@ -1003,6 +1003,57 @@ process_start_identity() {
     | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
+exact_tracked_tunnel_listener_pid() {
+  local port="$1"
+  local command="$2"
+  local pid forward expected actual executable
+  pid="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  case "$command" in
+    safebox-tunnel)
+      forward="127.0.0.1:${LOCAL_SAFEBOX_PORT}:${SAFEBOX_PRIVATE_HOST}:${SAFEBOX_PRIVATE_PORT}"
+      ;;
+    dashboard-tunnel)
+      forward="127.0.0.1:${LOCAL_DASHBOARD_PORT}:${REMOTE_DASHBOARD_HOST}:${REMOTE_DASHBOARD_PORT}"
+      ;;
+    *) return 1 ;;
+  esac
+  for value in "$SSH_KEY" "$SSH_HOST" "$SSH_SERVER_ALIVE_INTERVAL" "$SSH_SERVER_ALIVE_COUNT_MAX" "$forward"; do
+    [[ -n "$value" && ! "$value" =~ [[:space:]] ]] || return 1
+  done
+  expected="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ServerAliveInterval=$SSH_SERVER_ALIVE_INTERVAL -o ServerAliveCountMax=$SSH_SERVER_ALIVE_COUNT_MAX -o TCPKeepAlive=yes -N -L $forward $SSH_HOST"
+  actual="$(ps -ww -o command= -p "$pid" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  executable="$(lsof -nP -a -p "$pid" -d txt -Fn 2>/dev/null | awk 'substr($0,1,1)=="n" {print substr($0,2); exit}')"
+  [[ "$actual" == "$expected" && "$executable" == "$(command -v ssh)" ]] || return 1
+  [[ -n "$(process_start_identity "$pid")" ]] || return 1
+  printf '%s' "$pid"
+}
+
+adopt_exact_tracked_tunnel_locked() {
+  local command="$1"
+  local port="$2"
+  local pid_file="${3:-}"
+  local pid owner_record owner_pid owner_identity
+  managed_tunnel_recorded_owner_owns_listener "$port" && return 0
+  pid="$(exact_tracked_tunnel_listener_pid "$port" "$command")" || return 1
+  owner_record="$(read_managed_tunnel_owner "$port")" || owner_record=""
+  if [[ -n "$owner_record" ]]; then
+    IFS=$'\t' read -r owner_pid owner_identity <<<"$owner_record"
+    managed_tunnel_record_matches_process "$port" "$owner_pid" && return 1
+    clear_managed_tunnel_owner "$port" "$owner_pid"
+  fi
+  record_managed_tunnel_owner "$port" "$pid" || return 1
+  if [[ "$(exact_tracked_tunnel_listener_pid "$port" "$command")" != "$pid" ]] \
+    || ! managed_tunnel_recorded_owner_owns_listener "$port" "$pid"; then
+    clear_managed_tunnel_owner "$port" "$pid"
+    return 1
+  fi
+  if [[ -n "$pid_file" ]]; then
+    read_managed_tunnel_owner "$port" >"$pid_file"
+    chmod 600 "$pid_file" 2>/dev/null || true
+  fi
+}
+
 read_managed_tunnel_owner() {
   local port="$1"
   local owner_file owner_pid owner_identity
@@ -1292,6 +1343,7 @@ ensure_managed_tunnel_locked() {
   local health_fn="$7"
   local port="$8"
   if "$health_fn"; then
+    adopt_exact_tracked_tunnel_locked "$command" "$port" "$pid_file" || true
     echo "$label tunnel: already healthy at $display_url"
     return 0
   fi
@@ -1303,6 +1355,7 @@ ensure_managed_tunnel_locked() {
     for _health_retry in 1 2 3; do
       sleep 0.5
       if "$health_fn"; then
+        adopt_exact_tracked_tunnel_locked "$command" "$port" "$pid_file" || true
         echo "$label tunnel: healthy again at $display_url"
         return 0
       fi

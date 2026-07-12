@@ -26,6 +26,12 @@ psycopg = pytest.importorskip("psycopg")
 from plugins.takyon import cost_events  # noqa: E402
 
 
+def test_returned_id_accepts_runtime_mapping_and_test_tuple_rows():
+    assert cost_events._returned_id(("tuple-id",)) == "tuple-id"
+    assert cost_events._returned_id({"id": "mapping-id"}) == "mapping-id"
+    assert cost_events._returned_id({"takyon_app_record_cost_event": "port-id"}) == "port-id"
+
+
 def test_migration_creates_ledgers_and_port(pg_conn):
     for table in ("operator_cost_events", "app_cost_events"):
         row = pg_conn.execute("select to_regclass(%s)", (f"public.{table}",)).fetchone()

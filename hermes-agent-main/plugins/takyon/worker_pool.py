@@ -253,6 +253,7 @@ class WorkerPool:
         on the next worker (its reservation refunded). Returns total jobs drained."""
         import psycopg
 
+        from . import claim_scope as _cs
         from .core import load_takyon_env
         from .runtime_app import (
             assert_takyon_pg_role,
@@ -295,6 +296,33 @@ class WorkerPool:
                 configure_takyon_pg_session(conn, bypass=True)
             return conn
 
+        release_identity_failed = threading.Event()
+
+        def _stop_invalid_release(exc: _cs.LocalReleaseIdentityError) -> None:
+            if release_identity_failed.is_set():
+                return
+            release_identity_failed.set()
+            stop.set()
+            _log.error(
+                "worker[%s]: release identity invalid (%s); draining without new claims",
+                worker_id,
+                exc,
+            )
+            if ready_file:
+                try:
+                    Path(ready_file).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if self.register:
+                try:
+                    conn = _pool_conn()
+                    try:
+                        _cs.begin_drain(conn, self.pool_id)
+                    finally:
+                        conn.close()
+                except Exception as drain_exc:  # noqa: BLE001
+                    _log.warning("worker[%s]: pool drain mark failed: %s", worker_id, drain_exc)
+
         # ── pool registry lifecycle (Stage 2, UC1) ───────────────────────────────────
         # Register this pool's heartbeated lease row; a daemon thread renews it on its own
         # connection so a long-running handler never lets the lease lapse (a lapsed lease
@@ -307,8 +335,6 @@ class WorkerPool:
             try:
                 conn = _pool_conn()
                 try:
-                    from . import claim_scope as _cs
-
                     _cs.register_pool(
                         conn,
                         pool_id=self.pool_id,
@@ -321,6 +347,10 @@ class WorkerPool:
                     registered = True
                 finally:
                     conn.close()
+            except _cs.LocalReleaseIdentityError as exc:
+                _stop_invalid_release(exc)
+                if ready_file:
+                    raise
             except Exception as exc:  # noqa: BLE001 — daemon self-heals; preflight fails closed
                 _log.error(
                     "worker[%s]: pool registration failed (%s); strict reservations for pool "
@@ -352,17 +382,16 @@ class WorkerPool:
             os.replace(temporary, marker)
 
         def _pool_heartbeat_loop() -> None:
-            from . import claim_scope as _cs
-
             interval = max(15.0, self.pool_lease_seconds / 4.0)
             drained_marked = False
             while not stop.wait(interval):
                 try:
+                    _cs.require_local_release_sha(self.release_sha, field="release_sha")
                     conn = _pool_conn()
                     try:
                         if not _cs.heartbeat_pool(
                             conn, self.pool_id, lease_seconds=self.pool_lease_seconds
-                        ):
+                        ) and not stop.is_set():
                             _cs.register_pool(
                                 conn,
                                 pool_id=self.pool_id,
@@ -374,6 +403,9 @@ class WorkerPool:
                             )
                     finally:
                         conn.close()
+                except _cs.LocalReleaseIdentityError as exc:
+                    _stop_invalid_release(exc)
+                    break
                 except Exception as exc:  # noqa: BLE001 — transient DB outage must not kill the pool
                     _log.warning("worker[%s]: pool heartbeat failed: %s", worker_id, exc)
             # Stop requested: mark draining (in-flight work finishes; reservations held).
@@ -464,6 +496,8 @@ class WorkerPool:
                         worker_release_sha=self.release_sha,
                     )
                     total_drained += counts["drained"]
+                except _cs.LocalReleaseIdentityError as exc:
+                    _stop_invalid_release(exc)
                 except Exception as exc:  # noqa: BLE001 — a tick failure must not crash the daemon
                     _log.exception("worker[%s]: tick failed: %s", thread_worker_id, exc)
                 finally:

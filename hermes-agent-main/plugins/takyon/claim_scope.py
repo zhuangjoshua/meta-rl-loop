@@ -58,6 +58,10 @@ DEFAULT_LEASE_SECONDS = 3600.0
 POOL_LIVE_STATUSES = ("joining", "active", "draining")
 
 
+class LocalReleaseIdentityError(RuntimeError):
+    """The process can no longer prove its advertised release identity."""
+
+
 def _valid_release_sha(value: object) -> str:
     normalized = str(value or "").strip().lower()
     if len(normalized) != 40 or any(ch not in "0123456789abcdef" for ch in normalized):
@@ -78,7 +82,9 @@ def runtime_release_sha(*, runtime_root: str | os.PathLike[str] | None = None) -
     configured_raw = str(os.getenv(RUNTIME_RELEASE_SHA_ENV) or "").strip()
     configured = _valid_release_sha(configured_raw)
     if configured_raw and not configured:
-        raise RuntimeError(f"{RUNTIME_RELEASE_SHA_ENV} must be a nonzero 40-character Git SHA")
+        raise LocalReleaseIdentityError(
+            f"{RUNTIME_RELEASE_SHA_ENV} must be a nonzero 40-character Git SHA"
+        )
 
     root = (
         Path(runtime_root).expanduser().resolve()
@@ -90,14 +96,18 @@ def runtime_release_sha(*, runtime_root: str | os.PathLike[str] | None = None) -
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as exc:
-            raise RuntimeError(f"invalid runtime deploy manifest {manifest_path}: {exc}") from exc
+            raise LocalReleaseIdentityError(
+                f"invalid runtime deploy manifest {manifest_path}: {exc}"
+            ) from exc
         deployed = _valid_release_sha(
             manifest.get("source_revision") if isinstance(manifest, dict) else ""
         )
         if not deployed:
-            raise RuntimeError(f"runtime deploy manifest {manifest_path} has no valid source_revision")
+            raise LocalReleaseIdentityError(
+                f"runtime deploy manifest {manifest_path} has no valid source_revision"
+            )
         if configured and configured != deployed:
-            raise RuntimeError(
+            raise LocalReleaseIdentityError(
                 f"{RUNTIME_RELEASE_SHA_ENV}={configured} does not match deployed runtime {deployed}"
             )
         return deployed
@@ -111,11 +121,11 @@ def runtime_release_sha(*, runtime_root: str | os.PathLike[str] | None = None) -
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError(f"cannot resolve runtime release SHA: {exc}") from exc
+        raise LocalReleaseIdentityError(f"cannot resolve runtime release SHA: {exc}") from exc
     git_sha = _valid_release_sha(resolved.stdout if resolved.returncode == 0 else "")
     if not git_sha:
         detail = str(resolved.stderr or resolved.stdout or "not a Git worktree").strip()
-        raise RuntimeError(f"cannot resolve runtime release SHA from {root}: {detail}")
+        raise LocalReleaseIdentityError(f"cannot resolve runtime release SHA from {root}: {detail}")
     try:
         dirty = subprocess.run(
             ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all", "--", "."],
@@ -125,17 +135,21 @@ def runtime_release_sha(*, runtime_root: str | os.PathLike[str] | None = None) -
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError(f"cannot verify runtime worktree cleanliness: {exc}") from exc
+        raise LocalReleaseIdentityError(
+            f"cannot verify runtime worktree cleanliness: {exc}"
+        ) from exc
     if dirty.returncode != 0:
         detail = str(dirty.stderr or "git status failed").strip()
-        raise RuntimeError(f"cannot verify runtime worktree cleanliness at {root}: {detail}")
+        raise LocalReleaseIdentityError(
+            f"cannot verify runtime worktree cleanliness at {root}: {detail}"
+        )
     if str(dirty.stdout or "").strip():
-        raise RuntimeError(
+        raise LocalReleaseIdentityError(
             "refusing to advertise a Git release SHA from a modified runtime worktree; "
             f"commit or remove changes under {root}, or use a revision-sealed deploy artifact"
         )
     if configured and configured != git_sha:
-        raise RuntimeError(
+        raise LocalReleaseIdentityError(
             f"{RUNTIME_RELEASE_SHA_ENV}={configured} does not match clean runtime HEAD {git_sha}"
         )
     return git_sha
@@ -151,7 +165,7 @@ def require_local_release_sha(supplied: object, *, field: str) -> str:
     if not requested:
         raise ValueError(f"{field} must be a nonzero 40-character Git SHA")
     if requested != local_release:
-        raise RuntimeError(
+        raise LocalReleaseIdentityError(
             f"{field}={requested} does not match this process release {local_release}"
         )
     return local_release

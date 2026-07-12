@@ -592,6 +592,17 @@ def test_claude_worker_progress_notifies_activity_sink_even_for_duplicates():
     ]
 
 
+def test_runtime_progress_tracks_a_synchronous_tool_until_completion(monkeypatch):
+    monkeypatch.setattr(worker, "_record_runtime_event", lambda *_args, **_kwargs: None)
+    progress = worker._RuntimeProgress(slug="demo", kind="ceo_bootstrap", command="/create demo")
+
+    progress.tool_started("call-1", "business_claude_agent_task", {"workspace": "product/site"})
+    assert progress.has_active_tool() is True
+
+    progress.tool_completed("call-1", "business_claude_agent_task", {}, {"success": True})
+    assert progress.has_active_tool() is False
+
+
 def test_claude_worker_heartbeat_isolated_by_business_run_and_attempt_after_600s(monkeypatch):
     clock = {"now": 0.0}
     monkeypatch.setattr(takyon_core.time, "monotonic", lambda: clock["now"])
@@ -1886,6 +1897,27 @@ def test_format_cli_value_surfaces_attempt_scoped_blocked_x_launch():
     assert "Human review is REQUIRED" in rendered
     assert "job-x-blocked attempt 2" in rendered
     assert "Create completed" not in rendered
+
+
+def test_format_cli_value_surfaces_platform_publish_stop_without_human_review():
+    rendered = cli._format_cli_value(
+        {
+            "business": "demo",
+            "bootstrap_job": {"job_id": "job-1", "status": "queued"},
+            "follow": {
+                "status": "completed",
+                "result": {
+                    "bootstrap_completion_status": "platform_blocked",
+                    "review_required": False,
+                    "review_blocker": "database activation failed",
+                },
+            },
+        }
+    )
+
+    assert "PLATFORM PUBLISH BLOCKED" in rendered
+    assert "database activation failed" in rendered
+    assert "HUMAN REVIEW REQUIRED" not in rendered
 
 
 def test_format_cli_value_surfaces_attempt_scoped_published_x_launch():

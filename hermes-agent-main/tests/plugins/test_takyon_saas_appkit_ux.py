@@ -318,6 +318,22 @@ def test_subscription_conformance_blocks_worker_timing_and_refund_options(
     assert issue in [marker["issue"] for marker in markers]
 
 
+def test_subscription_conformance_does_not_cross_ternary_copy_branches(tmp_path):
+    root = tmp_path / "site"
+    for rel in ("src/main.tsx", "src/components/subscription-cancellation.tsx"):
+        destination = root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(read(rel), encoding="utf-8")
+    account = root / "src" / "screens" / "account.tsx"
+    account.parent.mkdir(parents=True, exist_ok=True)
+    account.write_text(
+        "const label = canceled ? 'Subscription canceled' : 'Subscribe to continue';\n",
+        encoding="utf-8",
+    )
+
+    assert takyon_core._appkit_subscription_cancellation_markers(root) == []
+
+
 def test_subscription_conformance_scans_product_actions_for_refund_options(tmp_path):
     root = tmp_path / "site"
     for rel in ("src/main.tsx", "src/components/subscription-cancellation.tsx"):

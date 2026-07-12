@@ -2154,6 +2154,7 @@ def _install_bootstrap_handler_stubs(
     monkeypatch.setattr(worker, "_record_runtime_event", _capture_event)
     monkeypatch.setattr(worker, "_bootstrap_human_review_blocker", lambda *_a, **_k: {})
     monkeypatch.setattr(worker, "_bootstrap_delegated_children", lambda *_a, **_k: [])
+    monkeypatch.setattr(worker, "_product_publish_blocker_after", lambda *_a, **_k: ("", ""))
     captured["store"] = store
     return captured
 
@@ -2219,6 +2220,7 @@ def test_ceo_bootstrap_handler_binds_owner_before_loading_summary(monkeypatch):
     )
     monkeypatch.setattr(worker, "_bootstrap_human_review_blocker", lambda *_a, **_k: {})
     monkeypatch.setattr(worker, "_bootstrap_delegated_children", lambda *_a, **_k: [])
+    monkeypatch.setattr(worker, "_product_publish_blocker_after", lambda *_a, **_k: ("", ""))
 
     result = worker.ceo_bootstrap_handler(
         SimpleNamespace(id="job-1", business_slug="acme", payload={})
@@ -2254,6 +2256,34 @@ def test_bootstrap_completed_and_published_job_completes_not_requeued(monkeypatc
     # Wake schedule was committed and the final "completed" receipt event fired.
     assert captured["store"].commits, "wake-cron schedule should have been committed"
     assert ("completed", "ceo_bootstrap") in captured["events"]
+
+
+def test_bootstrap_platform_publish_failure_stops_without_requeue_or_human_claim(monkeypatch):
+    captured = _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=True,
+        surface_refresh={"publish": {"status": "published"}},
+    )
+    observations = iter((("old", ""), ("new", "database activation failed")))
+    monkeypatch.setattr(
+        worker, "_product_publish_blocker_after", lambda *_a, **_k: next(observations)
+    )
+
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(
+            id="job-platform-blocked",
+            attempts=1,
+            business_slug="acme",
+            payload={"schedule": "every 6h"},
+        )
+    )
+
+    assert result.result["bootstrap_completion_status"] == "platform_blocked"
+    assert result.result["review_required"] is False
+    assert result.result["review_blocker"] == "database activation failed"
+    assert result.result["wake"]["reason"] == "platform_publish_blocked"
+    assert captured["store"].commits == []
+    assert ("blocked", "ceo_bootstrap") in captured["events"]
 
 
 def test_bootstrap_blocked_x_outcome_stops_immediately_for_human_review(monkeypatch):
@@ -3214,3 +3244,78 @@ def test_worker_pool_shutdown_joins_inflight_operator_task_lane(monkeypatch):
         release_timer.cancel()
 
     assert lane_finished.is_set(), "WorkerPool returned before its in-flight product task"
+
+
+def test_release_invalid_pool_drains_active_handler_before_decommission(monkeypatch):
+    import psycopg as _psycopg
+
+    from plugins.takyon import claim_scope, core, runtime_app
+    from plugins.takyon import worker_pool as wp
+
+    release = "a" * 40
+    active_started = threading.Event()
+    invalid_seen = threading.Event()
+    release_active = threading.Event()
+    active_finished = threading.Event()
+    transitions: list[str] = []
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    monkeypatch.setenv("TAKYON_WORKER_OPERATOR_TASK_LANE", "0")
+    monkeypatch.setattr(claim_scope, "runtime_release_sha", lambda **_kwargs: release)
+    monkeypatch.setattr(core, "load_takyon_env", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_app, "resolve_database_url", lambda *a, **k: "postgresql://fake")
+    monkeypatch.setattr(_psycopg, "connect", lambda *a, **k: _FakeConn())
+    monkeypatch.setattr(claim_scope, "register_pool", lambda *_a, **_k: transitions.append("active"))
+    monkeypatch.setattr(claim_scope, "begin_drain", lambda *_a, **_k: transitions.append("draining"))
+    monkeypatch.setattr(
+        claim_scope, "decommission_pool", lambda *_a, **_k: transitions.append("decommissioned")
+    )
+
+    counts = {
+        "dispatched": 0,
+        "requeued": 0,
+        "usage_holds_released": 0,
+        "drained": 0,
+        "completed": 0,
+        "blocked": 0,
+        "failed": 0,
+    }
+
+    def fake_drain(_conn, *, worker_id, **_kwargs):
+        if worker_id.endswith("-1"):
+            active_started.set()
+            assert release_active.wait(5)
+            active_finished.set()
+            return counts
+        assert active_started.wait(2)
+        invalid_seen.set()
+        raise claim_scope.LocalReleaseIdentityError("runtime checkout became dirty")
+
+    monkeypatch.setattr(worker, "drain_tick", fake_drain)
+    pool = wp.WorkerPool(
+        worker_id="dirty-worker",
+        pool_id="dirty-pool",
+        size=2,
+        poll_interval=0.01,
+        database_url="postgresql://fake",
+    )
+    runner = threading.Thread(target=pool.run)
+    runner.start()
+    try:
+        assert invalid_seen.wait(2)
+        deadline = time.monotonic() + 2
+        while "draining" not in transitions and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert "draining" in transitions
+        assert "decommissioned" not in transitions
+        assert not active_finished.is_set()
+    finally:
+        release_active.set()
+        runner.join(5)
+
+    assert not runner.is_alive()
+    assert active_finished.is_set()
+    assert transitions.index("draining") < transitions.index("decommissioned")

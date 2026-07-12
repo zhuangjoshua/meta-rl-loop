@@ -1102,6 +1102,37 @@ def test_database_activation_cas_returns_displaced_build_and_requires_finalize(
     )
     assert finalized["activation_state"] == "live"
 
+    first_id = "d" * 32
+    conn.execute("DELETE FROM product_builds WHERE business_slug='proposal'")
+    conn.execute(
+        "UPDATE app_surface_contracts SET live_build_id = NULL, publish_status = 'not_published', "
+        "public_url = NULL, published_at = NULL WHERE business_slug='proposal'"
+    )
+    conn.execute(
+        "INSERT INTO product_builds (build_id, business_slug, source_revision, artifact_prefix, "
+        "action_bundle_json, action_bundle_sha256, status, activation_state, created_at) "
+        "VALUES (?, 'proposal', 1, ?, ?, ?, 'staged', 'staged', ?)",
+        (first_id, f"products/proposal/{first_id}", bundle, digest, now),
+    )
+    first = store._apply_operation(
+        conn,
+        {"raw": "business:proposal/app", "business": "proposal", "kind": "resource", "resource": "app"},
+        dict(
+            operation,
+            live_build_id=first_id,
+            artifact_prefix=f"products/proposal/{first_id}",
+            expected_previous_build_id="",
+            activation_attempt_id="e" * 32,
+        ),
+        reason="test first activation",
+        actor="test",
+    )
+    assert first["previous_servable_until"] == ""
+    assert conn.execute(
+        "SELECT activation_previous_servable_until FROM product_builds WHERE build_id = ?",
+        (first_id,),
+    ).fetchone()[0] is None
+
 
 @pytest.mark.parametrize(
     ("edge_choice", "expected_status", "expected_live"),

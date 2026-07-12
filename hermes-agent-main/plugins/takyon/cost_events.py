@@ -99,6 +99,20 @@ def _own_transaction(conn):
     return raw, raw.transaction()
 
 
+def _returned_id(row: Any) -> str | None:
+    if not row:
+        return None
+    value = row.get("id") if isinstance(row, Mapping) and "id" in row else None
+    if value is None and isinstance(row, Mapping):
+        value = next(iter(row.values()), None)
+    if value is None and not isinstance(row, Mapping):
+        try:
+            value = row[0]
+        except (IndexError, KeyError, TypeError):
+            return None
+    return str(value) if value is not None else None
+
+
 _OPERATOR_INSERT_SQL = """
 insert into operator_cost_events (
     business_slug, user_id, job_id, run_id, session_id, task_kind,
@@ -169,7 +183,7 @@ def record_operator_cost_event(
                     _clip(error, _MAX_TEXT), _payload_json(payload), started_at,
                 ),
             ).fetchone()
-        return str(row[0]) if row else None
+        return _returned_id(row)
     except Exception as exc:  # noqa: BLE001 — observability must never break the caller
         _log_write_failure(f"operator/{event_kind}", exc)
         return None
@@ -239,7 +253,7 @@ def record_app_cost_event(
                     _payload_json(payload), started_at,
                 ),
             ).fetchone()
-        return str(row[0]) if row else None
+        return _returned_id(row)
     except Exception as exc:  # noqa: BLE001 — observability must never break the caller
         _log_write_failure(f"app/{business_slug}/{event_kind}", exc)
         return None

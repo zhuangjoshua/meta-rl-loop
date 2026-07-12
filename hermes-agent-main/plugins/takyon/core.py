@@ -5679,6 +5679,120 @@ def _claude_agent_non_docker_worker_env(business: str, operator_user_id: str) ->
     return env
 
 
+_PRODUCT_WORKER_RUNTIME_FILES = (
+    "package.json",
+    "package-lock.json",
+    "scripts/takyon-claude-agent-task.mjs",
+)
+
+
+def _product_worker_runtime_snapshot(repo_root: Path) -> Path:
+    """Materialize the current claimed release once; Docker never sees the mutable checkout."""
+    from .claim_scope import runtime_release_sha
+
+    root = repo_root.resolve()
+    release = runtime_release_sha(runtime_root=root)
+    cache_parent = get_default_takyon_root() / "cache" / "product-worker-runtime"
+    final = cache_parent / release
+    ready = final / ".ready.json"
+
+    def _verify(path: Path) -> Path:
+        try:
+            manifest = json.loads((path / ".ready.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise TakyonError(f"product worker release cache is incomplete for {release}: {exc}") from exc
+        if manifest.get("release") != release:
+            raise TakyonError(f"product worker release cache identity mismatch for {release}")
+        for relative, digest in (manifest.get("files") or {}).items():
+            candidate = path / relative
+            if not candidate.is_file() or hashlib.sha256(candidate.read_bytes()).hexdigest() != digest:
+                raise TakyonError(f"product worker release cache is corrupt: {relative}")
+        if not (path / "node_modules" / "@anthropic-ai" / "claude-agent-sdk" / "package.json").is_file():
+            raise TakyonError("product worker release cache is missing the Claude Agent SDK")
+        return path
+
+    if ready.is_file():
+        return _verify(final)
+
+    cache_parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{release}.", dir=cache_parent))
+    try:
+        source_files: dict[str, bytes] = {}
+        deploy_manifest = root / ".takyon-deploy-artifact.json"
+        if deploy_manifest.is_file():
+            before = deploy_manifest.read_bytes()
+            metadata = json.loads(before)
+            if str(metadata.get("source_revision") or "").strip().lower() != release:
+                raise TakyonError("deployed runtime manifest does not match the claimed release")
+            source_files = {
+                relative: (root / relative).read_bytes()
+                for relative in _PRODUCT_WORKER_RUNTIME_FILES
+            }
+            if deploy_manifest.read_bytes() != before:
+                raise TakyonError("deployed runtime changed while snapshotting the product worker")
+        else:
+            top = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            ).stdout.strip()
+            git_root = Path(top).resolve()
+            prefix = root.relative_to(git_root).as_posix()
+            for relative in _PRODUCT_WORKER_RUNTIME_FILES:
+                git_path = f"{prefix}/{relative}" if prefix else relative
+                shown = subprocess.run(
+                    ["git", "-C", str(git_root), "show", f"{release}:{git_path}"],
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                )
+                source_files[relative] = shown.stdout
+
+        for relative, content in source_files.items():
+            destination = staging / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+        npm = _resolve_runtime_executable("npm")
+        if not npm:
+            raise TakyonError("npm runtime unavailable for exact product worker release")
+        install = subprocess.run(
+            [npm, "ci", "--ignore-scripts", "--omit=dev", "--no-audit", "--no-fund"],
+            cwd=staging,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=_runtime_env({"NPM_CONFIG_CACHE": str(_shared_npm_cache_dir())}),
+        )
+        if install.returncode != 0:
+            raise TakyonError(
+                "exact product worker dependency install failed: "
+                + _truncate_text(install.stderr or install.stdout or "npm ci failed", 2000)
+            )
+        (staging / ".ready.json").write_text(
+            json.dumps(
+                {
+                    "release": release,
+                    "files": {
+                        name: hashlib.sha256(content).hexdigest()
+                        for name, content in source_files.items()
+                    },
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        try:
+            staging.rename(final)
+        except FileExistsError:
+            shutil.rmtree(staging, ignore_errors=True)
+        return _verify(final)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
 def _run_claude_agent_task_in_docker(
     *,
     payload: dict[str, Any],
@@ -5699,6 +5813,7 @@ def _run_claude_agent_task_in_docker(
         raise TakyonError("docker runtime unavailable for isolated Claude Agent SDK product/site tasks")
 
     repo_root = _repo_root().resolve()
+    runtime_snapshot = _product_worker_runtime_snapshot(repo_root)
     image = str(
         os.getenv("TAKYON_CLAUDE_AGENT_DOCKER_IMAGE")
         or os.getenv("TERMINAL_DOCKER_IMAGE")
@@ -5791,7 +5906,9 @@ def _run_claude_agent_task_in_docker(
     # SDK child forces any Bash/terminal work to execute locally inside the same container rather
     # than trying to spin up a second Docker layer that inherits host-Mac cwd mount config.
     env_args.extend(["-e", "TAKYON_CLAUDE_AGENT_IN_DOCKER=1"])
-    sdk_mount_args, sdk_env = _docker_claude_worker_binary_mounts(docker_exe=docker, repo_root=repo_root)
+    sdk_mount_args, sdk_env = _docker_claude_worker_binary_mounts(
+        docker_exe=docker, repo_root=runtime_snapshot
+    )
     for key, value in sdk_env.items():
         if value:
             env_args.extend(["-e", f"{key}={value}"])
@@ -5858,7 +5975,7 @@ def _run_claude_agent_task_in_docker(
         "--mount",
         f"type=bind,src={workspace_path},dst=/workspace",
         "--mount",
-        f"type=bind,src={repo_root},dst=/repo,readonly",
+        f"type=bind,src={runtime_snapshot},dst=/repo,readonly",
         "-w",
         "/repo",
         *user_args,
@@ -5867,7 +5984,7 @@ def _run_claude_agent_task_in_docker(
         "node",
         "/repo/scripts/takyon-claude-agent-task.mjs",
     ]
-    return run_cmd, payload, str(repo_root), runtime_env
+    return run_cmd, payload, str(runtime_snapshot), runtime_env
 
 
 def _build_sandbox_resource_args() -> list[str]:
@@ -8059,7 +8176,7 @@ _SUPPORT_MEDIATED_CANCELLATION_PATTERN = re.compile(
 _UNVERIFIED_CANCELLATION_TIMING_PATTERN = re.compile(
     r"(?:"
     r"\bcancel(?:lation|led|ed|ing)?\b.{0,180}\b(?:immediate(?:ly)?|grace\s+period|scheduled|"
-    r"current\s+period|billing\s+period|effective\s+(?:date|time)|continues?|stays?|remains?|ends?)\b"
+    r"current\s+period|billing\s+period|effective\s+(?:date|time))\b"
     r"|\b(?:access|subscription)\b.{0,100}\b(?:continues?|stays?|remains?|ends?)\b.{0,120}"
     r"\b(?:until|after\s+cancell|current\s+period|billing\s+period|\d{4})\b"
     r"|\bcancel_at_period_end\b|\bcancelAtPeriodEnd\b"
@@ -18287,6 +18404,8 @@ class TakyonStore:
 
         def _touches_workspace(item: dict[str, Any]) -> str:
             action_name = str(item.get("action") or "").strip()
+            if action_name == "business.upsert" and bool(item.get("business_existed")):
+                return ""
             internal_pointer_transition = action_name in {
                 "app.surface.stage_build",
                 "app.surface.finalize_build_activation",
@@ -18565,6 +18684,7 @@ class TakyonStore:
                     "UPDATE businesses SET name = ?, goal = COALESCE(NULLIF(?, ''), goal), mode = ?, work_focus = COALESCE(NULLIF(?, ''), work_focus), budget_json = COALESCE(?, budget_json), metadata_json = ?, updated_at = ? WHERE slug = ?",
                     (name, goal, resolved_mode, work_focus or "", _json_dumps(budget) if budget is not None else None, _json_dumps(metadata), now, slug),
                 )
+                root = self._business_workspace_base() / slug
             else:
                 root = self._business_root(slug)
                 if root.exists():
@@ -18624,13 +18744,12 @@ class TakyonStore:
                         now,
                     ),
                 )
-            root = self._business_root(slug)
-            root.mkdir(parents=True, exist_ok=True)
-            for dirname in TAKYON_BUSINESS_ROOTS:
-                (root / dirname).mkdir(parents=True, exist_ok=True)
-            strategy = root / "research" / "strategy.md"
-            if not strategy.exists():
-                _atomic_write_text(strategy, f"# {name}\n\nGoal: {goal or 'Unspecified'}\n")
+                root.mkdir(parents=True, exist_ok=True)
+                for dirname in TAKYON_BUSINESS_ROOTS:
+                    (root / dirname).mkdir(parents=True, exist_ok=True)
+                strategy = root / "research" / "strategy.md"
+                if not strategy.exists():
+                    _atomic_write_text(strategy, f"# {name}\n\nGoal: {goal or 'Unspecified'}\n")
             self._record_event(conn, scope=f"business:{slug}", business_slug=slug, event_type="business.upsert", payload={"reason": reason, "actor": actor})
             return {"action": action, "business": slug, "path": str(root)}
 
@@ -19373,7 +19492,7 @@ class TakyonStore:
                 and effective_live_build_id
                 and effective_live_build_id == live_build_id
             )
-            previous_servable_until = ""
+            previous_servable_until: str | None = None
             if activating_new_build:
                 if not re.fullmatch(r"[0-9a-f]{32}", effective_live_build_id):
                     raise TakyonError("live product build_id must be 32 lowercase hex characters")
@@ -19576,7 +19695,7 @@ class TakyonStore:
                 "activation_attempt_id": activation_attempt_id if activating_new_build else "",
                 "activation_state": "pointer_pending" if activating_new_build else "",
                 "previous_build_id": existing_live_build_id if activating_new_build else "",
-                "previous_servable_until": previous_servable_until if activating_new_build else "",
+                "previous_servable_until": previous_servable_until or "",
                 "prior_r2_previous_pointer": (
                     activation_prior_r2_previous_pointer if activating_new_build else ""
                 ),

@@ -955,12 +955,18 @@ class _RuntimeProgress:
         self._stream_last_emit = 0.0
         self._reasoning_buf = ""
         self._last_activity_monotonic = time.monotonic()
+        self._active_tool_calls: set[str] = set()
+        self._active_tool_lock = threading.Lock()
 
     def _touch_activity(self) -> None:
         self._last_activity_monotonic = time.monotonic()
 
     def seconds_since_activity(self) -> float:
         return max(0.0, time.monotonic() - self._last_activity_monotonic)
+
+    def has_active_tool(self) -> bool:
+        with self._active_tool_lock:
+            return bool(self._active_tool_calls)
 
     def _record_trace(
         self,
@@ -1073,6 +1079,9 @@ class _RuntimeProgress:
         tool_name = str(name or "").strip()
         if not tool_name:
             return
+        with self._active_tool_lock:
+            self._active_tool_calls.add(str(tool_call_id or tool_name))
+        self._touch_activity()
         preview = build_tool_preview(tool_name, args if isinstance(args, dict) else {}, max_len=120) or ""
         entry_kind, label, default_detail = _tool_trace_shape(tool_name, args)
         skill_name = str((args or {}).get("name") or "").strip() if tool_name == "skill_view" else ""
@@ -1148,6 +1157,9 @@ class _RuntimeProgress:
     ) -> None:
         from .turn_runtime import _tool_progress_lines
 
+        with self._active_tool_lock:
+            self._active_tool_calls.discard(str(tool_id or name))
+        self._touch_activity()
         lines = _tool_progress_lines(name, args if isinstance(args, dict) else {}, result)
         for line in lines[:2]:
             self.emit(line)
@@ -1461,7 +1473,13 @@ def _run_ceo_turn(
                                 f"human-review proof read unavailable: {exc}"
                             )
                             break
-                    active_external_work = claude_worker_idle < 60.0
+                    active_tool_probe = getattr(progress, "has_active_tool", None)
+                    active_tool = bool(
+                        callable(active_tool_probe) and active_tool_probe()
+                    )
+                    active_external_work = claude_worker_idle < 60.0 or active_tool
+                    if active_tool:
+                        idle = 0.0
                     # A delegated child job has its own durable claim heartbeat.  Consult it when
                     # the in-process clocks look quiet or the outer wall limit is due.  This covers
                     # a child running in another worker process: the parent CEO claim must remain
@@ -2094,6 +2112,33 @@ def _bootstrap_human_review_blocker(
                 }
             return result
     return {}
+
+
+def _product_publish_blocker_after(store: Any, slug: str, cursor: str) -> tuple[str, str]:
+    """Return a new validation-passed/platform-publish blocker after ``cursor``."""
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT id, payload_json FROM events WHERE business_slug = ? "
+            "AND event_type = 'product.surface.refresh' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (slug,),
+        ).fetchone()
+    if row is None:
+        return "", ""
+    event_id = str(row.get("id") if isinstance(row, Mapping) else row[0])
+    raw = row.get("payload_json") if isinstance(row, Mapping) else row[1]
+    payload = dict(raw) if isinstance(raw, Mapping) else json.loads(str(raw or "{}"))
+    publish = payload.get("publish") if isinstance(payload.get("publish"), Mapping) else {}
+    blocker = str(
+        publish.get("blocker") or payload.get("blocker") or payload.get("error") or ""
+    ).strip()
+    if (
+        event_id != str(cursor or "")
+        and str(payload.get("status") or "").strip().lower() == "passed"
+        and str(publish.get("status") or "").strip().lower() == "blocked"
+    ):
+        return event_id, blocker or "product validation passed but platform publication failed"
+    return event_id, ""
 
 
 def _read_bootstrap_human_review_blocker_pinned(
@@ -2751,6 +2796,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     bootstrap_deadline_monotonic = bootstrap_started_monotonic + wall_clock_limit
     bootstrap_deadline_at = time.time() + wall_clock_limit
     human_review_blocker: dict[str, Any] = {}
+    platform_publish_blocker = ""
 
     tokens: list[object] = []
     try:
@@ -2837,6 +2883,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                             ),
                         )
                         break
+                    refresh_cursor, _ = _product_publish_blocker_after(store, slug, "")
                     response, turn_cost_usd, turn_cost_status, turn_completed = _run_ceo_turn(
                         slug=slug,
                         system_prompt=system_prompt,
@@ -2917,6 +2964,11 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                     if durable_review_blocker:
                         human_review_blocker = durable_review_blocker
                     if human_review_blocker:
+                        break
+                    _, platform_publish_blocker = _product_publish_blocker_after(
+                        store, slug, refresh_cursor
+                    )
+                    if platform_publish_blocker:
                         break
                     try:
                         durable_product_complete = _bootstrap_has_durable_live_product(
@@ -3107,6 +3159,34 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 ).strip().lower(),
                 "x_launch_outcome": dict(blocked_x_outcome),
                 "wake": wake_result,
+            },
+            actual_cost_cents=cents,
+        )
+
+    if platform_publish_blocker:
+        cents = max(0, int(round(cost_usd * 100)))
+        _record_runtime_event(
+            slug,
+            kind="ceo_bootstrap",
+            status="blocked",
+            detail=f"CEO bootstrap stopped at the platform publish rail: {platform_publish_blocker}",
+            command=command,
+        )
+        return JobRunResult(
+            result={
+                "business_slug": slug,
+                "final_response": final_response[:4000],
+                "cost_usd": round(cost_usd, 6),
+                "cost_status": cost_status,
+                "bootstrap_completion_status": "platform_blocked",
+                "review_required": False,
+                "review_blocker": platform_publish_blocker,
+                "wake": {
+                    "status": "suppressed",
+                    "enabled": False,
+                    "reason": "platform_publish_blocked",
+                    "requested_schedule": schedule,
+                },
             },
             actual_cost_cents=cents,
         )
