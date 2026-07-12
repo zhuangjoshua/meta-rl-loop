@@ -18923,6 +18923,21 @@ class TakyonStore:
                 if required_workflow is None:
                     raise TakyonError("workflow_completion_required must be a boolean")
                 metadata["workflow_completion_required"] = required_workflow
+            if op.get("bootstrap_final_product_pass") is not None:
+                final_product_pass = _normalize_surface_bool(op.get("bootstrap_final_product_pass"))
+                if final_product_pass is None:
+                    raise TakyonError("bootstrap_final_product_pass must be a boolean")
+                if final_product_pass:
+                    baseline_build_id = str(existing.get("live_build_id") or "").strip().lower()
+                    if not baseline_build_id:
+                        raise TakyonError(
+                            "bootstrap_final_product_pass requires the first landing build to be live"
+                        )
+                    metadata["bootstrap_final_product_pass_required"] = True
+                    metadata["bootstrap_final_product_baseline_build_id"] = baseline_build_id
+                else:
+                    metadata.pop("bootstrap_final_product_pass_required", None)
+                    metadata.pop("bootstrap_final_product_baseline_build_id", None)
             # Product-chat tone preset (customer-facing product assistant voice). Omitted
             # tone keeps the prior selection; any value normalizes to a known preset, so a
             # stray string can never inject an unknown voice into the build worker contract.
@@ -19090,6 +19105,9 @@ class TakyonStore:
                 "runtime_features": runtime_features,
                 "display_name": _surface_product_display_name({"metadata": metadata}),
                 "workflow_completion_required": _surface_requires_complete_workflow({"metadata": metadata}),
+                "bootstrap_final_product_pass_required": bool(
+                    metadata.get("bootstrap_final_product_pass_required")
+                ),
                 "publish_target": publish_target,
             }
 
@@ -23596,6 +23614,7 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
         "rail_state": args.get("rail_state"),
         "display_name": args.get("display_name"),
         "workflow_completion_required": args.get("workflow_completion_required"),
+        "bootstrap_final_product_pass": args.get("bootstrap_final_product_pass"),
         "tone": args.get("tone"),
         "routes": args.get("routes") or [],
         "publish_target": args.get("publish_target"),
@@ -36763,7 +36782,7 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                 # A timed-out attempt whose partial synced to canonical is judged by the SAME
                 # tsc/build-gated refresh as a successful pass: if the partial passes, it publishes
                 # and the tool result carries the durable truth (site LIVE) so the CEO continues the
-                # launch steps (logo, GSC, launch post) instead of wrapping up blind; if it fails,
+                # remaining product steps (logo and final app/account pass) instead of wrapping up blind; if it fails,
                 # the exact build blockers surface and the bounded warm build-retry below gets one
                 # shot at finishing on the still-warm scratch workspace.
                 publishable_partial = (
@@ -36824,14 +36843,14 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                             f"Claude worker timed out after {int(timeout_ms)}ms, BUT the preserved partial "
                             "PASSED the build gate and IS PUBLISHED live"
                             + (f" at {live_url}" if live_url else "")
-                            + ". The site is live — do NOT rebuild or re-delegate the landing; continue the "
-                            "remaining launch steps (logo, Search Console registration, launch post) in this turn.",
+                            + ". The landing is live — do NOT rebuild or re-delegate it; continue the "
+                            "remaining product steps (logo and final app/account pass) in this turn.",
                             8000,
                         )
                         published_line = (
                             "timed-out partial passed the build gate and is PUBLISHED"
                             + (f" ({live_url})" if live_url else "")
-                            + "; continuing launch steps."
+                            + "; continuing product steps."
                         )
                         _record_claude_agent_runtime_event(
                             business=business,
@@ -38179,6 +38198,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, actions=broken, or usage=live."},
                 "display_name": {"type": "string", "description": "Canonical customer-visible product name. This is branding, never the routing slug; owned navigation, metadata, and surface context use it consistently."},
                 "workflow_completion_required": {"type": "boolean", "description": "Set true immediately before the final requested SaaS workflow build. While true, publish refuses an unchanged access starter or a workflow without a real action, AI generation, and durable records wiring."},
+                "bootstrap_final_product_pass": {"type": "boolean", "description": "Set true immediately before bootstrap's second and final product build. The runtime snapshots the live landing build and bootstrap completes only after a different final build publishes."},
                 "tone": {"type": "string", "enum": ["default", "poke"], "description": "Voice preset for the customer-facing product chat/assistant (the generate rail), NOT the operator CEO shell. 'default' is neutral; 'poke' is short, warm, lightly playful, no corporate hedging, always ends on a proactive next step. Recorded on the surface contract and injected into the product-build worker so the generated product assistant speaks in this voice. Omit to keep the current selection (defaults to 'default')."},
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.coscale.app/"},

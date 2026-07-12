@@ -118,6 +118,7 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     assert "route graph and required public/auth behavior are immutable" in prompt
     assert "business_generate_site_image" in prompt
     assert "Persist every created/generated customer artifact" in prompt
+    assert "bootstrap_final_product_pass: true" in prompt
     assert "Upgrade landing proof from the verified research" not in prompt
     assert "### 4. X post" not in prompt
     assert "scheduled CEO wake rail" in prompt

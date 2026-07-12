@@ -1814,6 +1814,14 @@ def _bootstrap_has_durable_live_product(
     ).strip().lower()
     if publish_status != "published":
         return False
+    if not bool(metadata.get("bootstrap_final_product_pass_required")):
+        return False
+    baseline_build_id = str(
+        metadata.get("bootstrap_final_product_baseline_build_id") or ""
+    ).strip().lower()
+    live_build_id = str(surface.get("live_build_id") or "").strip().lower()
+    if not baseline_build_id or not live_build_id or live_build_id == baseline_build_id:
+        return False
     if workflow_requested and not _bootstrap_real_http_actions(store, slug):
         return False
     return True
@@ -2164,7 +2172,7 @@ def _bootstrap_ready_for_completion_grace(
     the store-signed app phase after the web product, so they intentionally rely on their absolute
     ceiling and natural turn completion rather than arming this earlier web completion probe.
     """
-    if str(archetype or "").strip().lower() == "mobile_app" or not workflow_requested:
+    if str(archetype or "").strip().lower() == "mobile_app":
         return False
     product_complete = _bootstrap_has_durable_live_product(
         store,
@@ -2948,9 +2956,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                     except Exception:
                         durable_product_complete = False
                     mobile_bootstrap = str(archetype or "").strip().lower() == "mobile_app"
-                    if durable_product_complete and (
-                        turn_completed or (workflow_requested and not mobile_bootstrap)
-                    ):
+                    if durable_product_complete and (turn_completed or not mobile_bootstrap):
                         break
                     if same_job_turn >= _BOOTSTRAP_MAX_SAME_JOB_TURNS:
                         break
@@ -3186,13 +3192,11 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         )
     except Exception:
         durable_product_complete = False
-    product_complete = (publish_status == "published" or durable_product_complete) and (
+    product_complete = durable_product_complete and (
         not workflow_requested or bool(real_http_actions)
     )
     mobile_bootstrap = str(archetype or "").strip().lower() == "mobile_app"
-    bootstrap_done = product_complete and (
-        bool(turn_completed) or (workflow_requested and not mobile_bootstrap)
-    )
+    bootstrap_done = product_complete and (bool(turn_completed) or not mobile_bootstrap)
     if not bootstrap_done:
         if workflow_requested and publish_status == "published" and not real_http_actions:
             raise RuntimeError(

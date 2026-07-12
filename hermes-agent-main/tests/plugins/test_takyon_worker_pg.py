@@ -1922,7 +1922,7 @@ def test_operator_task_receipt_context_can_bind_parent_attempt_across_child_clai
             }
 
 
-def test_bootstrap_completion_grace_requires_final_workflow_and_never_arms_for_landing_or_mobile(monkeypatch):
+def test_bootstrap_completion_grace_arms_for_final_web_product_and_never_mobile(monkeypatch):
     monkeypatch.setattr(
         worker,
         "_bootstrap_has_durable_live_product",
@@ -1936,11 +1936,39 @@ def test_bootstrap_completion_grace_requires_final_workflow_and_never_arms_for_l
     assert worker._bootstrap_ready_for_completion_grace(
         object(), "acme", workflow_requested=False, archetype="web_saas",
         bootstrap_job_id="job-1", bootstrap_attempt=1,
-    ) is False
+    ) is True
     assert worker._bootstrap_ready_for_completion_grace(
         object(), "acme", workflow_requested=True, archetype="mobile_app",
         bootstrap_job_id="job-1", bootstrap_attempt=1,
     ) is False
+
+
+def test_bootstrap_durable_product_requires_build_after_runtime_owned_final_pass_baseline():
+    surface = {
+        "live_build_id": "landing-build",
+        "metadata": {
+            "takyon_publish": {"status": "published"},
+            "bootstrap_final_product_pass_required": True,
+            "bootstrap_final_product_baseline_build_id": "landing-build",
+        },
+    }
+
+    class _Store:
+        @contextlib.contextmanager
+        def _connect(self):
+            yield object()
+
+        @staticmethod
+        def _app_surface_contract(_conn, _slug):
+            return surface
+
+    assert worker._bootstrap_has_durable_live_product(
+        _Store(), "acme", workflow_requested=False
+    ) is False
+    surface["live_build_id"] = "final-build"
+    assert worker._bootstrap_has_durable_live_product(
+        _Store(), "acme", workflow_requested=False
+    ) is True
 
 
 def test_bootstrap_human_review_blocker_survives_same_job_retry():
@@ -2033,20 +2061,26 @@ def test_delegated_child_refuses_stale_parent_generation():
 # Regression guard for the build-loop bug: a CEO bootstrap turn that finished cleanly and published
 # the product site was requeued by a raising POST-TURN step (observed on business "simple": the turn
 # ended at finish_reason=stop, then the handler raised JobNotRunning and run_one re-ran the whole
-# 5-minute Docker build, starving the single build lane). Product publish alone is not terminal: the
-# bootstrap instruction still requires research and an X outcome. Once product + X are terminal,
-# every post-turn bookkeeping step remains non-fatal so a finished launch settles instead of looping.
+# 5-minute Docker build, starving the single build lane). The landing-first publish is not terminal;
+# the runtime-owned final-pass baseline must advance. Post-turn bookkeeping remains non-fatal.
 
 
 class _BootstrapStubStore:
     """Minimal TakyonStore stand-in for ceo_bootstrap_handler unit tests."""
 
-    def __init__(self, *, goal: str = "do the thing") -> None:
+    def __init__(self, *, goal: str = "do the thing", archetype: str = "") -> None:
         self.goal = goal
+        self.archetype = archetype
         self.commits: list[dict[str, Any]] = []
 
     def read(self, *_, **__) -> dict[str, Any]:
-        return {"business": {"name": "Acme", "goal": self.goal}}
+        return {
+            "business": {
+                "name": "Acme",
+                "goal": self.goal,
+                "archetype": self.archetype,
+            }
+        }
 
     def commit(self, **kwargs) -> dict[str, Any]:
         self.commits.append(kwargs)
@@ -2060,6 +2094,7 @@ def _install_bootstrap_handler_stubs(
     surface_refresh: Any,
     run_turn=None,
     goal: str = "do the thing",
+    archetype: str = "",
 ):
     """Patch every heavy collaborator of ceo_bootstrap_handler so it runs in-process without a DB,
     workspace, agent, or network. Returns the dict capturing what the handler did."""
@@ -2069,7 +2104,7 @@ def _install_bootstrap_handler_stubs(
     import gateway.session_context as session_context
 
     captured: dict[str, Any] = {"events": [], "refresh_calls": 0}
-    store = _BootstrapStubStore(goal=goal)
+    store = _BootstrapStubStore(goal=goal, archetype=archetype)
 
     monkeypatch.setattr(core, "TakyonStore", lambda *a, **k: store)
 
@@ -2090,7 +2125,7 @@ def _install_bootstrap_handler_stubs(
         lambda *a, **k: {
             "user_prompt": "Bootstrap business now.",
             "ephemeral_system_prompt": "CEO prompt",
-            "enabled_toolsets": ["takyon", "web", "skills"],
+            "enabled_toolsets": ["takyon", "takyon-authority", "skills"],
         },
     )
     monkeypatch.setattr(session_context, "set_session_vars", lambda **_k: [])
@@ -2108,27 +2143,13 @@ def _install_bootstrap_handler_stubs(
         or (surface_refresh.get("status") if isinstance(surface_refresh, dict) else "")
         or ""
     ).strip()
-    # Most tests model a launch whose canonical product and X receipts already exist; individual
-    # incompleteness tests override either probe explicitly. A post-turn refresh exception is also
+    # Most tests model a final product whose runtime-owned completion proof already exists. A post-turn refresh exception is also
     # modeled as canonical product state already proving the prior publish.
     product_complete = not isinstance(surface_refresh, dict) or publish_status == "published"
     monkeypatch.setattr(
         worker,
         "_bootstrap_has_durable_live_product",
         lambda *_a, **_k: product_complete,
-    )
-    monkeypatch.setattr(
-        worker,
-        "_bootstrap_x_launch_outcome",
-        lambda *_a, **_k: {
-            "status": "published",
-            "bootstrap_job_id": str(_k.get("bootstrap_job_id") or ""),
-            "bootstrap_attempt": int(_k.get("bootstrap_attempt") or 1),
-            "post_id": "x-test",
-            "receipt_path": "metrics/receipts/outreach/x-test.json",
-            "blocker": "",
-            "source": "test",
-        },
     )
 
     def _fake_refresh(slug, *, job_id, operator_user_id=None):
@@ -2330,9 +2351,31 @@ def test_bootstrap_published_but_turn_capped_completes_not_requeued(monkeypatch)
     assert isinstance(result, jobs.JobRunResult)
 
 
+def test_mobile_bootstrap_never_settles_on_web_product_before_mobile_release(monkeypatch):
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=False,
+        archetype="mobile_app",
+        surface_refresh={
+            "publish": {
+                "status": "published",
+                "public_url": "https://acme.coscale.app/",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        worker, "_bootstrap_has_durable_live_product", lambda *_a, **_k: True
+    )
+
+    with pytest.raises(RuntimeError, match="mobile release phase"):
+        worker.ceo_bootstrap_handler(
+            SimpleNamespace(id="job-mobile", business_slug="acme", payload={})
+        )
+
+
 def test_bootstrap_incomplete_workflow_continues_in_same_job_and_preserves_identity(monkeypatch):
     prompts: list[str] = []
-    completion_checks = iter([False, True])
+    completion_checks = iter([False, True, True])
 
     def _turn(**kwargs):
         prompts.append(kwargs["user_prompt"])
@@ -2361,6 +2404,40 @@ def test_bootstrap_incomplete_workflow_continues_in_same_job_and_preserves_ident
     assert "SAME in-progress bootstrap" in prompts[1]
     assert "Preserve the canonical business/product name" in prompts[1]
     assert "do not restart, rebrand, or redo completed work" in prompts[1]
+
+
+def test_bootstrap_landing_only_natural_stop_continues_until_final_product_pass(monkeypatch):
+    prompts: list[str] = []
+    completion_checks = iter([False, True, True])
+
+    def _turn(**kwargs):
+        prompts.append(kwargs["user_prompt"])
+        return "continue", 0.10, "exact", True
+
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=True,
+        run_turn=_turn,
+        surface_refresh={
+            "publish": {
+                "status": "published",
+                "public_url": "https://acme.coscale.app/",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_has_durable_live_product",
+        lambda *_a, **_k: next(completion_checks),
+    )
+
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(id="job-final-pass", business_slug="acme", payload={})
+    )
+
+    assert isinstance(result, jobs.JobRunResult)
+    assert len(prompts) == 2
+    assert "remaining product phase" in prompts[1]
 
 
 def test_bootstrap_published_workflow_without_x_completes_in_first_turn(monkeypatch):
