@@ -279,7 +279,7 @@ quiesce_remote_worker() {
     # SIGTERM tells WorkerPool to stop claiming immediately and join every in-flight lane. Give a
     # full 900-second product task an additional minute to finish instead of letting systemd's old
     # 120-second stop ceiling SIGKILL and requeue it.
-    systemctl set-property --runtime takyon-worker.service TimeoutStopUSec='${TAKYON_DEPLOY_WORKER_STOP_GRACE_SECONDS}s'
+    systemctl set-property --runtime takyon-worker.service TimeoutStopSec='${TAKYON_DEPLOY_WORKER_STOP_GRACE_SECONDS}s'
     systemctl stop takyon-worker.service
     systemctl is-active --quiet takyon-worker.service && exit 1 || true"
 }

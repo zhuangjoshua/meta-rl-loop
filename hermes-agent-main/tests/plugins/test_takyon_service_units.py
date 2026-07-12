@@ -363,7 +363,8 @@ def test_operator_deploy_quiesces_worker_before_observing_and_migrating():
     migrate = src.index("\nrun_remote_migrations\n")
     stop_dashboard = src.index("TAKYON_STOP_CORE_SERVICES=1")
     assert quiesce < observe < migrate < stop_dashboard
-    assert "systemctl set-property --runtime takyon-worker.service TimeoutStopUSec=" in src
+    assert "systemctl set-property --runtime takyon-worker.service TimeoutStopSec=" in src
+    assert "TimeoutStopUSec=" not in src
     assert "WHERE work_request.status = 'running'" in src
     assert "WHERE work_request.status IN ('queued', 'running')" not in src
     assert "restore_operator_services_on_failure" in src
