@@ -2,7 +2,7 @@
 # and forwards everything else (/api/* and reserved operator hosts) to the real
 # origin (operator Caddy at 137.184.75.57) unchanged.
 #
-# Deploy:  wrangler deploy        (see README.md)
+# Deploy:  scripts/takyon-operator-prod.sh product-edge-deploy (see README.md)
 # Tail:    wrangler tail takyon-product-worker
 
 name = "takyon-product-worker"
@@ -42,7 +42,7 @@ SUBUSER_ORIGIN_HOST = "subuser-origin.coscale.app"
 SUBUSER_API_HOSTS = "*"
 
 # ── Routes ──────────────────────────────────────────────────────────────────
-# Routes are intentionally managed by the Takyon publish path, not by `wrangler deploy`:
+# Routes are intentionally managed by the Takyon publish path, not by the Worker-version deploy:
 # `plugins/takyon/core.py::_ensure_product_edge_route` creates per-business routes such as
 # `wandr.coscale.app/*` in the coscale.app zone. Per-business routes keep `origin.coscale.app`
 # outside this Worker, which is required for `/api/*` passthrough via `resolveOverride`.

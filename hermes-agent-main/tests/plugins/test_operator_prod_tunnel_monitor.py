@@ -45,7 +45,11 @@ def test_product_edge_deploy_is_clean_published_and_secret_isolated():
     assert "require_tunnel" not in command
     assert 'env["CLOUDFLARE_API_TOKEN"] = token' in command
     assert 'safe_names = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")' in command
-    assert '"wrangler@4.110.0", "deploy"' in command
+    assert '"wrangler@4.110.0",' in command
+    assert '"versions",\n        "upload",' in command
+    assert '"versions",\n        "deploy",' in command
+    assert '"--version-tag",\n        source_revision,' in command
+    assert '"--percentage",\n        "100",' in command
     assert "print(token)" not in command
     assert "TAKYON_OPERATOR_DATABASE_URL" not in command
     assert "TAKYON_SAFEBOX_OPERATOR_TOKEN" not in command

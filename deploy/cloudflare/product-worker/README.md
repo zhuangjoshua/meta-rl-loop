@@ -146,9 +146,13 @@ cd deploy/cloudflare/product-worker
 wrangler tail takyon-product-worker
 ```
 
+The tracked command uploads an immutable Worker version tagged with the published Git revision,
+then deploys that version at 100%. It does not require a `workers.dev` subdomain and does not
+replace the per-business routes managed by publish.
+
 ### Exact route binding
 
-Routes are managed by the Takyon publish path, not by `wrangler deploy`.
+Routes are managed by the Takyon publish path, not by the version deployment.
 `plugins/takyon/core.py::_ensure_product_edge_route` creates a per-business
 Cloudflare route such as `wandr.coscale.app/*` in the `coscale.app` zone. This
 keeps `origin.coscale.app` outside the Worker route table so `/api/*`

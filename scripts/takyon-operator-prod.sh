@@ -1822,7 +1822,7 @@ cmd_product_edge_deploy() {
   # written to a terminal, log, or disk, or inherited alongside operator DB authority.
   cd "$ROOT"
   PYTHONPATH="$RUNTIME_DIR" exec "$RUNTIME_DIR/.venv/bin/python" - \
-    "$edge_dir" "$SAFEBOX_SSH_HOST" "$SAFEBOX_SSH_KEY" <<'PY'
+    "$edge_dir" "$SAFEBOX_SSH_HOST" "$SAFEBOX_SSH_KEY" "$head" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -1832,6 +1832,7 @@ import sys
 edge_dir = Path(sys.argv[1]).resolve()
 safebox_host = str(sys.argv[2]).strip()
 safebox_key = str(sys.argv[3]).strip()
+source_revision = str(sys.argv[4]).strip()
 safe_names = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")
 base_env = {name: os.environ[name] for name in safe_names if os.environ.get(name)}
 try:
@@ -1887,11 +1888,43 @@ if not token:
 env = dict(base_env)
 env["CLOUDFLARE_API_TOKEN"] = token
 os.chdir(edge_dir)
-os.execvpe(
-    "npx",
-    ["npx", "--yes", "wrangler@4.110.0", "deploy"],
-    env,
+message = f"Takyon source {source_revision}"
+upload = subprocess.run(
+    [
+        "npx",
+        "--yes",
+        "wrangler@4.110.0",
+        "versions",
+        "upload",
+        "--tag",
+        source_revision,
+        "--message",
+        message,
+    ],
+    env=env,
+    check=False,
 )
+if upload.returncode != 0:
+    raise SystemExit(upload.returncode)
+deployment = subprocess.run(
+    [
+        "npx",
+        "--yes",
+        "wrangler@4.110.0",
+        "versions",
+        "deploy",
+        "--version-tag",
+        source_revision,
+        "--percentage",
+        "100",
+        "--message",
+        message,
+        "--yes",
+    ],
+    env=env,
+    check=False,
+)
+raise SystemExit(deployment.returncode)
 PY
 }
 
