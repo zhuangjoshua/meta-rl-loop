@@ -1931,6 +1931,40 @@ def test_surface_contract_persists_product_display_name_and_workflow_gate(tmp_pa
     assert "Requested workflow completion gate: required" in surface_md
 
 
+def test_surface_contract_accepts_authoritative_display_name_matching_slug(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:notewave",
+        [
+            {
+                "action": "business.upsert",
+                "business": "notewave",
+                "name": "NoteWave",
+                "budget": {"amount": 25},
+            }
+        ],
+        "init-notewave",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "notewave",
+                "display_name": "NoteWave",
+                "source_path": "product/site",
+                "runtime_features": ["auth", "account", "profile", "checkout"],
+                "routes": [{"path": "/"}, {"path": "/app"}],
+                "idempotency_key": "surface-notewave-identity",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["results"][0]["display_name"] == "NoteWave"
+
+
 def test_bootstrap_app_surface_seed_ignores_burned_workflow_args(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)

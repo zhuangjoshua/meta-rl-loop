@@ -530,6 +530,24 @@ def test_surface_context_carries_strategy_product_name_instead_of_internal_slug(
     assert "businessName" in branding
 
 
+def test_surface_context_reads_identity_name_label(tmp_path):
+    business_root = tmp_path / "businesses" / "notewave"
+    workspace = business_root / "product" / "site"
+    strategy = business_root / "research" / "strategy.md"
+    workspace.mkdir(parents=True)
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        "# notewave — Landing Brief\n\n## Identity\n- **Name:** NoteWave\n",
+        encoding="utf-8",
+    )
+
+    payload = takyon_core._subuser_surface_context_payload(
+        None, slug="notewave", workspace_root=workspace
+    )
+
+    assert payload["businessName"] == "NoteWave"
+
+
 def test_surface_contract_display_name_outranks_slug_and_strategy(tmp_path):
     business_root = tmp_path / "businesses" / "qa-proposal-0711"
     workspace = business_root / "product" / "site"

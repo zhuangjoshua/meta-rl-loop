@@ -3068,17 +3068,18 @@ def _subuser_surface_context_payload(
     effective_runtime_features = _surface_effective_runtime_features(surface)
     hero = _read_bootstrap_hero_copy(workspace_root)
     strategy_title, strategy_sections = _starter_strategy_sections(workspace_root)
-    raw_display_name = _surface_product_display_name(surface) or (
-        strategy_sections.get("business name")
+    declared_display_name = _surface_product_display_name(surface) or (
+        strategy_sections.get("name")
+        or strategy_sections.get("business name")
         or strategy_sections.get("product name")
         or strategy_sections.get("brand name")
-        or strategy_title
     )
+    raw_display_name = declared_display_name or strategy_title
     display_name = _starter_strategy_title(raw_display_name, slug=slug)
     display_name = re.sub(
         r"\s+(?:strategy(?:\s+brief)?|brief)$", "", display_name, flags=re.IGNORECASE
     ).strip()
-    if _starter_title_is_generic(display_name, slug=slug):
+    if not declared_display_name and _starter_title_is_generic(display_name, slug=slug):
         display_name = "Product"
     return {
         "heroEyebrow": hero.get("eyebrow", ""),
@@ -18775,21 +18776,18 @@ class TakyonStore:
             requested_display_name = str(op.get("display_name") or "").strip()
             if op.get("display_name") is not None and not requested_display_name:
                 raise TakyonError("display_name must be a non-empty customer-visible product name")
-            if requested_display_name and _starter_title_is_generic(requested_display_name, slug=slug):
-                raise TakyonError(
-                    "display_name must be a human product name, not the routing business slug"
-                )
             display_name = requested_display_name or existing_display_name
             if not display_name:
                 strategy_title, strategy_sections = _starter_strategy_sections(self._business_root(slug))
-                strategy_name = (
-                    strategy_sections.get("product name")
+                declared_strategy_name = (
+                    strategy_sections.get("name")
+                    or strategy_sections.get("product name")
                     or strategy_sections.get("brand name")
                     or strategy_sections.get("business name")
-                    or strategy_title
                 )
+                strategy_name = declared_strategy_name or strategy_title
                 strategy_name = _starter_strategy_title(strategy_name, slug=slug)
-                if not _starter_title_is_generic(strategy_name, slug=slug):
+                if declared_strategy_name or not _starter_title_is_generic(strategy_name, slug=slug):
                     display_name = strategy_name
             if not display_name:
                 business_row = conn.execute(
