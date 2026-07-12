@@ -3689,14 +3689,19 @@ def meta_graph_ensure_custom_conversion(
     name: str,
     rule: str,
     custom_event_type: str,
+    event_source_id: str = "",
     timeout: float = 60.0,
 ) -> dict[str, Any]:
-    """Ensure a per-business custom conversion through the safebox-held system-user token."""
+    """Ensure a per-business custom conversion through the safebox-held system-user token.
+
+    ``event_source_id`` is the pixel the conversion listens to — Meta refuses creation
+    without it, so callers must pass the shared pixel id."""
     payload = {
         "ad_account_id": str(ad_account_id or ""),
         "name": str(name or ""),
         "rule": str(rule or ""),
         "custom_event_type": str(custom_event_type or ""),
+        "event_source_id": str(event_source_id or ""),
         "timeout": float(timeout),
     }
     if _use_remote_authority():
@@ -3723,6 +3728,7 @@ def meta_graph_ensure_custom_conversion(
         name=str(name or ""),
         rule=str(rule or ""),
         custom_event_type=str(custom_event_type or ""),
+        event_source_id=str(event_source_id or ""),
         version=_local_meta_graph_version(),
     )
 

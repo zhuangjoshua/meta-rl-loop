@@ -165,7 +165,7 @@ class _FakeSafebox:
             return {"success": True, "id": path, "status": clean_params.get("status")}
         return {"success": True}
 
-    def meta_graph_ensure_custom_conversion(self, *, ad_account_id: str, name: str, rule: str, custom_event_type: str, timeout=60.0) -> dict:
+    def meta_graph_ensure_custom_conversion(self, *, ad_account_id: str, name: str, rule: str, custom_event_type: str, event_source_id: str = "", timeout=60.0) -> dict:
         self.graph_rec.custom_conversions.append(
             {
                 "token": "",
@@ -173,6 +173,7 @@ class _FakeSafebox:
                 "name": name,
                 "rule": rule,
                 "custom_event_type": custom_event_type,
+                "event_source_id": event_source_id,
             }
         )
         return {"id": "custom-conv-1", "name": name, "custom_event_type": custom_event_type}
@@ -1481,13 +1482,18 @@ def test_pixel_ensure_live_installs_site_side_and_meta_side(harness):
     rec = harness.core._pixel_site_rec
     assert rec["surface_flips"] == ["clipbook"]
     assert rec["injections"][0]["pixel_id"] == "PIX-TEST-1"
+    # The custom conversion is anchored to the shared pixel (Meta requires event_source_id).
+    assert harness.graph.custom_conversions[-1]["event_source_id"] == "PIX-TEST-1"
     assert rec["republishes"][0]["business"] == "clipbook"
     # The receipt mirrors the site block so operators can see what actually happened.
     receipt = harness.read_business_file("clipbook", result["receipt"])
     assert receipt["site"]["live_injected"] is True
 
 
-def test_pixel_ensure_unconfigured_pixel_is_site_blocker_not_failure(harness):
+def test_pixel_ensure_unconfigured_pixel_fails_closed_before_provider_call(harness):
+    # Meta REQUIRES event_source_id (the pixel) to create a custom conversion, so an
+    # unconfigured pixel is a hard fail-closed BEFORE any provider call — not the old
+    # "meta side succeeds, site blocker" split (which Meta itself made impossible).
     harness.set_business_mode("clipbook", "live")
     harness.core._pixel_site_rec["config"] = {}  # analytics.meta_pixel unset
 
@@ -1497,10 +1503,8 @@ def test_pixel_ensure_unconfigured_pixel_is_site_blocker_not_failure(harness):
         )
     )
 
-    # Meta-side ensure still succeeds; the missing pixel id is a truthful site blocker.
-    assert result["success"] is True
-    assert result["ok"] is True
-    assert "meta_pixel_unconfigured" in result["site"]["blocker"]
+    assert result["success"] is False
+    assert "meta_pixel_unconfigured" in result["error"]
     assert not harness.core._pixel_site_rec["injections"]
 
 

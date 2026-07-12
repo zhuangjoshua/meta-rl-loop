@@ -1635,11 +1635,24 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
                 "value": ensure,
             })
 
+        # Meta requires the event source (the shared pixel) on custom-conversion creation —
+        # resolve it BEFORE the provider call and fail closed when unconfigured.
+        _pixel_cfg_early = core._meta_pixel_config()
+        _pixel_event_source = (
+            str(_pixel_cfg_early.get("pixel_id") or "").strip()
+            if isinstance(_pixel_cfg_early, Mapping) else ""
+        )
+        if not _pixel_event_source:
+            raise core.TakyonError(
+                "meta_pixel_unconfigured: set analytics.meta_pixel.pixel_id — the custom "
+                "conversion must be anchored to the shared pixel (event_source_id)"
+            )
         result = core.safebox.meta_graph_ensure_custom_conversion(
             ad_account_id=ad_account_id,
             name=name,
             rule=rule,
             custom_event_type=custom_event_type,
+            event_source_id=_pixel_event_source,
         )
         custom_conversion_id = str(
             (result or {}).get("id")

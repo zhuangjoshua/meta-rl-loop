@@ -1337,6 +1337,7 @@ class _MetaEnsureCustomConversionBody(BaseModel):
     name: str
     rule: str
     custom_event_type: str
+    event_source_id: str = ""  # the pixel the conversion listens to; Meta requires it
     timeout: float = 60.0
 
 
@@ -4434,6 +4435,7 @@ def build_safebox_app() -> FastAPI:
                 name=str(body.name or ""),
                 rule=str(body.rule or ""),
                 custom_event_type=str(body.custom_event_type or ""),
+                event_source_id=str(body.event_source_id or ""),
                 version=version,
             )
         except _meta_graph.MetaGraphError as exc:
