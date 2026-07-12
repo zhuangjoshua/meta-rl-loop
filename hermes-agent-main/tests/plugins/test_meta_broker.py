@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import pytest
 from starlette.testclient import TestClient
 
@@ -318,8 +319,10 @@ def test_meta_graph_ensure_custom_conversion_route_brokers_key_free_result(clien
         lambda *keys: next((values[key] for key in keys if values.get(key)), ""),
     )
 
-    def fake_ensure(token, ad_account_id, *, name, rule, custom_event_type, version="v21.0"):
-        captured["call"] = (token, ad_account_id, name, rule, custom_event_type, version)
+    def fake_ensure(token, ad_account_id, *, name, rule, custom_event_type,
+                    event_source_id, version="v21.0"):
+        captured["call"] = (token, ad_account_id, name, rule, custom_event_type,
+                            event_source_id, version)
         return {"id": "cc-123", "existed": True}
 
     monkeypatch.setattr(meta_graph, "ensure_custom_conversion", fake_ensure)
@@ -332,20 +335,67 @@ def test_meta_graph_ensure_custom_conversion_route_brokers_key_free_result(clien
             "name": "demo-cc",
             "rule": "{\"url\":{\"i_contains\":\"demo\"}}",
             "custom_event_type": "LEAD",
+            "event_source_id": "PIX-99",
             "timeout": 18,
         },
     )
 
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"id": "cc-123", "existed": True}
+    # event_source_id crosses the process boundary intact — the pixel anchor is not
+    # allowed to be dropped between the safebox client and the Graph call.
     assert captured["call"] == (
         "local-graph-token",
         "act_123",
         "demo-cc",
         "{\"url\":{\"i_contains\":\"demo\"}}",
         "LEAD",
+        "PIX-99",
         "v21.0",
     )
+
+
+def test_meta_graph_ensure_custom_conversion_rejects_product_subuser_authority(client):
+    resp = client.post(
+        "/v1/providers/meta/graph/ensure-custom-conversion",
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        json={
+            "ad_account_id": "act_123",
+            "name": "demo-purchase",
+            "rule": '{"url":{"i_contains":"demo.coscale.app/app"}}',
+            "custom_event_type": "PURCHASE",
+            "event_source_id": "PIX-99",
+            "business": "demo",
+            "site_hostname": "demo.coscale.app",
+        },
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "operator_unauthorized"
+
+
+def test_meta_graph_ensure_custom_conversion_route_requires_event_source(client, monkeypatch):
+    values = {
+        "META_GRAPH_VERSION": "v21.0",
+        "META_SYSTEM_USER_ACCESS_TOKEN": "local-graph-token",
+    }
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "first_env_backed_value",
+        lambda *keys: next((values[key] for key in keys if values.get(key)), ""),
+    )
+    resp = client.post(
+        "/v1/providers/meta/graph/ensure-custom-conversion",
+        headers=_auth(),
+        json={
+            "ad_account_id": "act_123",
+            "name": "demo-cc",
+            "rule": "{\"url\":{\"i_contains\":\"demo\"}}",
+            "custom_event_type": "PURCHASE",
+        },
+    )
+    assert resp.status_code == 400
+    assert "event_source_id_required" in resp.text
 
 
 def test_meta_graph_route_is_registered(client):
@@ -357,3 +407,60 @@ def test_meta_graph_route_is_registered(client):
     assert "/v1/providers/meta/graph/upload-image" in paths
     assert "/v1/providers/meta/graph/upload-video" in paths
     assert "/v1/providers/meta/graph/ensure-custom-conversion" in paths
+
+
+def test_verified_stripe_checkout_emits_private_capi_purchase(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(safebox_app, "_cap_signing_key", lambda: b"k" * 32)
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "first_env_backed_value",
+        lambda *keys: "capi-token" if "META_CAPI_TOKEN" in keys else "v23.0",
+    )
+
+    def fake_send(token, pixel_id, **kwargs):
+        captured.update(token=token, pixel_id=pixel_id, **kwargs)
+        return {"events_received": 1}
+
+    monkeypatch.setattr(meta_graph, "send_purchase_conversion_event", fake_send)
+    result = safebox_app._send_verified_meta_purchase(
+        {"id": "evt_1", "created": 1_700_000_000},
+        {
+            "id": "cs_1", "payment_status": "paid", "amount_total": 1900,
+            "currency": "usd", "customer_details": {"email": "Buyer@Example.com"},
+            "metadata": {
+                "source": "takyon_app", "business": "clipbook",
+                "takyon_meta_capi": "1", "takyon_meta_pixel_id": "123456",
+                "takyon_meta_site_host": "clipbook.coscale.app",
+            },
+        },
+    )
+    assert result == {
+        "sent": True, "event_id": "takyon-stripe:cs_1:evt_1", "events_received": 1,
+    }
+    assert captured["event_name"].startswith("TakyonPurchase_")
+    assert captured["event_source_url"] == "https://clipbook.coscale.app/app?checkout=success"
+    assert captured["user_data"] == {
+        "em": [hashlib.sha256(b"buyer@example.com").hexdigest()]
+    }
+
+
+def test_browser_or_unpaid_checkout_cannot_emit_capi_purchase(monkeypatch):
+    monkeypatch.setattr(
+        safebox_app.safebox, "first_env_backed_value", lambda *keys: "capi-token"
+    )
+    assert safebox_app._send_verified_meta_purchase(
+        {"id": "evt_1"}, {"metadata": {"source": "browser"}}
+    ) is None
+    with pytest.raises(RuntimeError, match="paid_checkout"):
+        safebox_app._send_verified_meta_purchase(
+            {"id": "evt_1"},
+            {
+                "payment_status": "unpaid",
+                "metadata": {
+                    "source": "takyon_app", "business": "clipbook",
+                    "takyon_meta_capi": "1", "takyon_meta_pixel_id": "123456",
+                    "takyon_meta_site_host": "clipbook.coscale.app",
+                },
+            },
+        )

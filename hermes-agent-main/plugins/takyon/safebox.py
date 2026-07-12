@@ -3718,14 +3718,29 @@ def meta_graph_ensure_custom_conversion(
     name: str,
     rule: str,
     custom_event_type: str,
+    event_source_id: str,
+    business: str = "",
+    site_hostname: str = "",
     timeout: float = 60.0,
 ) -> dict[str, Any]:
-    """Ensure a per-business custom conversion through the safebox-held system-user token."""
+    """Ensure a per-business custom conversion through the safebox-held system-user token.
+
+    ``event_source_id`` is the pixel the conversion listens to — Meta refuses creation
+    without it, so callers must pass the shared pixel id (required, non-empty)."""
+    if not str(event_source_id or "").strip():
+        raise RemoteSafeboxError(
+            "meta_graph_ensure_custom_conversion requires event_source_id (the pixel id)",
+            status_code=400,
+            payload={"detail": "event_source_id_required"},
+        )
     payload = {
         "ad_account_id": str(ad_account_id or ""),
         "name": str(name or ""),
         "rule": str(rule or ""),
         "custom_event_type": str(custom_event_type or ""),
+        "event_source_id": str(event_source_id or ""),
+        "business": str(business or ""),
+        "site_hostname": str(site_hostname or ""),
         "timeout": float(timeout),
     }
     if _use_remote_authority():
@@ -3746,14 +3761,33 @@ def meta_graph_ensure_custom_conversion(
             status_code=428,
             payload={"detail": "meta_system_user_token_required"},
         )
-    return meta_graph.ensure_custom_conversion(
+    event_type = str(custom_event_type or "").strip().upper()
+    effective_rule = str(rule or "")
+    purchase_event_name = ""
+    if event_type == "PURCHASE":
+        signing_key = str(os.environ.get("TAKYON_CAP_SIGNING_KEY") or "").encode("utf-8")
+        purchase_event_name = meta_graph.derive_purchase_event_name(signing_key, business)
+        effective_rule = meta_graph.purchase_custom_conversion_rule(
+            purchase_event_name, site_hostname
+        )
+    result = meta_graph.ensure_custom_conversion(
         token,
         str(ad_account_id or ""),
         name=str(name or ""),
-        rule=str(rule or ""),
-        custom_event_type=str(custom_event_type or ""),
+        rule=effective_rule,
+        custom_event_type=event_type,
+        event_source_id=str(event_source_id or ""),
         version=_local_meta_graph_version(),
     )
+    if event_type == "PURCHASE":
+        result["capi_ready"] = bool(
+            str(first_env_backed_value(
+                "META_CAPI_TOKEN", "META_SYSTEM_USER_ACCESS_TOKEN"
+            ) or "").strip()
+        )
+    if purchase_event_name:
+        result["purchase_event_name"] = purchase_event_name
+    return result
 
 
 def _local_meta_graph_version() -> str:

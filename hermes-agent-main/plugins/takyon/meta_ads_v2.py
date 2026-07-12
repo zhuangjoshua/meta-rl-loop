@@ -33,6 +33,7 @@ records any ids already created.
 from __future__ import annotations
 
 import json
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -257,6 +258,107 @@ def _is_test_mode(store: Any, business: str) -> bool:
 
 def _launch_receipt_rel(slug: str) -> str:
     return f"distribution/meta-ads/{slug}/receipt.json"
+
+
+_PURCHASE_ATTRIBUTION_REL = "metrics/meta-pixel/purchase-attribution.json"
+
+
+def _business_site_hostname(business: str) -> str:
+    """The business's AUTHORITATIVE site hostname, derived from the canonical publish-target
+    machinery (never from caller-supplied args) — the domain the checkout-success Purchase
+    event actually fires on. This is the only hostname the purchase-attribution rule may
+    scope to."""
+    try:
+        return str(
+            urllib.parse.urlparse(core._product_publish_target(business)).hostname or ""
+        ).strip().lower().rstrip(".")
+    except Exception:
+        return ""
+
+
+def _server_purchase_rule_matches(rule: str, site_hostname: str) -> bool:
+    """Require the CAPI-only event plus the exact authoritative app host/path."""
+    try:
+        payload = json.loads(str(rule or ""))
+    except Exception:
+        return False
+    clauses = payload.get("and") if isinstance(payload, Mapping) else None
+    if not isinstance(clauses, list):
+        return False
+    event_name = ""
+    url_match = ""
+    for clause in clauses:
+        if not isinstance(clause, Mapping):
+            continue
+        event = clause.get("event")
+        url = clause.get("url")
+        if isinstance(event, Mapping):
+            event_name = str(event.get("eq") or "").strip()
+        if isinstance(url, Mapping):
+            url_match = str(url.get("i_contains") or "").strip().lower()
+    return (
+        event_name.startswith("TakyonPurchase_")
+        and len(event_name) >= 32
+        and url_match == f"{site_hostname}/app"
+    )
+
+
+def _business_purchase_attribution(store: Any, business: str) -> tuple[tuple[str, ...] | None, str]:
+    """Resolve THIS business's purchase-attribution boundary for insights aggregation.
+
+    Reads ONLY the canonical record at ``metrics/meta-pixel/purchase-attribution.json`` —
+    written by pixel-ensure exclusively for an explicit PURCHASE custom conversion — and
+    validates it end to end: right business, PURCHASE event type, non-empty conversion id,
+    a recorded URL rule, and a pixel id matching the CURRENTLY configured shared pixel
+    (a stale record from a rotated pixel must not masquerade as attribution).
+
+    Returns ``(action_types, label)``. On ANY missing/malformed/LEAD/stale/mismatched
+    record: ``(None, "unavailable")`` — purchases/revenue/ROAS become unavailable, NOT
+    generic. Attribution is a financial decision boundary: failure must NARROW it (no
+    ROAS, no ROAS-driven decisions), never broaden it to the shared pixel's generic
+    purchases, which include other businesses' sales (the exact cross-business
+    contamination this boundary exists to prevent)."""
+    try:
+        path = store._resolve_business_file(business, _PURCHASE_ATTRIBUTION_REL, sync=False)
+        if not path.is_file():
+            return None, "unavailable"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(doc, Mapping):
+            return None, "unavailable"
+        if str(doc.get("status") or "").strip().lower() != "active":
+            return None, "unavailable"  # invalidated/superseded records never count
+        if str(doc.get("business") or "").strip() != str(business):
+            return None, "unavailable"
+        if str(doc.get("custom_event_type") or "").strip().upper() != "PURCHASE":
+            return None, "unavailable"
+        if str(doc.get("measurement_source") or "").strip() != "stripe_capi":
+            return None, "unavailable"
+        conversion_id = str(doc.get("custom_conversion_id") or "").strip()
+        if not conversion_id:
+            return None, "unavailable"
+        rule = str(doc.get("rule") or "").strip()
+        if not rule:
+            return None, "unavailable"
+        # The rule must scope to THIS business's authoritative hostname (derived from
+        # canonical business state at READ time — a record whose rule points at another
+        # domain, or whose hostname the business has since moved away from, is not
+        # attribution for this business's purchases).
+        site_host = _business_site_hostname(business)
+        if not site_host:
+            return None, "unavailable"
+        if str(doc.get("url_match") or "").strip().lower() != f"{site_host}/app":
+            return None, "unavailable"
+        if not _server_purchase_rule_matches(rule, site_host):
+            return None, "unavailable"
+        pixel_cfg = core._meta_pixel_config()
+        current_pixel = (str(pixel_cfg.get("pixel_id") or "").strip()
+                         if isinstance(pixel_cfg, Mapping) else "")
+        if not current_pixel or str(doc.get("pixel_id") or "").strip() != current_pixel:
+            return None, "unavailable"
+        return ((f"offsite_conversion.custom.{conversion_id}",),
+                f"custom_conversion:{conversion_id}")
+    except Exception:
+        return None, "unavailable"
 
 
 def _load_launch_receipt(store: Any, business: str, slug: str) -> Mapping[str, Any]:
@@ -1147,8 +1249,11 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
         # carries them (parity with the reddit receipt shape) so downstream readers — episode
         # metrics snapshots, evaluate, operators — get impressions/clicks/spend without re-reading
         # insights.jsonl.
+        purchase_action_types, attribution_label = _business_purchase_attribution(store, business)
+        base_sync["purchase_attribution"] = attribution_label
         totals = core._meta_aggregate_insights_rows(
-            [dict(r) for r in rows if isinstance(r, Mapping)]
+            [dict(r) for r in rows if isinstance(r, Mapping)],
+            purchase_action_types=purchase_action_types,
         )
         try:
             policy = core._load_ad_spend_policy(business, channel="meta", slug=slug)
@@ -1231,7 +1336,8 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
 
             try:
                 _metrics_totals = core._meta_aggregate_insights_rows(
-                    [dict(r) for r in rows if isinstance(r, Mapping)]
+                    [dict(r) for r in rows if isinstance(r, Mapping)],
+                    purchase_action_types=purchase_action_types,
                 )
             except Exception:
                 _metrics_totals = {}
@@ -1266,9 +1372,16 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
 
 
 # ── 4. EVALUATE ───────────────────────────────────────────────────────────────────────────────────
-def _evaluate_rows(rows: list[Mapping[str, Any]], *, cpa_baseline_usd: float) -> dict[str, Any]:
-    """Apply references/benchmarks.md thresholds to aggregated insights → verdict + recommended action."""
-    totals = core._meta_aggregate_insights_rows([dict(r) for r in rows])
+def _evaluate_rows(rows: list[Mapping[str, Any]], *, cpa_baseline_usd: float,
+                   purchase_action_types: tuple[str, ...] | None) -> dict[str, Any]:
+    """Apply references/benchmarks.md thresholds to aggregated insights → verdict + recommended
+    action. ``purchase_action_types`` is the caller's resolved attribution boundary, passed
+    through verbatim (None = purchases/ROAS unavailable in the totals; the verdict heuristics
+    are CTR/CPC/learning-based and never scale/cut on ROAS)."""
+    totals = core._meta_aggregate_insights_rows(
+        [dict(r) for r in rows],
+        purchase_action_types=purchase_action_types,
+    )
     ctr = totals.get("ctr")  # percent
     cpc = totals.get("cpc")
     cpm = totals.get("cpm")
@@ -1386,7 +1499,10 @@ def handle_business_meta_ad_evaluate(args: dict, **_: Any) -> str:
                 "created_at": core._now(),
             }
         else:
-            result = _evaluate_rows(rows, cpa_baseline_usd=cpa_baseline_usd)
+            purchase_action_types, attribution_label = _business_purchase_attribution(store, business)
+            result = _evaluate_rows(rows, cpa_baseline_usd=cpa_baseline_usd,
+                                    purchase_action_types=purchase_action_types)
+            result["purchase_attribution"] = attribution_label
             evaluation = {
                 "idempotency_key": idempotency_key,
                 "business": business,
@@ -1561,10 +1677,37 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
             raise core.TakyonError("ad_account_id is required (arg ad_account_id or Safebox META_AD_ACCOUNT_ID)")
         custom_event_type = str(_arg(args, "custom_event_type", default="LEAD") or "LEAD").strip().upper()
         conversion_path = str(_arg(args, "conversion_path", "conversion_url") or "").strip()
-        domain = str(_arg(args, "domain") or f"{slug}.coscale.app").strip()
-        url_match = conversion_path or f"{domain}"
+        requested_domain = str(_arg(args, "domain") or "").strip()
+        # The hostname is AUTHORITATIVE business state (the domain the checkout-success
+        # Purchase event fires on), never caller-supplied: a caller-chosen domain could
+        # scope this business's conversion to ANOTHER business's site — contamination
+        # through the front door. Caller args are accepted only when they agree.
+        site_host = _business_site_hostname(business)
+        if not site_host:
+            raise core.TakyonError(
+                f"cannot derive the authoritative site hostname for business {business!r}")
+        if requested_domain:
+            parsed_domain = urllib.parse.urlparse(
+                requested_domain if "://" in requested_domain else f"//{requested_domain}"
+            ).hostname
+            if str(parsed_domain or "").strip().lower().rstrip(".") != site_host:
+                raise core.TakyonError(
+                    f"cross-business domain rejected: {requested_domain!r} is not this "
+                    f"business's authoritative hostname {site_host!r}")
+        if custom_event_type == "PURCHASE" and conversion_path:
+            parsed_path = urllib.parse.urlparse(conversion_path)
+            supplied_host = str(parsed_path.hostname or "").strip().lower().rstrip(".")
+            path_only = str(parsed_path.path or conversion_path.split("?", 1)[0]).strip()
+            if (supplied_host and supplied_host != site_host) or not path_only.startswith("/app"):
+                raise core.TakyonError(
+                    "purchase conversion_path must be the authoritative business /app checkout-return path"
+                )
+        url_match = f"{site_host}/app" if custom_event_type == "PURCHASE" else (
+            conversion_path or site_host
+        )
         name = str(_arg(args, "conversion_name") or f"{slug}-{custom_event_type.lower()}").strip()
-        # URL rule: fire only for this business's traffic (per-business isolation on the shared pixel).
+        # For PURCHASE the Safebox replaces this placeholder with an unguessable CAPI-only
+        # event + exact authoritative host/path rule. LEAD keeps the legacy URL rule.
         rule = json.dumps({"url": {"i_contains": url_match}}, ensure_ascii=False)
 
         base = {
@@ -1591,11 +1734,46 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
                 "value": ensure,
             })
 
+        if custom_event_type == "PURCHASE":
+            try:
+                record_abs = store._resolve_business_file(business, _PURCHASE_ATTRIBUTION_REL)
+                if record_abs.is_file():
+                    try:
+                        previous_record = json.loads(record_abs.read_text(encoding="utf-8"))
+                    except Exception:
+                        previous_record = {}
+                    # Invalidate-before-replace: from this moment until a VERIFIED new record
+                    # is activated below, attribution is deliberately unavailable.
+                    _write_receipt(business, _PURCHASE_ATTRIBUTION_REL, {
+                        "status": "invalidated",
+                        "business": business,
+                        "invalidated_at": core._now(),
+                        "reason": "superseded_by_new_ensure",
+                        "previous": previous_record,
+                    })
+            except Exception:
+                pass
+
+        # Meta requires the event source (the shared pixel) on custom-conversion creation —
+        # resolve it BEFORE the provider call and fail closed when unconfigured.
+        _pixel_cfg_early = core._meta_pixel_config()
+        _pixel_event_source = (
+            str(_pixel_cfg_early.get("pixel_id") or "").strip()
+            if isinstance(_pixel_cfg_early, Mapping) else ""
+        )
+        if not _pixel_event_source:
+            raise core.TakyonError(
+                "meta_pixel_unconfigured: set analytics.meta_pixel.pixel_id — the custom "
+                "conversion must be anchored to the shared pixel (event_source_id)"
+            )
         result = core.safebox.meta_graph_ensure_custom_conversion(
             ad_account_id=ad_account_id,
             name=name,
             rule=rule,
             custom_event_type=custom_event_type,
+            event_source_id=_pixel_event_source,
+            business=business,
+            site_hostname=site_host,
         )
         custom_conversion_id = str(
             (result or {}).get("id")
@@ -1603,6 +1781,25 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
             or ""
         ).strip()
         ok = bool(custom_conversion_id)
+        # PROVIDER verification: the safebox/meta_graph layer read the conversion back from
+        # Meta and certified id/pixel/event-type/exact-rule. The canonical record is gated on
+        # this — an unverified id (or one verified against different facts) never becomes
+        # the attribution boundary.
+        provider_verified = bool(
+            ok
+            and (result or {}).get("verified") is True
+            and str((result or {}).get("custom_event_type") or "").strip().upper() == custom_event_type
+            and str((result or {}).get("pixel_id") or "").strip() == _pixel_event_source
+        )
+        effective_rule = str((result or {}).get("rule") or rule).strip()
+        capi_ready = bool((result or {}).get("capi_ready") is True)
+        if custom_event_type == "PURCHASE":
+            provider_verified = bool(
+                provider_verified
+                and capi_ready
+                and _server_purchase_rule_matches(effective_rule, site_host)
+            )
+        base["rule"] = effective_rule
 
         # ── Site-side install (the half this tool historically skipped). Fail-soft by design:
         # the Meta-side custom conversion above is the primary op; a site-side blocker is
@@ -1633,17 +1830,65 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
             except Exception as exc:  # noqa: BLE001 - retrofit must not sink the ensure
                 site["blocker"] = str(exc)[:200]
 
+        # LIVE-INSTRUMENTATION verification: the currently served dist must actually carry
+        # the pixel (a conversion that listens to a pixel the site never fires is a boundary
+        # that can never observe a purchase). Direct read of the live index — not the
+        # injection call's return value.
+        instrumentation_verified = False
+        try:
+            live_root = core._product_live_current_root(business)
+            live_index = Path(live_root) / "index.html"
+            instrumentation_verified = (
+                bool(pixel_id)
+                and live_index.is_file()
+                and pixel_id in live_index.read_text(encoding="utf-8", errors="replace")
+            )
+        except Exception:
+            instrumentation_verified = False
+        site["instrumentation_verified"] = instrumentation_verified
+
         ensure = {
             **base,
             "success": True,
             "status": "ensured" if ok else "degraded",
             "ok": ok,
             "custom_conversion_id": custom_conversion_id or None,
+            "provider_verified": provider_verified,
             "provider_response": result,
             "site": site,
             "external_side_effects": "ensured",
         }
         _write_receipt(business, ensure_rel, ensure)
+        # The CANONICAL purchase-attribution record — the ONLY input the ROAS attribution
+        # boundary reads. ACTIVATED exclusively for an explicit PURCHASE conversion that
+        # passed BOTH verifications: provider read-back (Meta says the conversion really is
+        # this pixel + PURCHASE + this exact rule) and live instrumentation (the served site
+        # really fires this pixel). Anything less leaves attribution unavailable — the old
+        # record was already invalidated above.
+        if custom_event_type == "PURCHASE":
+            if ok and provider_verified and instrumentation_verified:
+                _write_receipt(business, _PURCHASE_ATTRIBUTION_REL, {
+                    "status": "active",
+                    "business": business,
+                    "custom_conversion_id": custom_conversion_id,
+                    "custom_event_type": "PURCHASE",
+                    "pixel_id": _pixel_event_source,
+                    "rule": effective_rule,
+                    "url_match": url_match,
+                    "measurement_source": "stripe_capi",
+                    "capi_ready": True,
+                    "ensure_receipt": ensure_rel,
+                    "verified_at": core._now(),
+                    "created_at": core._now(),
+                })
+                ensure["purchase_attribution_record"] = _PURCHASE_ATTRIBUTION_REL
+            else:
+                ensure["purchase_attribution_blocked"] = {
+                    "provider_verified": provider_verified,
+                    "instrumentation_verified": instrumentation_verified,
+                    "capi_ready": capi_ready,
+                    "detail": "canonical record NOT activated; attribution remains unavailable",
+                }
         return core.tool_result({
             "success": True,
             "action": "business_meta_pixel_ensure",

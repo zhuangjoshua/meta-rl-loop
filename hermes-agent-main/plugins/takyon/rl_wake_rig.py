@@ -171,7 +171,20 @@ class RigSafebox:
 
     def meta_graph_ensure_custom_conversion(self, **kw: Any) -> dict[str, Any]:
         self.calls.append({"op": "ensure_custom_conversion", **{k: str(v)[:60] for k, v in kw.items()}})
-        return {"id": self._next("cc"), "created": True}
+        event_name = f"TakyonPurchase_{str(kw.get('business') or 'rig'):0<32}"[:47]
+        site_host = str(kw.get("site_hostname") or "")
+        rule = json.dumps({
+            "and": [
+                {"event": {"eq": event_name}},
+                {"url": {"i_contains": f"{site_host}/app"}},
+            ]
+        }, sort_keys=True, separators=(",", ":"))
+        return {
+            "id": self._next("cc"), "existed": False, "verified": True,
+            "custom_event_type": str(kw.get("custom_event_type") or "").upper(),
+            "pixel_id": str(kw.get("event_source_id") or ""),
+            "rule": rule, "capi_ready": True, "purchase_event_name": event_name,
+        }
 
 
 # ------------------------------------------------------------------ rig environment
@@ -197,7 +210,11 @@ def rig_environment(dsn: str, home: Path, *, model: str = "", provider: str = ""
         "model:\n"
         f"  provider: {provider or 'anthropic'}\n"
         f"  default: {model or ''}\n"
-        "conversation:\n  response_style: concise\n",
+        "conversation:\n  response_style: concise\n"
+        # The rig's shared pixel: the canonical purchase-attribution record each rig
+        # business gets at seeding must validate against the CURRENT pixel (stale-pixel
+        # rejection is part of the boundary contract).
+        "analytics:\n  meta_pixel:\n    pixel_id: \"PIX-RIG-1\"\n",
         encoding="utf-8",
     )
 
@@ -371,6 +388,10 @@ def rig_environment(dsn: str, home: Path, *, model: str = "", provider: str = ""
 
 # ------------------------------------------------------------------ business seeding
 
+def _rig_purchase_conversion_id(slug: str) -> str:
+    return f"rigcc{slug[-6:]}"
+
+
 def seed_business(dsn: str, store: Any, slug: str) -> None:
     """A live-mode business pinned to the meta-ads task: goal + work_focus make 'launch a
     meta traffic campaign' the wake's one obvious move (Hermes-native pinning through
@@ -416,6 +437,37 @@ def seed_business(dsn: str, store: Any, slug: str) -> None:
         path = store._resolve_business_file(slug, rel, sync=False)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
+    # The canonical PURCHASE attribution record (production shape: pixel-ensure writes this
+    # for an explicit PURCHASE conversion). Without it the strict boundary is UNAVAILABLE —
+    # ROAS would be None everywhere and the rig could not test the feedback loop at all,
+    # which is exactly the fail-closed behavior production businesses get pre-pixel.
+    import urllib.parse
+
+    from plugins.takyon import core as takyon_core
+
+    # The record must satisfy the STRICT resolver: status active, url_match/rule scoped to
+    # the business's AUTHORITATIVE hostname (derived from the canonical publish-target
+    # machinery, same as production), pixel matching the rig config's pixel id.
+    site_host = urllib.parse.urlparse(takyon_core._product_publish_target(slug)).netloc
+    attribution = store._resolve_business_file(
+        slug, "metrics/meta-pixel/purchase-attribution.json", sync=False)
+    attribution.parent.mkdir(parents=True, exist_ok=True)
+    attribution.write_text(json.dumps({
+        "status": "active",
+        "business": slug,
+        "custom_conversion_id": _rig_purchase_conversion_id(slug),
+        "custom_event_type": "PURCHASE",
+        "pixel_id": "PIX-RIG-1",
+        "rule": json.dumps({"and": [
+            {"event": {"eq": f"TakyonPurchase_{slug:0<32}"[:47]}},
+            {"url": {"i_contains": f"{site_host}/app"}},
+        ]}, sort_keys=True, separators=(",", ":")),
+        "url_match": f"{site_host}/app",
+        "measurement_source": "stripe_capi",
+        "capi_ready": True,
+        "verified_at": "2026-07-01T00:00:00+00:00",
+        "created_at": "2026-07-01T00:00:00+00:00",
+    }), encoding="utf-8")
     set_meta_channel_budget(store, slug, 40_000)
 
 
@@ -519,11 +571,13 @@ def inject_outcomes(store: Any, slug: str, world: RigWorld,
                 "impressions": str(state["impressions"]),
                 "clicks": str(state["clicks"]),
                 "actions": [
-                    {"action_type": "purchase", "value": str(state["purchases"])},
+                    {"action_type": f"offsite_conversion.custom.{_rig_purchase_conversion_id(slug)}",
+                     "value": str(state["purchases"])},
                     {"action_type": "link_click", "value": str(state["link_clicks"])},
                 ],
                 "action_values": [
-                    {"action_type": "purchase", "value": f"{state['revenue_usd']:.2f}"},
+                    {"action_type": f"offsite_conversion.custom.{_rig_purchase_conversion_id(slug)}",
+                     "value": f"{state['revenue_usd']:.2f}"},
                 ],
             }
             try:
