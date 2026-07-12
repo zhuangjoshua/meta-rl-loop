@@ -3623,13 +3623,33 @@ def test_product_host_assets_route_serves_published_product_assets(monkeypatch, 
     assert "plannerly" in response.text
 
 
-def test_operator_root_serves_embedded_workspace(monkeypatch):
+def _embedded_workspace_client(monkeypatch, tmp_path):
+    from fastapi import FastAPI
     from starlette.testclient import TestClient
 
     import takyon_cli.web_server as web_server
 
+    litebulb = tmp_path / "litebulb"
+    assets = litebulb / "assets"
+    assets.mkdir(parents=True)
+    (litebulb / "litebulb.html").write_text(
+        '<!doctype html><head><link href="./assets/main.css"></head>'
+        '<body><script src="./assets/main.js"></script>'
+        '<script src="./takyon-adapter.js"></script></body>',
+        encoding="utf-8",
+    )
+    (litebulb / "takyon-adapter.js").write_text("", encoding="utf-8")
+    (assets / "main.css").write_text("", encoding="utf-8")
+    (assets / "main.js").write_text("", encoding="utf-8")
+    monkeypatch.setattr(web_server, "WEB_DIST", tmp_path)
     monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
-    client = TestClient(web_server.app)
+    app = FastAPI()
+    web_server.mount_spa(app)
+    return TestClient(app)
+
+
+def test_operator_root_serves_embedded_workspace(monkeypatch, tmp_path):
+    client = _embedded_workspace_client(monkeypatch, tmp_path)
 
     response = client.get("/?business=dashboardsly", follow_redirects=False)
 
@@ -3637,13 +3657,8 @@ def test_operator_root_serves_embedded_workspace(monkeypatch):
     assert "window.__TAKYON_DASHBOARD_EMBEDDED_CHAT__=true" in response.text
 
 
-def test_skill_lab_root_serves_embedded_workspace_like_operator_host(monkeypatch):
-    from starlette.testclient import TestClient
-
-    import takyon_cli.web_server as web_server
-
-    monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
-    client = TestClient(web_server.app)
+def test_skill_lab_root_serves_embedded_workspace_like_operator_host(monkeypatch, tmp_path):
+    client = _embedded_workspace_client(monkeypatch, tmp_path)
 
     response = client.get("/", headers={"Host": "skills.fourmanifold.com"}, follow_redirects=False)
 
@@ -3651,13 +3666,8 @@ def test_skill_lab_root_serves_embedded_workspace_like_operator_host(monkeypatch
     assert "window.__TAKYON_DASHBOARD_EMBEDDED_CHAT__=true" in response.text
 
 
-def test_skill_lab_routes_serve_embedded_workspace_instead_of_legacy_shell(monkeypatch):
-    from starlette.testclient import TestClient
-
-    import takyon_cli.web_server as web_server
-
-    monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
-    client = TestClient(web_server.app)
+def test_skill_lab_routes_serve_embedded_workspace_instead_of_legacy_shell(monkeypatch, tmp_path):
+    client = _embedded_workspace_client(monkeypatch, tmp_path)
 
     response = client.get(
         "/skill-lab",
@@ -3669,13 +3679,8 @@ def test_skill_lab_routes_serve_embedded_workspace_instead_of_legacy_shell(monke
     assert "window.__TAKYON_DASHBOARD_EMBEDDED_CHAT__=true" in response.text
 
 
-def test_operator_chat_serves_litebulb_assets_from_litebulb_prefix(monkeypatch):
-    from starlette.testclient import TestClient
-
-    import takyon_cli.web_server as web_server
-
-    monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
-    client = TestClient(web_server.app)
+def test_operator_chat_serves_litebulb_assets_from_litebulb_prefix(monkeypatch, tmp_path):
+    client = _embedded_workspace_client(monkeypatch, tmp_path)
 
     response = client.get("/chat")
 
@@ -3684,13 +3689,8 @@ def test_operator_chat_serves_litebulb_assets_from_litebulb_prefix(monkeypatch):
     assert 'href="/litebulb/assets/' in response.text
 
 
-def test_skill_lab_chat_serves_litebulb_assets_from_litebulb_prefix(monkeypatch):
-    from starlette.testclient import TestClient
-
-    import takyon_cli.web_server as web_server
-
-    monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
-    client = TestClient(web_server.app)
+def test_skill_lab_chat_serves_litebulb_assets_from_litebulb_prefix(monkeypatch, tmp_path):
+    client = _embedded_workspace_client(monkeypatch, tmp_path)
 
     response = client.get("/chat", headers={"Host": "skills.fourmanifold.com"})
 
