@@ -367,7 +367,7 @@ def ensure_custom_conversion(
     name: str,
     rule: str,
     custom_event_type: str,
-    event_source_id: str = "",
+    event_source_id: str,
     version: str = "v21.0",
 ) -> dict:
     """Create (or return) a URL-rule custom conversion for per-business attribution.
@@ -381,15 +381,17 @@ def ensure_custom_conversion(
     """
     acct = account_path(ad_account_id)
     rule_value = rule if isinstance(rule, str) else json.dumps(rule)
+    # Meta REQUIRES the event source (the pixel this conversion listens to): the API
+    # refuses creation without it — "(#100) The parameter event_source_id is required".
+    # Required at every layer of this chain so a missing pixel fails loudly at the edge.
+    if not str(event_source_id or "").strip():
+        raise ValueError("ensure_custom_conversion requires event_source_id (the pixel id)")
     params = {
         "name": name,
         "rule": rule_value,
         "custom_event_type": custom_event_type,
+        "event_source_id": str(event_source_id).strip(),
     }
-    # Meta REQUIRES the event source (the pixel this conversion listens to): the API
-    # refuses creation without it — "(#100) The parameter event_source_id is required".
-    if str(event_source_id or "").strip():
-        params["event_source_id"] = str(event_source_id).strip()
     try:
         return _graph(
             "POST",

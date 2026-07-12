@@ -4428,6 +4428,8 @@ def build_safebox_app() -> FastAPI:
         ).strip()
         if not token:
             raise HTTPException(status_code=502, detail="META_SYSTEM_USER_ACCESS_TOKEN is not configured")
+        if not str(body.event_source_id or "").strip():
+            raise HTTPException(status_code=400, detail="event_source_id_required")
         try:
             return _meta_graph.ensure_custom_conversion(
                 token,

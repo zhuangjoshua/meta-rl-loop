@@ -3689,13 +3689,19 @@ def meta_graph_ensure_custom_conversion(
     name: str,
     rule: str,
     custom_event_type: str,
-    event_source_id: str = "",
+    event_source_id: str,
     timeout: float = 60.0,
 ) -> dict[str, Any]:
     """Ensure a per-business custom conversion through the safebox-held system-user token.
 
     ``event_source_id`` is the pixel the conversion listens to — Meta refuses creation
-    without it, so callers must pass the shared pixel id."""
+    without it, so callers must pass the shared pixel id (required, non-empty)."""
+    if not str(event_source_id or "").strip():
+        raise RemoteSafeboxError(
+            "meta_graph_ensure_custom_conversion requires event_source_id (the pixel id)",
+            status_code=400,
+            payload={"detail": "event_source_id_required"},
+        )
     payload = {
         "ad_account_id": str(ad_account_id or ""),
         "name": str(name or ""),

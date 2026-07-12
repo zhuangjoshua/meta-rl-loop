@@ -197,7 +197,11 @@ def rig_environment(dsn: str, home: Path, *, model: str = "", provider: str = ""
         "model:\n"
         f"  provider: {provider or 'anthropic'}\n"
         f"  default: {model or ''}\n"
-        "conversation:\n  response_style: concise\n",
+        "conversation:\n  response_style: concise\n"
+        # The rig's shared pixel: the canonical purchase-attribution record each rig
+        # business gets at seeding must validate against the CURRENT pixel (stale-pixel
+        # rejection is part of the boundary contract).
+        "analytics:\n  meta_pixel:\n    pixel_id: \"PIX-RIG-1\"\n",
         encoding="utf-8",
     )
 
@@ -371,6 +375,10 @@ def rig_environment(dsn: str, home: Path, *, model: str = "", provider: str = ""
 
 # ------------------------------------------------------------------ business seeding
 
+def _rig_purchase_conversion_id(slug: str) -> str:
+    return f"rigcc{slug[-6:]}"
+
+
 def seed_business(dsn: str, store: Any, slug: str) -> None:
     """A live-mode business pinned to the meta-ads task: goal + work_focus make 'launch a
     meta traffic campaign' the wake's one obvious move (Hermes-native pinning through
@@ -416,6 +424,22 @@ def seed_business(dsn: str, store: Any, slug: str) -> None:
         path = store._resolve_business_file(slug, rel, sync=False)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
+    # The canonical PURCHASE attribution record (production shape: pixel-ensure writes this
+    # for an explicit PURCHASE conversion). Without it the strict boundary is UNAVAILABLE —
+    # ROAS would be None everywhere and the rig could not test the feedback loop at all,
+    # which is exactly the fail-closed behavior production businesses get pre-pixel.
+    attribution = store._resolve_business_file(
+        slug, "metrics/meta-pixel/purchase-attribution.json", sync=False)
+    attribution.parent.mkdir(parents=True, exist_ok=True)
+    attribution.write_text(json.dumps({
+        "business": slug,
+        "custom_conversion_id": _rig_purchase_conversion_id(slug),
+        "custom_event_type": "PURCHASE",
+        "pixel_id": "PIX-RIG-1",
+        "rule": json.dumps({"url": {"i_contains": "demo.localtest.me"}}),
+        "url_match": "demo.localtest.me",
+        "created_at": "2026-07-01T00:00:00+00:00",
+    }), encoding="utf-8")
     set_meta_channel_budget(store, slug, 40_000)
 
 
@@ -519,11 +543,13 @@ def inject_outcomes(store: Any, slug: str, world: RigWorld,
                 "impressions": str(state["impressions"]),
                 "clicks": str(state["clicks"]),
                 "actions": [
-                    {"action_type": "purchase", "value": str(state["purchases"])},
+                    {"action_type": f"offsite_conversion.custom.{_rig_purchase_conversion_id(slug)}",
+                     "value": str(state["purchases"])},
                     {"action_type": "link_click", "value": str(state["link_clicks"])},
                 ],
                 "action_values": [
-                    {"action_type": "purchase", "value": f"{state['revenue_usd']:.2f}"},
+                    {"action_type": f"offsite_conversion.custom.{_rig_purchase_conversion_id(slug)}",
+                     "value": f"{state['revenue_usd']:.2f}"},
                 ],
             }
             try:

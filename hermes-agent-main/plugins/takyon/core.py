@@ -33513,14 +33513,18 @@ def _meta_first_action_metric(entries: Any, action_types: tuple[str, ...]) -> fl
 
 def _meta_aggregate_insights_rows(
     rows: list[dict[str, Any]], *,
-    purchase_action_types: tuple[str, ...] = _META_PURCHASE_ACTION_TYPES,
+    purchase_action_types: tuple[str, ...] | None,
 ) -> dict[str, Any]:
     """Aggregate Meta insights rows into totals. ``purchase_action_types`` is the ATTRIBUTION
-    BOUNDARY: by default the generic shared-pixel purchase synonyms; a business with its own
-    custom conversion passes ``("offsite_conversion.custom.<id>",)`` so purchases/revenue/ROAS
-    count ONLY conversions on that business's own site — on the SHARED pixel, a click-through
-    that buys on a DIFFERENT business's site otherwise lands in this campaign's generic
-    purchase actions and pollutes its ROAS."""
+    BOUNDARY and is deliberately REQUIRED — every caller states which boundary it is counting
+    under. A business with its own PURCHASE custom conversion passes
+    ``("offsite_conversion.custom.<id>",)`` so purchases/revenue/ROAS count ONLY conversions
+    on that business's own site: on the SHARED pixel, a click-through that buys on a DIFFERENT
+    business's site otherwise lands in this campaign's generic purchase actions and pollutes
+    its ROAS. ``None`` means attribution is UNAVAILABLE: delivery metrics (spend, impressions,
+    clicks, link clicks) still aggregate, but purchase_count / purchase_value / ROAS /
+    conversion rate come back None — unavailable is not zero, and a financial boundary must
+    NARROW on failure, never silently broaden to every business's purchases."""
     totals = {
         "rows": len(rows),
         "spend_cents": 0,
@@ -33558,12 +33562,13 @@ def _meta_aggregate_insights_rows(
         # Meta-attributed purchase VALUE (revenue) and count for this object, deduped across the
         # synonym action_types so one purchase is not counted several times. Fed by the client-side
         # `Purchase` pixel event; zero until that event fires.
-        purchase_value = _meta_first_action_metric(row.get("action_values"), purchase_action_types)
-        if purchase_value is not None:
-            totals["purchase_value_cents"] += int((Decimal(str(purchase_value)) * 100).quantize(Decimal("1")))
-        purchase_count = _meta_first_action_metric(row.get("actions"), purchase_action_types)
-        if purchase_count is not None:
-            totals["purchase_count"] += int(round(purchase_count))
+        if purchase_action_types is not None:
+            purchase_value = _meta_first_action_metric(row.get("action_values"), purchase_action_types)
+            if purchase_value is not None:
+                totals["purchase_value_cents"] += int((Decimal(str(purchase_value)) * 100).quantize(Decimal("1")))
+            purchase_count = _meta_first_action_metric(row.get("actions"), purchase_action_types)
+            if purchase_count is not None:
+                totals["purchase_count"] += int(round(purchase_count))
         # Outbound LINK clicks (`link_click` action) — distinct from `clicks`, which is Meta's
         # all-clicks (reactions, profile taps, expands). Link clicks are the funnel's midpoint:
         # ad -> click-through -> landing site -> purchase.
@@ -33572,19 +33577,25 @@ def _meta_aggregate_insights_rows(
             totals["link_clicks"] += int(round(link_clicks))
 
     totals["spend_usd"] = round(totals["spend_cents"] / 100.0, 2)
-    totals["purchase_value_usd"] = round(totals["purchase_value_cents"] / 100.0, 2)
+    if purchase_action_types is None:
+        totals["purchase_count"] = None
+        totals["purchase_value_cents"] = None
+        totals["purchase_value_usd"] = None
+    else:
+        totals["purchase_value_usd"] = round(totals["purchase_value_cents"] / 100.0, 2)
     if totals["clicks"] > 0:
         totals["cpc"] = round(totals["spend_usd"] / totals["clicks"], 4)
     if totals["impressions"] > 0:
         totals["ctr"] = round((totals["clicks"] / totals["impressions"]) * 100.0, 4)
         totals["cpm"] = round((totals["spend_usd"] * 1000.0) / totals["impressions"], 4)
-    # ROAS = Meta-attributed revenue / ad spend. Only meaningful once spend is non-zero.
-    if totals["spend_cents"] > 0:
+    # ROAS = Meta-attributed revenue / ad spend. Only meaningful once spend is non-zero AND
+    # a purchase-attribution boundary exists; unavailable attribution -> ROAS None, not 0.
+    if purchase_action_types is not None and totals["spend_cents"] > 0:
         totals["roas"] = round(totals["purchase_value_cents"] / totals["spend_cents"], 4)
     # Conversion rate from link clicks (purchases per click-through, %): splits the funnel —
     # plenty of link clicks + low rate points at the landing site; few link clicks + healthy
     # rate points at the ad creative.
-    if totals["link_clicks"] > 0:
+    if purchase_action_types is not None and totals["link_clicks"] > 0:
         totals["link_click_conversion_rate"] = round(
             (totals["purchase_count"] / totals["link_clicks"]) * 100.0, 4)
     return totals

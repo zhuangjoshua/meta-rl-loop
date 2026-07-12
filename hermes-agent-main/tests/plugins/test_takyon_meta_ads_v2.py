@@ -293,52 +293,16 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
                     return None
         return None
 
-    def _meta_aggregate_insights_rows(rows, *, purchase_action_types=None):
-        # Faithful mirror of core._meta_aggregate_insights_rows: derive ctr/cpc/cpm
-        # from summed clicks/impressions/spend (the row's literal ctr/cpc are ignored)
-        # and Meta-attributed purchase value/count/roas from action_values/actions,
-        # bounded by purchase_action_types (the per-business attribution boundary).
-        wanted_types = tuple(purchase_action_types or _purchase_action_types)
-        totals = {
-            "rows": len(rows),
-            "spend_usd": 0.0,
-            "impressions": 0,
-            "reach": 0,
-            "clicks": 0,
-            "cpc": None,
-            "cpm": None,
-            "ctr": None,
-            "purchase_count": 0,
-            "purchase_value_cents": 0,
-            "purchase_value_usd": 0.0,
-            "roas": None,
-        }
-        spend = 0.0
-        for row in rows:
-            try:
-                spend += float(str(row.get("spend") or "0").strip() or "0")
-            except (TypeError, ValueError):
-                pass
-            totals["impressions"] += _meta_int_metric(row.get("impressions"))
-            totals["reach"] += _meta_int_metric(row.get("reach"))
-            totals["clicks"] += _meta_int_metric(row.get("clicks"))
-            pv = _first_action_metric(row.get("action_values"), wanted_types)
-            if pv is not None:
-                totals["purchase_value_cents"] += int(round(pv * 100))
-            pc = _first_action_metric(row.get("actions"), wanted_types)
-            if pc is not None:
-                totals["purchase_count"] += int(round(pc))
-        totals["spend_usd"] = round(spend, 2)
-        totals["purchase_value_usd"] = round(totals["purchase_value_cents"] / 100.0, 2)
-        if totals["clicks"] > 0:
-            totals["cpc"] = round(totals["spend_usd"] / totals["clicks"], 4)
-        if totals["impressions"] > 0:
-            totals["ctr"] = round((totals["clicks"] / totals["impressions"]) * 100.0, 4)
-            totals["cpm"] = round((totals["spend_usd"] * 1000.0) / totals["impressions"], 4)
-        spend_cents = int(round(spend * 100))
-        if spend_cents > 0:
-            totals["roas"] = round(totals["purchase_value_cents"] / spend_cents, 4)
-        return totals
+    # REAL aggregator — the fake module delegates instead of maintaining a duplicate
+    # implementation that can drift from the code under test (review 2026-07-12).
+    from plugins.takyon.core import (
+        _meta_aggregate_insights_rows as _real_meta_aggregate_insights_rows,
+        _META_PURCHASE_ACTION_TYPES as _real_meta_purchase_action_types,
+    )
+
+    def _meta_aggregate_insights_rows(rows, *, purchase_action_types):
+        return _real_meta_aggregate_insights_rows(
+            rows, purchase_action_types=purchase_action_types)
 
     class _FakeCreativeCreditBackend:
         InsufficientCreativeCredits = _FakeInsufficientCreativeCredits
@@ -590,7 +554,7 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
     mod._read_existing_receipt = _read_existing_receipt
     mod._meta_int_metric = _meta_int_metric
     mod._meta_aggregate_insights_rows = _meta_aggregate_insights_rows
-    mod._META_PURCHASE_ACTION_TYPES = _purchase_action_types
+    mod._META_PURCHASE_ACTION_TYPES = _real_meta_purchase_action_types
 
     # Schema/property helpers used by TAKYON_META_ADS_V2_DEFINITIONS.
     def _schema(name, description, properties, required):
@@ -1358,8 +1322,15 @@ def test_insights_sync_isolates_revenue_to_the_business_custom_conversion(harnes
     harness.set_business_mode("clipbook", "live")
     _write_launch_receipt(harness)
     harness.write_business_file(
-        "clipbook", "metrics/meta-pixel/clipbook/ensure.json",
-        json.dumps({"custom_conversion_id": "42424242"}).encode("utf-8"),
+        "clipbook", "metrics/meta-pixel/purchase-attribution.json",
+        json.dumps({
+            "business": "clipbook",
+            "custom_conversion_id": "42424242",
+            "custom_event_type": "PURCHASE",
+            "pixel_id": "PIX-TEST-1",
+            "rule": "{\"url\":{\"i_contains\":\"clipbook\"}}",
+            "created_at": "2026-07-01T00:00:00+00:00",
+        }).encode("utf-8"),
     )
     harness.graph.graph_forward_get_response = {
         "data": [
@@ -1395,29 +1366,88 @@ def test_insights_sync_isolates_revenue_to_the_business_custom_conversion(harnes
     assert result["value"]["purchase_attribution"] == "custom_conversion:42424242"
 
 
-def test_insights_sync_without_custom_conversion_uses_generic_and_says_so(harness):
+_GENERIC_PURCHASE_ROWS = {
+    "data": [{
+        "ad_id": "ad-1", "date_start": "2026-06-24", "date_stop": "2026-06-24",
+        "impressions": "100", "clicks": "10", "spend": "10.00",
+        "actions": [{"action_type": "purchase", "value": "1"}],
+        "action_values": [{"action_type": "purchase", "value": "30.00"}],
+    }]
+}
+
+
+def _sync_clipbook(harness, key):
+    return _result(harness.module.handle_business_meta_ad_insights_sync({
+        "business": "clipbook", "slug": "demo-meta", "level": "ad",
+        "idempotency_key": key,
+    }))
+
+
+def test_insights_sync_missing_attribution_is_unavailable_not_generic(harness):
+    # FAIL-CLOSED: no canonical purchase-attribution record -> purchases/revenue/ROAS are
+    # UNAVAILABLE (None). Counting the generic purchase actions here would re-admit other
+    # businesses' sales on the shared pixel — the exact contamination the boundary prevents.
     harness.set_business_mode("clipbook", "live")
     _write_launch_receipt(harness)
-    harness.graph.graph_forward_get_response = {
-        "data": [{
-            "ad_id": "ad-1", "date_start": "2026-06-24", "date_stop": "2026-06-24",
-            "impressions": "100", "clicks": "10", "spend": "10.00",
-            "actions": [{"action_type": "purchase", "value": "1"}],
-            "action_values": [{"action_type": "purchase", "value": "30.00"}],
-        }]
-    }
-    result = _result(harness.module.handle_business_meta_ad_insights_sync({
-        "business": "clipbook", "slug": "demo-meta", "level": "ad",
-        "idempotency_key": "clipbook-meta-generic-v1",
-    }))
+    harness.graph.graph_forward_get_response = _GENERIC_PURCHASE_ROWS
+    result = _sync_clipbook(harness, "clipbook-meta-unavail-v1")
     assert result["success"] is True
-    assert result["value"]["totals"]["purchase_value_usd"] == 30.0
-    assert result["value"]["purchase_attribution"] == "generic_purchase"
+    totals = result["value"]["totals"]
+    assert totals["spend_usd"] == 10.0 and totals["clicks"] == 10  # delivery still syncs
+    assert totals["purchase_count"] is None
+    assert totals["purchase_value_usd"] is None
+    assert totals["roas"] is None
+    assert result["value"]["purchase_attribution"] == "unavailable"
+
+
+def test_insights_sync_rejects_lead_attribution_record(harness):
+    # A LEAD conversion must never become the purchase/revenue boundary.
+    harness.set_business_mode("clipbook", "live")
+    _write_launch_receipt(harness)
+    harness.write_business_file(
+        "clipbook", "metrics/meta-pixel/purchase-attribution.json",
+        json.dumps({
+            "business": "clipbook", "custom_conversion_id": "42424242",
+            "custom_event_type": "LEAD", "pixel_id": "PIX-TEST-1",
+            "rule": "{\"url\":{\"i_contains\":\"clipbook\"}}",
+        }).encode("utf-8"),
+    )
+    harness.graph.graph_forward_get_response = _GENERIC_PURCHASE_ROWS
+    result = _sync_clipbook(harness, "clipbook-meta-lead-v1")
+    assert result["value"]["purchase_attribution"] == "unavailable"
+    assert result["value"]["totals"]["roas"] is None
+
+
+def test_insights_sync_rejects_stale_pixel_attribution_record(harness):
+    # The record must match the CURRENTLY configured pixel — a record minted against a
+    # rotated/old pixel must not masquerade as live attribution.
+    harness.set_business_mode("clipbook", "live")
+    _write_launch_receipt(harness)
+    harness.write_business_file(
+        "clipbook", "metrics/meta-pixel/purchase-attribution.json",
+        json.dumps({
+            "business": "clipbook", "custom_conversion_id": "42424242",
+            "custom_event_type": "PURCHASE", "pixel_id": "PIX-OLD-ROTATED",
+            "rule": "{\"url\":{\"i_contains\":\"clipbook\"}}",
+        }).encode("utf-8"),
+    )
+    harness.graph.graph_forward_get_response = _GENERIC_PURCHASE_ROWS
+    result = _sync_clipbook(harness, "clipbook-meta-stale-v1")
+    assert result["value"]["purchase_attribution"] == "unavailable"
+    assert result["value"]["totals"]["purchase_count"] is None
 
 
 def test_insights_sync_requests_and_surfaces_meta_attributed_revenue(harness):
     harness.set_business_mode("clipbook", "live")
     _write_launch_receipt(harness)
+    harness.write_business_file(
+        "clipbook", "metrics/meta-pixel/purchase-attribution.json",
+        json.dumps({
+            "business": "clipbook", "custom_conversion_id": "555",
+            "custom_event_type": "PURCHASE", "pixel_id": "PIX-TEST-1",
+            "rule": "{\"url\":{\"i_contains\":\"clipbook\"}}",
+        }).encode("utf-8"),
+    )
     harness.graph.graph_forward_get_response = {
         "data": [
             {
@@ -1427,8 +1457,8 @@ def test_insights_sync_requests_and_surfaces_meta_attributed_revenue(harness):
                 "impressions": "1200",
                 "clicks": "40",
                 "spend": "20.00",
-                "actions": [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "3"}],
-                "action_values": [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "80.00"}],
+                "actions": [{"action_type": "offsite_conversion.custom.555", "value": "3"}],
+                "action_values": [{"action_type": "offsite_conversion.custom.555", "value": "80.00"}],
             }
         ]
     }
@@ -1455,7 +1485,7 @@ def test_insights_sync_requests_and_surfaces_meta_attributed_revenue(harness):
     # action_values is persisted for downstream re-reads.
     insights_path = harness.business_file_path("clipbook", "metrics/meta-ads/demo-meta/insights.jsonl")
     lines = [json.loads(line) for line in insights_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert lines[0]["action_values"] == [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "80.00"}]
+    assert lines[0]["action_values"] == [{"action_type": "offsite_conversion.custom.555", "value": "80.00"}]
 
 
 def test_pixel_ensure_live_installs_site_side_and_meta_side(harness):
@@ -1488,6 +1518,32 @@ def test_pixel_ensure_live_installs_site_side_and_meta_side(harness):
     # The receipt mirrors the site block so operators can see what actually happened.
     receipt = harness.read_business_file("clipbook", result["receipt"])
     assert receipt["site"]["live_injected"] is True
+    # Default event type is LEAD -> the canonical PURCHASE attribution record must NOT exist.
+    assert harness.business_file_path(
+        "clipbook", "metrics/meta-pixel/purchase-attribution.json").exists() is False
+
+
+def test_pixel_ensure_purchase_conversion_writes_canonical_attribution_record(harness):
+    harness.set_business_mode("clipbook", "live")
+    result = _result(harness.module.handle_business_meta_pixel_ensure({
+        "business": "clipbook", "idempotency_key": "clipbook-pixel-purchase-v1",
+        "ad_account_id": "123456", "custom_event_type": "PURCHASE",
+    }))
+    assert result["success"] is True and result["ok"] is True
+    record_path = harness.business_file_path(
+        "clipbook", "metrics/meta-pixel/purchase-attribution.json")
+    assert record_path.exists()
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["business"] == "clipbook"
+    assert record["custom_event_type"] == "PURCHASE"
+    assert record["custom_conversion_id"] == "custom-conv-1"
+    assert record["pixel_id"] == "PIX-TEST-1"   # anchored to the CURRENT shared pixel
+    assert record["rule"]                        # purchase-specific URL rule recorded
+    # And the strict resolver accepts exactly this record.
+    types, label = harness.module._business_purchase_attribution(
+        harness.core._store(), "clipbook")
+    assert types == ("offsite_conversion.custom.custom-conv-1",)
+    assert label == "custom_conversion:custom-conv-1"
 
 
 def test_pixel_ensure_unconfigured_pixel_fails_closed_before_provider_call(harness):

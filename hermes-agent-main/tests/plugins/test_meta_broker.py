@@ -318,8 +318,10 @@ def test_meta_graph_ensure_custom_conversion_route_brokers_key_free_result(clien
         lambda *keys: next((values[key] for key in keys if values.get(key)), ""),
     )
 
-    def fake_ensure(token, ad_account_id, *, name, rule, custom_event_type, version="v21.0"):
-        captured["call"] = (token, ad_account_id, name, rule, custom_event_type, version)
+    def fake_ensure(token, ad_account_id, *, name, rule, custom_event_type,
+                    event_source_id, version="v21.0"):
+        captured["call"] = (token, ad_account_id, name, rule, custom_event_type,
+                            event_source_id, version)
         return {"id": "cc-123", "existed": True}
 
     monkeypatch.setattr(meta_graph, "ensure_custom_conversion", fake_ensure)
@@ -332,20 +334,48 @@ def test_meta_graph_ensure_custom_conversion_route_brokers_key_free_result(clien
             "name": "demo-cc",
             "rule": "{\"url\":{\"i_contains\":\"demo\"}}",
             "custom_event_type": "LEAD",
+            "event_source_id": "PIX-99",
             "timeout": 18,
         },
     )
 
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"id": "cc-123", "existed": True}
+    # event_source_id crosses the process boundary intact — the pixel anchor is not
+    # allowed to be dropped between the safebox client and the Graph call.
     assert captured["call"] == (
         "local-graph-token",
         "act_123",
         "demo-cc",
         "{\"url\":{\"i_contains\":\"demo\"}}",
         "LEAD",
+        "PIX-99",
         "v21.0",
     )
+
+
+def test_meta_graph_ensure_custom_conversion_route_requires_event_source(client, monkeypatch):
+    values = {
+        "META_GRAPH_VERSION": "v21.0",
+        "META_SYSTEM_USER_ACCESS_TOKEN": "local-graph-token",
+    }
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "first_env_backed_value",
+        lambda *keys: next((values[key] for key in keys if values.get(key)), ""),
+    )
+    resp = client.post(
+        "/v1/providers/meta/graph/ensure-custom-conversion",
+        headers=_auth(),
+        json={
+            "ad_account_id": "act_123",
+            "name": "demo-cc",
+            "rule": "{\"url\":{\"i_contains\":\"demo\"}}",
+            "custom_event_type": "PURCHASE",
+        },
+    )
+    assert resp.status_code == 400
+    assert "event_source_id_required" in resp.text
 
 
 def test_meta_graph_route_is_registered(client):

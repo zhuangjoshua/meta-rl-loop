@@ -259,37 +259,49 @@ def _launch_receipt_rel(slug: str) -> str:
     return f"distribution/meta-ads/{slug}/receipt.json"
 
 
-def _business_purchase_attribution(store: Any, business: str) -> tuple[tuple[str, ...], str]:
+_PURCHASE_ATTRIBUTION_REL = "metrics/meta-pixel/purchase-attribution.json"
+
+
+def _business_purchase_attribution(store: Any, business: str) -> tuple[tuple[str, ...] | None, str]:
     """Resolve THIS business's purchase-attribution boundary for insights aggregation.
 
-    When pixel-ensure has minted the business its own custom conversion on the SHARED pixel
-    (URL rule scoped to the business's own site), purchases must be counted ONLY from that
-    conversion's action type (``offsite_conversion.custom.<id>``) — the generic purchase
-    synonyms would also count click-throughs that bought on a DIFFERENT business's site and
-    pollute this business's ROAS. Reads the newest ensure receipt under
-    ``metrics/meta-pixel/*/ensure.json``; absent one (single-business worlds, pre-pixel
-    businesses, the rig) falls back to the generic synonyms unchanged.
+    Reads ONLY the canonical record at ``metrics/meta-pixel/purchase-attribution.json`` —
+    written by pixel-ensure exclusively for an explicit PURCHASE custom conversion — and
+    validates it end to end: right business, PURCHASE event type, non-empty conversion id,
+    a recorded URL rule, and a pixel id matching the CURRENTLY configured shared pixel
+    (a stale record from a rotated pixel must not masquerade as attribution).
 
-    Returns ``(action_types, attribution_label)`` — the label is recorded on the sync
-    receipt so every ROAS is traceable to the boundary that computed it."""
+    Returns ``(action_types, label)``. On ANY missing/malformed/LEAD/stale/mismatched
+    record: ``(None, "unavailable")`` — purchases/revenue/ROAS become unavailable, NOT
+    generic. Attribution is a financial decision boundary: failure must NARROW it (no
+    ROAS, no ROAS-driven decisions), never broaden it to the shared pixel's generic
+    purchases, which include other businesses' sales (the exact cross-business
+    contamination this boundary exists to prevent)."""
     try:
-        base = store._resolve_business_file(business, "metrics/meta-pixel", sync=False)
-        newest_id = ""
-        if base.is_dir():
-            for path in sorted(base.glob("*/ensure.json")):
-                try:
-                    doc = json.loads(path.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                conversion_id = str((doc or {}).get("custom_conversion_id") or "").strip()
-                if conversion_id:
-                    newest_id = conversion_id
-        if newest_id:
-            return ((f"offsite_conversion.custom.{newest_id}",),
-                    f"custom_conversion:{newest_id}")
+        path = store._resolve_business_file(business, _PURCHASE_ATTRIBUTION_REL, sync=False)
+        if not path.is_file():
+            return None, "unavailable"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(doc, Mapping):
+            return None, "unavailable"
+        if str(doc.get("business") or "").strip() != str(business):
+            return None, "unavailable"
+        if str(doc.get("custom_event_type") or "").strip().upper() != "PURCHASE":
+            return None, "unavailable"
+        conversion_id = str(doc.get("custom_conversion_id") or "").strip()
+        if not conversion_id:
+            return None, "unavailable"
+        if not str(doc.get("rule") or "").strip():
+            return None, "unavailable"
+        pixel_cfg = core._meta_pixel_config()
+        current_pixel = (str(pixel_cfg.get("pixel_id") or "").strip()
+                         if isinstance(pixel_cfg, Mapping) else "")
+        if not current_pixel or str(doc.get("pixel_id") or "").strip() != current_pixel:
+            return None, "unavailable"
+        return ((f"offsite_conversion.custom.{conversion_id}",),
+                f"custom_conversion:{conversion_id}")
     except Exception:
-        pass
-    return core._META_PURCHASE_ACTION_TYPES, "generic_purchase"
+        return None, "unavailable"
 
 
 def _load_launch_receipt(store: Any, business: str, slug: str) -> Mapping[str, Any]:
@@ -1304,11 +1316,14 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
 
 # ── 4. EVALUATE ───────────────────────────────────────────────────────────────────────────────────
 def _evaluate_rows(rows: list[Mapping[str, Any]], *, cpa_baseline_usd: float,
-                   purchase_action_types: tuple[str, ...] | None = None) -> dict[str, Any]:
-    """Apply references/benchmarks.md thresholds to aggregated insights → verdict + recommended action."""
+                   purchase_action_types: tuple[str, ...] | None) -> dict[str, Any]:
+    """Apply references/benchmarks.md thresholds to aggregated insights → verdict + recommended
+    action. ``purchase_action_types`` is the caller's resolved attribution boundary, passed
+    through verbatim (None = purchases/ROAS unavailable in the totals; the verdict heuristics
+    are CTR/CPC/learning-based and never scale/cut on ROAS)."""
     totals = core._meta_aggregate_insights_rows(
         [dict(r) for r in rows],
-        purchase_action_types=purchase_action_types or core._META_PURCHASE_ACTION_TYPES,
+        purchase_action_types=purchase_action_types,
     )
     ctr = totals.get("ctr")  # percent
     cpc = totals.get("cpc")
@@ -1701,6 +1716,21 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
             "external_side_effects": "ensured",
         }
         _write_receipt(business, ensure_rel, ensure)
+        # The CANONICAL purchase-attribution record — the ONLY input the ROAS attribution
+        # boundary reads. Written exclusively for an explicit PURCHASE conversion: a LEAD
+        # conversion must never become the purchase/revenue boundary.
+        if ok and custom_event_type == "PURCHASE":
+            _write_receipt(business, _PURCHASE_ATTRIBUTION_REL, {
+                "business": business,
+                "custom_conversion_id": custom_conversion_id,
+                "custom_event_type": "PURCHASE",
+                "pixel_id": _pixel_event_source,
+                "rule": rule,
+                "url_match": url_match,
+                "ensure_receipt": ensure_rel,
+                "created_at": core._now(),
+            })
+            ensure["purchase_attribution_record"] = _PURCHASE_ATTRIBUTION_REL
         return core.tool_result({
             "success": True,
             "action": "business_meta_pixel_ensure",

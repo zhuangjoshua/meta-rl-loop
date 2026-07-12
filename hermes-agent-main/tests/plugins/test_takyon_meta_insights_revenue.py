@@ -25,7 +25,7 @@ def test_purchase_value_and_roas_from_action_values():
             actions=[{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "2"}],
         )
     ]
-    totals = core._meta_aggregate_insights_rows(rows)
+    totals = core._meta_aggregate_insights_rows(rows, purchase_action_types=core._META_PURCHASE_ACTION_TYPES)
     assert totals["purchase_value_cents"] == 10000
     assert totals["purchase_value_usd"] == 100.0
     assert totals["purchase_count"] == 2
@@ -44,7 +44,7 @@ def test_link_clicks_and_conversion_rate_from_actions():
             ],
         )
     ]
-    totals = core._meta_aggregate_insights_rows(rows)
+    totals = core._meta_aggregate_insights_rows(rows, purchase_action_types=core._META_PURCHASE_ACTION_TYPES)
     assert totals["link_clicks"] == 40
     # conversion rate from link clicks = 2 / 40 = 5%
     assert totals["link_click_conversion_rate"] == 5.0
@@ -74,14 +74,41 @@ def test_custom_conversion_boundary_excludes_other_businesses_purchases():
     assert totals["purchase_value_usd"] == 40.0   # not 500
     assert totals["purchase_count"] == 2          # not 9
     assert totals["roas"] == 2.0                  # 40/20, ours only
-    # Default (no boundary) keeps the legacy generic behavior unchanged.
-    generic = core._meta_aggregate_insights_rows(rows)
+    # An EXPLICIT generic boundary still counts generically (the constant remains for
+    # callers that deliberately choose it) — there is no implicit default anymore.
+    generic = core._meta_aggregate_insights_rows(
+        rows, purchase_action_types=core._META_PURCHASE_ACTION_TYPES)
     assert generic["purchase_value_usd"] == 500.0
+
+
+def test_unavailable_attribution_yields_none_not_zero():
+    # Attribution is a financial boundary: when it cannot be resolved, purchases/revenue/
+    # ROAS/conversion must be UNAVAILABLE (None) — never zero, and never silently generic.
+    rows = [
+        _row(
+            spend="20.00",
+            action_values=[{"action_type": "purchase", "value": "500.00"}],
+            actions=[
+                {"action_type": "purchase", "value": "9"},
+                {"action_type": "link_click", "value": "40"},
+            ],
+        )
+    ]
+    totals = core._meta_aggregate_insights_rows(rows, purchase_action_types=None)
+    # Delivery metrics still aggregate…
+    assert totals["spend_usd"] == 20.0
+    assert totals["clicks"] == 50
+    assert totals["link_clicks"] == 40
+    # …but the financial fields are unavailable, not zero.
+    assert totals["purchase_count"] is None
+    assert totals["purchase_value_usd"] is None
+    assert totals["roas"] is None
+    assert totals["link_click_conversion_rate"] is None
 
 
 def test_no_link_clicks_leaves_conversion_rate_null():
     rows = [_row(spend="10.00", action_values=[], actions=[{"action_type": "purchase", "value": "1"}])]
-    totals = core._meta_aggregate_insights_rows(rows)
+    totals = core._meta_aggregate_insights_rows(rows, purchase_action_types=core._META_PURCHASE_ACTION_TYPES)
     assert totals["link_clicks"] == 0
     assert totals["link_click_conversion_rate"] is None
 
@@ -103,7 +130,7 @@ def test_purchase_synonyms_are_counted_once_not_summed():
             ],
         )
     ]
-    totals = core._meta_aggregate_insights_rows(rows)
+    totals = core._meta_aggregate_insights_rows(rows, purchase_action_types=core._META_PURCHASE_ACTION_TYPES)
     assert totals["purchase_value_cents"] == 5000  # 50.00 once, not 150.00
     assert totals["purchase_count"] == 1
     assert totals["roas"] == 5.0
@@ -111,7 +138,7 @@ def test_purchase_synonyms_are_counted_once_not_summed():
 
 def test_no_purchase_actions_yields_zero_revenue_and_null_roas_when_no_spend():
     rows = [_row(spend="0", action_values=None, actions=None)]
-    totals = core._meta_aggregate_insights_rows(rows)
+    totals = core._meta_aggregate_insights_rows(rows, purchase_action_types=core._META_PURCHASE_ACTION_TYPES)
     assert totals["purchase_value_cents"] == 0
     assert totals["purchase_count"] == 0
     assert totals["roas"] is None  # spend is zero → ROAS undefined, not 0
@@ -119,7 +146,7 @@ def test_no_purchase_actions_yields_zero_revenue_and_null_roas_when_no_spend():
 
 def test_spend_without_purchases_gives_zero_roas():
     rows = [_row(spend="30.00", action_values=[], actions=[])]
-    totals = core._meta_aggregate_insights_rows(rows)
+    totals = core._meta_aggregate_insights_rows(rows, purchase_action_types=core._META_PURCHASE_ACTION_TYPES)
     assert totals["purchase_value_cents"] == 0
     assert totals["roas"] == 0.0
 
