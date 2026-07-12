@@ -17,7 +17,13 @@ TAKYON_REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-/opt/takyon/hermes-agent-main}"
 TAKYON_REMOTE_SERVICE_FILE="${TAKYON_REMOTE_SERVICE_FILE:-/etc/systemd/system/takyon-safebox.service}"
 TAKYON_REMOTE_SERVICE_NAME="${TAKYON_REMOTE_SERVICE_NAME:-takyon-safebox.service}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
-TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED="${TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED:-1}"
+TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED="${TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED:-0}"
+
+if [[ "$TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED" != "0" \
+  && "$TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED" != "1" ]]; then
+  echo "TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED must be exactly 0 or 1" >&2
+  exit 1
+fi
 
 # Every production plane promotes one immutable outer-repository revision under the same Mac lock.
 # Safebox does not serve the dashboard, but building the bounded bundle here keeps this canonical
@@ -106,20 +112,18 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   "bash -s -- safebox /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
   < "$VALIDATE_AUTHORITY_ENV_SCRIPT"
 
-if [[ "$TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED" == "1" ]]; then
-  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-    "$TAKYON_VPS_HOST" \
-    "set -euo pipefail
-    env_files=(/opt/takyon/.takyon/.env /opt/takyon/secrets/.env)
-    test \"\$(grep -hE '^TAKYON_STRIPE_CHECKOUT_DISABLED=' \"\${env_files[@]}\" | tail -n 1)\" = \
-      'TAKYON_STRIPE_CHECKOUT_DISABLED=1'
-    test \"\$(grep -hE '^TAKYON_STRIPE_ACCOUNT_ID=' \"\${env_files[@]}\" | tail -n 1)\" = \
-      'TAKYON_STRIPE_ACCOUNT_ID=acct_1TXWsW7tYL4lkVC6'
-    test \"\$(grep -hE '^TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED=' \"\${env_files[@]}\" | tail -n 1)\" = \
-      'TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED=1'
-    test \"\$(grep -hE '^TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=' \"\${env_files[@]}\" | tail -n 1)\" = \
-      'TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=1'"
-fi
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+  "$TAKYON_VPS_HOST" \
+  "set -euo pipefail
+  env_files=(/opt/takyon/.takyon/.env /opt/takyon/secrets/.env)
+  test \"\$(grep -hE '^TAKYON_STRIPE_CHECKOUT_DISABLED=' \"\${env_files[@]}\" | tail -n 1)\" = \
+    'TAKYON_STRIPE_CHECKOUT_DISABLED=$TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED'
+  test \"\$(grep -hE '^TAKYON_STRIPE_ACCOUNT_ID=' \"\${env_files[@]}\" | tail -n 1)\" = \
+    'TAKYON_STRIPE_ACCOUNT_ID=acct_1TXWsW7tYL4lkVC6'
+  test \"\$(grep -hE '^TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED=' \"\${env_files[@]}\" | tail -n 1)\" = \
+    'TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED=1'
+  test \"\$(grep -hE '^TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=' \"\${env_files[@]}\" | tail -n 1)\" = \
+    'TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=1'"
 
 (
   compile_cache="$(mktemp -d)"
@@ -265,16 +269,14 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   systemctl daemon-reload
   systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'
   systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME'
-  if [[ '$TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED' == '1' ]]; then
-    pid=\$(systemctl show -p MainPID --value '$TAKYON_REMOTE_SERVICE_NAME')
-    [[ \"\$pid\" != 0 ]]
-    process_env=\$(tr '\\000' '\\n' < \"/proc/\$pid/environ\")
-    grep -Fxq 'TAKYON_STRIPE_CHECKOUT_DISABLED=1' <<<\"\$process_env\"
-    grep -Fxq 'TAKYON_STRIPE_ACCOUNT_ID=acct_1TXWsW7tYL4lkVC6' <<<\"\$process_env\"
-    grep -Fxq 'TAKYON_STRIPE_MODE=live' <<<\"\$process_env\"
-    grep -Fxq 'TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED=1' <<<\"\$process_env\"
-    grep -Fxq 'TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=1' <<<\"\$process_env\"
-  fi
+  pid=\$(systemctl show -p MainPID --value '$TAKYON_REMOTE_SERVICE_NAME')
+  [[ \"\$pid\" != 0 ]]
+  process_env=\$(tr '\\000' '\\n' < \"/proc/\$pid/environ\")
+  grep -Fxq 'TAKYON_STRIPE_CHECKOUT_DISABLED=$TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED' <<<\"\$process_env\"
+  grep -Fxq 'TAKYON_STRIPE_ACCOUNT_ID=acct_1TXWsW7tYL4lkVC6' <<<\"\$process_env\"
+  grep -Fxq 'TAKYON_STRIPE_MODE=live' <<<\"\$process_env\"
+  grep -Fxq 'TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED=1' <<<\"\$process_env\"
+  grep -Fxq 'TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=1' <<<\"\$process_env\"
   for _ in \$(seq 1 30); do
     curl -fsS http://10.116.0.2:8000/healthz >/dev/null && break
     sleep 1

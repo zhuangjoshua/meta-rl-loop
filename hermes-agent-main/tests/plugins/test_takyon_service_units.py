@@ -331,12 +331,12 @@ def test_runtime_units_are_staged_before_the_quiesced_activation_window():
     )
 
 
-def test_production_safebox_deploy_defaults_to_exact_checkout_pause_preflight():
+def test_production_safebox_deploy_verifies_exact_live_checkout_posture():
     deploy = (ROOT / "deploy/takyon-safebox/deploy-runtime.sh").read_text()
 
-    assert 'TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED="${TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED:-1}"' in deploy
+    assert 'TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED="${TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED:-0}"' in deploy
     for assignment in (
-        "TAKYON_STRIPE_CHECKOUT_DISABLED=1",
+        "TAKYON_STRIPE_CHECKOUT_DISABLED=$TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED",
         "TAKYON_STRIPE_ACCOUNT_ID=acct_1TXWsW7tYL4lkVC6",
         "TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED=1",
         "TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=1",
