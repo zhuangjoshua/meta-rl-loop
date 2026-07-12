@@ -2585,6 +2585,8 @@ cmd_console() {
   worker_pid="$!"
   if ! wait_for_worker_preflight "$worker_pid" "$worker_ready_file" "$worker_log"; then
     worker_pid=""
+    cleanup
+    trap - EXIT INT TERM
     return 1
   fi
   rm -f "$worker_ready_file"

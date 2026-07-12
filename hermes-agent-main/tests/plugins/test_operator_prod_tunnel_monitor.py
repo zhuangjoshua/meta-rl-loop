@@ -592,6 +592,13 @@ def test_console_wiring_requires_worker_ready_marker_before_shell():
 
     assert 'TAKYON_WORKER_READY_FILE="$worker_ready_file"' in console
     assert 'wait_for_worker_preflight "$worker_pid" "$worker_ready_file" "$worker_log"' in console
+    preflight_failure = console[
+        console.index('if ! wait_for_worker_preflight "$worker_pid"') : console.index(
+            'rm -f "$worker_ready_file"',
+            console.index('if ! wait_for_worker_preflight "$worker_pid"'),
+        )
+    ]
+    assert preflight_failure.index("cleanup") < preflight_failure.index("trap - EXIT INT TERM")
     assert "Local worker unavailable; relying on delayed VPS worker fallback" not in console
     assert "mark_worker_preflight_ready" not in worker
     assert "TAKYON_WORKER_READY_FILE" not in worker
