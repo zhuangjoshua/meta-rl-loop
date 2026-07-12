@@ -267,9 +267,9 @@ def test_operator_deploy_drain_ignores_only_unambiguous_mac_owned_work():
     drain = src.split("wait_for_remote_runtime_idle() {", 1)[1].split("wait_for_remote_runtime_idle", 1)[0]
 
     assert "mac_job.payload->>'work_request_id' = work_request.id" in drain
-    assert "COALESCE(mac_job.locked_by, '') LIKE 'mac-operator-%'" in drain
+    assert "COALESCE(mac_job.locked_by, '') LIKE 'mac-operator-%%'" in drain
     assert "other_job.payload->>'work_request_id' = work_request.id" in drain
-    assert "COALESCE(other_job.locked_by, '') NOT LIKE 'mac-operator-%'" in drain
+    assert "COALESCE(other_job.locked_by, '') NOT LIKE 'mac-operator-%%'" in drain
     assert "COALESCE(locked_by, '') NOT LIKE 'mac-operator-%'" in drain
 
 
@@ -284,6 +284,11 @@ def test_operator_deploy_drain_owner_query_semantics():
         re.S,
     )
     assert match is not None
+    # psycopg's bound-query parser treats every literal percent as formatting syntax. Prove the
+    # embedded SQL keeps its one real %s placeholder while escaping LIKE wildcards as %%.
+    assert "mac-operator-%%" in match.group(1)
+    assert "mac-operator-%'" not in match.group(1).replace("mac-operator-%%", "")
+    match.group(1) % ("1800 seconds",)
     query = re.sub(
         r"AND NULLIF\(work_request\.updated_at, ''\)::timestamptz >= \(NOW\(\) - %s::interval\)",
         "AND 1 = 1",

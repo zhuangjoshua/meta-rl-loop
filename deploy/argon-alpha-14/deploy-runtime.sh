@@ -270,7 +270,7 @@ with psycopg.connect(resolve_database_url(plane='operator'), autocommit=True, pr
                       FROM jobs AS mac_job
                       WHERE mac_job.payload->>'work_request_id' = work_request.id
                         AND mac_job.status = 'running'
-                        AND COALESCE(mac_job.locked_by, '') LIKE 'mac-operator-%'
+                        AND COALESCE(mac_job.locked_by, '') LIKE 'mac-operator-%%'
                   )
                   AND NOT EXISTS (
                       SELECT 1
@@ -279,7 +279,7 @@ with psycopg.connect(resolve_database_url(plane='operator'), autocommit=True, pr
                         AND other_job.status IN ('queued', 'running')
                         AND (
                             other_job.status <> 'running'
-                            OR COALESCE(other_job.locked_by, '') NOT LIKE 'mac-operator-%'
+                            OR COALESCE(other_job.locked_by, '') NOT LIKE 'mac-operator-%%'
                         )
                   )
               )
