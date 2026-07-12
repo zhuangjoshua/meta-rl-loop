@@ -117,7 +117,7 @@ export function AppLayout() {
                       ? "Subscription canceled"
                       : "Complete your subscription"}
                 </h1>
-                <p className="text-muted-foreground">One secure checkout unlocks the complete product.</p>
+                <p className="text-muted-foreground">One secure checkout unlocks {productName}.</p>
               </div>
               <Link
                 to={cta.primaryHref}

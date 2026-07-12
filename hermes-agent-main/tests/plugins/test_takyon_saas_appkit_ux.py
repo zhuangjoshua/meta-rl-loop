@@ -548,6 +548,12 @@ def test_surface_context_reads_identity_name_label(tmp_path):
     assert payload["businessName"] == "NoteWave"
 
 
+def test_subscription_gate_uses_canonical_product_name():
+    layout = read("src/screens/app-layout.tsx")
+    assert "One secure checkout unlocks {productName}." in layout
+    assert "unlocks the complete product" not in layout
+
+
 def test_surface_contract_display_name_outranks_slug_and_strategy(tmp_path):
     business_root = tmp_path / "businesses" / "qa-proposal-0711"
     workspace = business_root / "product" / "site"
