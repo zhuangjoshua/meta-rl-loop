@@ -345,6 +345,11 @@ def test_production_safebox_deploy_verifies_exact_live_checkout_posture():
         assert f"grep -hE '^{key}='" in deploy
         assert f"'{assignment}'" in deploy
         assert f"grep -Fxq '{assignment}'" in deploy
+    restart_tail = deploy.split("systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'", 1)[1]
+    assert restart_tail.index("curl -fsS http://10.116.0.2:8000/healthz") < restart_tail.index(
+        "process_env="
+    )
+    assert r'[[ \"\$ready\" == 1 ]]' in restart_tail
 
 
 def test_operator_deploy_runs_migrations_only_when_revision_requires_them():

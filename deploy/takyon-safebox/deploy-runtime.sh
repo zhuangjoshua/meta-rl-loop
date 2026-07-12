@@ -269,18 +269,24 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   systemctl daemon-reload
   systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'
   systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME'
-  pid=\$(systemctl show -p MainPID --value '$TAKYON_REMOTE_SERVICE_NAME')
-  [[ \"\$pid\" != 0 ]]
-  process_env=\$(tr '\\000' '\\n' < \"/proc/\$pid/environ\")
-  grep -Fxq 'TAKYON_STRIPE_CHECKOUT_DISABLED=$TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED' <<<\"\$process_env\"
-  grep -Fxq 'TAKYON_STRIPE_ACCOUNT_ID=acct_1TXWsW7tYL4lkVC6' <<<\"\$process_env\"
-  grep -Fxq 'TAKYON_STRIPE_MODE=live' <<<\"\$process_env\"
-  grep -Fxq 'TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED=1' <<<\"\$process_env\"
-  grep -Fxq 'TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=1' <<<\"\$process_env\"
+  ready=0
   for _ in \$(seq 1 30); do
-    curl -fsS http://10.116.0.2:8000/healthz >/dev/null && break
+    pid=\$(systemctl show -p MainPID --value '$TAKYON_REMOTE_SERVICE_NAME')
+    if [[ \"\$pid\" != 0 && -r \"/proc/\$pid/environ\" ]] \
+      && curl -fsS http://10.116.0.2:8000/healthz >/dev/null; then
+      process_env=\$(tr '\\000' '\\n' < \"/proc/\$pid/environ\")
+      if grep -Fxq 'TAKYON_STRIPE_CHECKOUT_DISABLED=$TAKYON_EXPECT_STRIPE_CHECKOUT_DISABLED' <<<\"\$process_env\" \
+        && grep -Fxq 'TAKYON_STRIPE_ACCOUNT_ID=acct_1TXWsW7tYL4lkVC6' <<<\"\$process_env\" \
+        && grep -Fxq 'TAKYON_STRIPE_MODE=live' <<<\"\$process_env\" \
+        && grep -Fxq 'TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED=1' <<<\"\$process_env\" \
+        && grep -Fxq 'TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=1' <<<\"\$process_env\"; then
+        ready=1
+        break
+      fi
+    fi
     sleep 1
   done
+  [[ \"\$ready\" == 1 ]]
   curl -fsS http://10.116.0.2:8000/healthz >/dev/null
   test \"\$(readlink -f /opt/takyon/venvs/safebox-current)\" = '$remote_venv_candidate'"
 activation_started=0
