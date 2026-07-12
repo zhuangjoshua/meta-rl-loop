@@ -137,7 +137,7 @@ cd deploy/cloudflare/product-worker
 wrangler r2 bucket create product-sites
 
 # deploy tracked worker code from a clean revision already pushed to origin/main;
-# the command resolves the Cloudflare token through Safebox and passes no operator authority to Wrangler
+# the command reads the non-vendable infra token over root-only Safebox SSH and passes no operator authority to Wrangler
 cd ../../..
 scripts/takyon-operator-prod.sh product-edge-deploy
 

@@ -31,7 +31,18 @@ def test_product_edge_deploy_is_clean_published_and_secret_isolated():
     assert 'git -C "$ROOT" fetch --quiet origin main' in command
     assert 'git -C "$ROOT" rev-parse refs/remotes/origin/main' in command
     assert '[[ "$head" == "$published" ]]' in command
-    assert 'safebox.first_env_backed_value("CLOUDFLARE_API_TOKEN")' in command
+    assert "CLOUDFLARE_API_TOKEN is intentionally NOT vendable through /v1/env" in command
+    assert "safebox.read_env_backed_value('CLOUDFLARE_API_TOKEN')" in command
+    assert '"ssh",' in command
+    assert '"IdentitiesOnly=yes"' in command
+    assert '"BatchMode=yes"' in command
+    assert "except (OSError, subprocess.TimeoutExpired)" in command
+    assert '"/opt/takyon/venvs/safebox-current/bin/python -"' in command
+    assert "load_dotenv(path, override=True)" in command
+    assert "('/opt/takyon/.takyon/.env', '/opt/takyon/secrets/.env')" in command
+    assert "first_env_backed_value" not in command
+    assert "load_operator_env" not in command
+    assert "require_tunnel" not in command
     assert 'env["CLOUDFLARE_API_TOKEN"] = token' in command
     assert 'safe_names = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")' in command
     assert '"wrangler@4.110.0", "deploy"' in command

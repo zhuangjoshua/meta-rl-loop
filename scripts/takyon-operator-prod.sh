@@ -16,6 +16,8 @@ TAKYON_CLI_PYTHON="$RUNTIME_DIR/.venv/bin/python"
 
 SSH_HOST="${TAKYON_OPERATOR_VPS_HOST:-root@137.184.75.57}"
 SSH_KEY="${TAKYON_OPERATOR_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
+SAFEBOX_SSH_HOST="${TAKYON_SAFEBOX_VPS_HOST:-root@67.205.158.170}"
+SAFEBOX_SSH_KEY="${TAKYON_SAFEBOX_VPS_KEY:-$SSH_KEY}"
 SAFEBOX_PRIVATE_HOST="${TAKYON_REMOTE_SAFEBOX_PRIVATE_HOST:-10.116.0.2}"
 SAFEBOX_PRIVATE_PORT="${TAKYON_REMOTE_SAFEBOX_PRIVATE_PORT:-8000}"
 LOCAL_SAFEBOX_PORT="${TAKYON_LOCAL_SAFEBOX_PORT:-8765}"
@@ -1777,8 +1779,10 @@ cmd_run() {
 }
 
 cmd_product_edge_deploy() {
-  load_operator_env
-  require_tunnel
+  [[ "$TARGET" == "prod" ]] || {
+    echo "takyon-prod: product-edge deployment is production-only" >&2
+    return 1
+  }
   local edge_dir="$ROOT/deploy/cloudflare/product-worker"
   [[ -f "$edge_dir/worker.js" && -f "$edge_dir/wrangler.toml" ]] || {
     echo "takyon-prod: tracked product-edge worker is missing" >&2
@@ -1786,6 +1790,14 @@ cmd_product_edge_deploy() {
   }
   command -v npx >/dev/null 2>&1 || {
     echo "takyon-prod: npx is required to deploy the product-edge worker" >&2
+    return 1
+  }
+  command -v ssh >/dev/null 2>&1 || {
+    echo "takyon-prod: ssh is required to read the product-edge deploy credential" >&2
+    return 1
+  }
+  [[ -f "$SAFEBOX_SSH_KEY" ]] || {
+    echo "takyon-prod: Safebox deploy key is missing" >&2
     return 1
   }
   local dirty head published
@@ -1804,23 +1816,75 @@ cmd_product_edge_deploy() {
     echo "takyon-prod: refusing product-edge deploy from unpublished revision $head" >&2
     return 1
   }
-  # Resolve the infra token through the existing Safebox authority route and exec Wrangler with a
-  # minimal environment. The token is never printed, persisted, or inherited alongside operator DB
-  # authority; only this one Cloudflare control-plane process receives it.
+  # CLOUDFLARE_API_TOKEN is intentionally NOT vendable through /v1/env. Retrieve this infra-only
+  # deployment credential over the same root-only SSH boundary used by the tracked Safebox deploy,
+  # keep it in memory, and exec pinned Wrangler with a minimal environment. The token is never
+  # written to a terminal, log, or disk, or inherited alongside operator DB authority.
   cd "$ROOT"
-  PYTHONPATH="$RUNTIME_DIR" exec "$RUNTIME_DIR/.venv/bin/python" - "$edge_dir" <<'PY'
+  PYTHONPATH="$RUNTIME_DIR" exec "$RUNTIME_DIR/.venv/bin/python" - \
+    "$edge_dir" "$SAFEBOX_SSH_HOST" "$SAFEBOX_SSH_KEY" <<'PY'
+import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
-from plugins.takyon import safebox
-
 edge_dir = Path(sys.argv[1]).resolve()
-token = str(safebox.first_env_backed_value("CLOUDFLARE_API_TOKEN") or "").strip()
-if not token:
-    raise SystemExit("takyon-prod: CLOUDFLARE_API_TOKEN is unavailable from Safebox")
+safebox_host = str(sys.argv[2]).strip()
+safebox_key = str(sys.argv[3]).strip()
 safe_names = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")
-env = {name: os.environ[name] for name in safe_names if os.environ.get(name)}
+base_env = {name: os.environ[name] for name in safe_names if os.environ.get(name)}
+try:
+    remote = subprocess.run(
+        [
+            "ssh",
+            "-i",
+            safebox_key,
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            safebox_host,
+            "env PYTHONPATH=/opt/takyon/hermes-agent-main "
+            "/opt/takyon/venvs/safebox-current/bin/python -",
+        ],
+        input=(
+            "import json\n"
+            "import os\n"
+            "from dotenv import load_dotenv\n"
+            "for path in ('/opt/takyon/.takyon/.env', '/opt/takyon/secrets/.env'):\n"
+            "    load_dotenv(path, override=True)\n"
+            "os.environ['TAKYON_HOME'] = '/opt/takyon/.takyon'\n"
+            "os.environ['TAKYON_HOST_ROLE'] = 'safebox'\n"
+            "os.environ['TAKYON_ENV'] = 'prod'\n"
+            "os.environ.pop('TAKYON_SAFEBOX_URL', None)\n"
+            "from plugins.takyon import safebox\n"
+            "value = str(safebox.read_env_backed_value('CLOUDFLARE_API_TOKEN') or '').strip()\n"
+            "if not value: raise SystemExit('cloudflare token unavailable')\n"
+            "print(json.dumps({'token': value}), end='')\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+        env=base_env,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit("takyon-prod: could not read the Cloudflare credential from Safebox") from None
+if remote.returncode != 0:
+    raise SystemExit("takyon-prod: CLOUDFLARE_API_TOKEN is unavailable on Safebox")
+try:
+    payload = json.loads(str(remote.stdout or ""))
+except (TypeError, ValueError):
+    raise SystemExit("takyon-prod: Safebox returned an invalid Cloudflare credential response") from None
+token = str(payload.get("token") or "").strip() if isinstance(payload, dict) else ""
+if not token:
+    raise SystemExit("takyon-prod: CLOUDFLARE_API_TOKEN is unavailable on Safebox")
+env = dict(base_env)
 env["CLOUDFLARE_API_TOKEN"] = token
 os.chdir(edge_dir)
 os.execvpe(
