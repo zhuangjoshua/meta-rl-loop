@@ -423,6 +423,64 @@ def test_action_bundle_allows_erased_platform_type_import(tmp_path):
     assert bundle["file_count"] == 2
 
 
+def test_action_bundle_resolves_extensionless_erased_typescript_import(tmp_path):
+    root = tmp_path / "site"
+    (root / "actions").mkdir(parents=True)
+    (root / "_takyon").mkdir()
+    (root / "_takyon" / "runtime-client.d.ts").write_text(
+        "export type RecordRef = string & { readonly __opaque: unique symbol };\n",
+        encoding="utf-8",
+    )
+    (root / "actions" / "coach.ts").write_text(
+        'import type { RecordRef } from "../_takyon/runtime-client";\n'
+        "export default async function run(payload: TakyonActionPayload, "
+        "ctx: TakyonActionContext) {\n"
+        "  return { ref: payload.ref as RecordRef, callable: ctx.isRailCallable('records') };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    bundle = app_actions.build_action_bundle(root)
+
+    # The declaration is erased and therefore excluded from the immutable runtime bundle.
+    assert bundle["file_count"] == 1
+
+
+def test_action_bundle_extensionless_type_import_still_cannot_escape_site(tmp_path):
+    root = tmp_path / "site"
+    (root / "actions").mkdir(parents=True)
+    (tmp_path / "outside.d.ts").write_text("export type Secret = string;\n", encoding="utf-8")
+    (root / "actions" / "coach.ts").write_text(
+        'import type { Secret } from "../../outside";\n'
+        "export default async function run(payload: TakyonActionPayload, "
+        "ctx: TakyonActionContext) { return { payload, ctx: Boolean(ctx) } }\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(app_actions.ActionContractError, match="escapes or is missing"):
+        app_actions.build_action_bundle(root)
+
+
+@pytest.mark.parametrize("loop", [False, True])
+def test_action_bundle_rejects_symlinked_type_import_components(tmp_path, loop):
+    root = tmp_path / "site"
+    (root / "actions").mkdir(parents=True)
+    types = root / "types"
+    types.mkdir()
+    (types / "contract.d.ts").write_text("export type Ref = string;\n", encoding="utf-8")
+    alias = root / "alias"
+    alias.symlink_to(alias if loop else types, target_is_directory=True)
+    (root / "actions" / "coach.ts").write_text(
+        'import type { Ref } from "../alias/contract";\n'
+        "export default async function run(payload: TakyonActionPayload, "
+        "ctx: TakyonActionContext) { return { payload, ctx: Boolean(ctx) } }\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(app_actions.ActionContractError, match="escapes or is missing"):
+        app_actions.build_action_bundle(root)
+
+
 def test_action_bundle_ignores_import_and_any_examples_in_comments_and_strings(tmp_path):
     root = tmp_path / "site"
     (root / "actions").mkdir(parents=True)

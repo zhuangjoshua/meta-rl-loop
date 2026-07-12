@@ -3956,6 +3956,7 @@ def drain_tick(
     max_jobs: int | None = None,
     heartbeat_conn_factory=None,
     min_queue_age_seconds: float | None = None,
+    worker_release_sha: str | None = None,
 ) -> dict[str, int]:
     """One drain tick on an open autocommit connection: optionally dispatch due wakes, reclaim stale
     claims, then drain queued jobs through ``jobs.run_one`` until the queue is empty (or ``stop`` is
@@ -4004,6 +4005,7 @@ def drain_tick(
             exclusive_pool=exclusive_pool,
             heartbeat_conn_factory=heartbeat_conn_factory,
             min_queue_age_seconds=min_queue_age_seconds,
+            worker_release_sha=worker_release_sha,
         )
         if outcome is None:
             break

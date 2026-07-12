@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { client, defaultSubscribePlanKey, type TakyonActionError } from "./takyon";
+import {
+  client,
+  defaultSubscribePlanKey,
+  type AccountPayload,
+  type AppEntitlement,
+  type TakyonActionError,
+} from "./takyon";
 import { setSubscribeAfterAuth, shouldSubscribeAfterAuth } from "./product-auth";
 
 export interface SessionUser {
@@ -7,10 +13,6 @@ export interface SessionUser {
 }
 
 export interface SessionPayload {
-  [key: string]: unknown;
-}
-
-export interface AccountPayload {
   [key: string]: unknown;
 }
 
@@ -25,6 +27,7 @@ export type ViewerAccessState =
   | "account_unavailable"
   | "subscription_required"
   | "past_due"
+  | "canceled"
   | "ready";
 
 export interface ViewerAccessResult {
@@ -69,9 +72,9 @@ function accountUser(payload: AccountPayload | null): SessionUser | null {
   return payload && isObject(payload.user) ? (payload.user as SessionUser) : null;
 }
 
-function accountEntitlements(payload: AccountPayload | null): Record<string, unknown>[] {
+function accountEntitlements(payload: AccountPayload | null): AppEntitlement[] {
   return payload && Array.isArray(payload.entitlements)
-    ? payload.entitlements.filter((item): item is Record<string, unknown> => isObject(item))
+    ? payload.entitlements.filter((item): item is AppEntitlement => isObject(item))
     : [];
 }
 
@@ -79,14 +82,14 @@ function isPaidTier(value: unknown): boolean {
   return ["paid", "pro", "trial"].includes(lowerText(value));
 }
 
-function entitlementStatus(entitlement: Record<string, unknown>): string {
+function entitlementStatus(entitlement: AppEntitlement): string {
   const status = lowerText(entitlement.status);
   if (status === "paid") return "active";
   if (status === "cancelled") return "canceled";
   return status;
 }
 
-function activePaidEntitlement(entitlement: Record<string, unknown>): boolean {
+function activePaidEntitlement(entitlement: AppEntitlement): boolean {
   const status = entitlementStatus(entitlement);
   const tier = lowerText(entitlement.tier);
   if (!["active", "trialing", "paid"].includes(status)) return false;
@@ -157,6 +160,16 @@ export function subscriptionStateFromAccount(payload: AccountPayload | null): st
   return "none";
 }
 
+export function viewerAccessStateForSubscription(
+  entitled: boolean,
+  subscriptionState: string,
+): ViewerAccessState {
+  if (entitled) return "ready";
+  if (subscriptionState === "past_due") return "past_due";
+  if (subscriptionState === "canceled") return "canceled";
+  return "subscription_required";
+}
+
 export function resolveViewerCta(access: Pick<ViewerAccessResult, "authenticated" | "entitled" | "state" | "subscriptionState"> | null): ViewerCta {
   if (!access || !access.authenticated || access.state === "anonymous") {
     return {
@@ -192,6 +205,15 @@ export function resolveViewerCta(access: Pick<ViewerAccessResult, "authenticated
       secondaryHref: "/app/profile",
       secondaryLabel: "Account",
       membershipState: access.subscriptionState || "past_due",
+    };
+  }
+  if (access.state === "canceled") {
+    return {
+      primaryHref: "/app?intent=subscribe",
+      primaryLabel: "Subscribe again",
+      secondaryHref: "/app/profile",
+      secondaryLabel: "Account",
+      membershipState: access.subscriptionState || "canceled",
     };
   }
   return {
@@ -504,13 +526,7 @@ export function useViewerAccess(): ViewerAccessResult {
         setUser(accountUser(nextAccount) ?? nextSessionUser);
         setEntitled(nextEntitled);
         setSubscriptionState(nextSubscriptionState);
-        setState(
-          nextEntitled
-            ? "ready"
-            : nextSubscriptionState === "past_due" || nextSubscriptionState === "canceled"
-              ? "past_due"
-              : "subscription_required",
-        );
+        setState(viewerAccessStateForSubscription(nextEntitled, nextSubscriptionState));
         setError(null);
       } catch (err) {
         if (!aliveRef.current) return;

@@ -42,7 +42,6 @@ TAKYON_SMOKE_MAX_TIME="${TAKYON_SMOKE_MAX_TIME:-10}"
 TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS="${TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS:-900}"
 TAKYON_DEPLOY_DRAIN_POLL_SECONDS="${TAKYON_DEPLOY_DRAIN_POLL_SECONDS:-5}"
 TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS="${TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS:-1800}"
-TAKYON_DEPLOY_WORKER_STOP_GRACE_SECONDS="${TAKYON_DEPLOY_WORKER_STOP_GRACE_SECONDS:-960}"
 TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
 TAKYON_REQUIRE_XURL_AUTH="${TAKYON_REQUIRE_XURL_AUTH:-0}"
 TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
@@ -185,8 +184,7 @@ fi
 for numeric_setting in \
   TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS \
   TAKYON_DEPLOY_DRAIN_POLL_SECONDS \
-  TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS \
-  TAKYON_DEPLOY_WORKER_STOP_GRACE_SECONDS; do
+  TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS; do
   numeric_value="${!numeric_setting}"
   if ! [[ "$numeric_value" =~ ^[0-9]+$ ]] || (( numeric_value < 1 )); then
     echo "$numeric_setting must be a positive integer" >&2
@@ -198,10 +196,14 @@ operator_worker_quiesce_attempted=0
 operator_dashboard_stopped=0
 operator_runtime_activation_started=0
 operator_services_activated=0
+worker_release_fence_activated=0
+worker_release_previous_sha=""
+worker_release_activation_receipt=""
 
 restore_operator_services_on_failure() {
   local exit_status="$?"
   local operator_rollback_ready=1
+  local release_restore_receipt=""
   if [[ "$operator_worker_quiesce_attempted" == "1" && "$operator_services_activated" != "1" ]]; then
     echo "operator deploy did not activate; restoring core services before exit" >&2
     if [[ "$operator_runtime_activation_started" == "1" ]]; then
@@ -245,6 +247,18 @@ restore_operator_services_on_failure() {
         operator_rollback_ready=0
       fi
     fi
+    if [[ "$operator_rollback_ready" == "1" && "$worker_release_fence_activated" == "1" ]]; then
+      if release_restore_receipt="$(
+        remote_worker_release_fence restore \
+          "$TAKYON_DEPLOY_SOURCE_REVISION" "$worker_release_previous_sha"
+      )"; then
+        echo "worker release fence restored: $release_restore_receipt" >&2
+        worker_release_fence_activated=0
+      else
+        echo "worker release fence restore refused; target work may have started" >&2
+        operator_rollback_ready=0
+      fi
+    fi
     if [[ "$operator_rollback_ready" == "1" ]]; then
       ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
         "set +e
@@ -254,7 +268,9 @@ restore_operator_services_on_failure() {
           systemctl restart takyon-dashboard.service
         fi
         if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
-          systemctl restart takyon-worker.service
+          # Queue the restart behind any still-draining stop job. The deploy must never turn a
+          # bounded drain timeout into SIGKILL of a product writer.
+          systemctl restart --no-block takyon-worker.service
         fi
         systemctl is-active --quiet takyon-dashboard.service" \
         || true
@@ -276,16 +292,16 @@ quiesce_remote_worker() {
     if ! grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
       exit 0
     fi
-    # SIGTERM tells WorkerPool to stop claiming immediately and join every in-flight lane. Give a
-    # full 900-second product task an additional minute to finish instead of letting systemd's old
-    # 120-second stop ceiling SIGKILL and requeue it.
+    # SIGTERM tells WorkerPool to stop claiming immediately and join every in-flight lane. The
+    # transient infinite stop bound is deliberate: deployment may time out and report blockers,
+    # but it must never SIGKILL a running bootstrap/product writer. --no-block lets the tracked
+    # database drain below report exact Mac/VPS blockers while systemd waits.
     install -d -m 0755 /run/systemd/system/takyon-worker.service.d
-    printf '%s\n' '[Service]' 'TimeoutStopSec=${TAKYON_DEPLOY_WORKER_STOP_GRACE_SECONDS}s' \
+    printf '%s\n' '[Service]' 'TimeoutStopSec=infinity' \
       > /run/systemd/system/takyon-worker.service.d/90-takyon-deploy-stop-grace.conf
     chmod 0644 /run/systemd/system/takyon-worker.service.d/90-takyon-deploy-stop-grace.conf
     systemctl daemon-reload
-    systemctl stop takyon-worker.service
-    systemctl is-active --quiet takyon-worker.service && exit 1 || true"
+    systemctl stop --no-block takyon-worker.service"
 }
 
 TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
@@ -391,6 +407,157 @@ exec "$TAKYON_REMOTE_RUNTIME/.venv/bin/takyon-cli" migrate
 REMOTE_MIGRATE
 }
 
+# The release singleton is authority state, not runtime configuration. Only the root-isolated
+# migration DSN may change it; no operator service or Mac shell receives that credential.
+remote_worker_release_fence() {
+  local action="$1"
+  local target_release_sha="$2"
+  local previous_release_sha="${3:-}"
+  case "$action" in
+    activate|inspect|restore) ;;
+    *) echo "invalid worker release fence action: $action" >&2; return 2 ;;
+  esac
+  [[ "$target_release_sha" =~ ^[0-9a-f]{40}$ ]] \
+    || { echo "invalid target worker release SHA" >&2; return 2; }
+  if [[ -n "$previous_release_sha" && ! "$previous_release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "invalid previous worker release SHA" >&2
+    return 2
+  fi
+
+  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+    "exec env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root \
+      PYTHONPATH='$TAKYON_REMOTE_STAGED_RUNTIME' \
+      '$TAKYON_REMOTE_STAGED_RUNTIME/.venv/bin/python' - '$action' '$target_release_sha' '$previous_release_sha'" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+
+import psycopg
+
+from plugins.takyon.runtime_app import assert_takyon_pg_role
+
+
+def read_migration_dsn() -> str:
+    directory = Path('/root/.config/takyon/migration')
+    path = directory / 'database-url'
+    directory_info = directory.lstat()
+    path_info = path.lstat()
+    if (
+        not stat.S_ISDIR(directory_info.st_mode)
+        or stat.S_ISLNK(directory_info.st_mode)
+        or (directory_info.st_uid, directory_info.st_gid, stat.S_IMODE(directory_info.st_mode))
+        != (0, 0, 0o700)
+    ):
+        raise RuntimeError('root-only migration credential directory permissions invalid')
+    if (
+        not stat.S_ISREG(path_info.st_mode)
+        or stat.S_ISLNK(path_info.st_mode)
+        or (path_info.st_uid, path_info.st_gid, stat.S_IMODE(path_info.st_mode))
+        != (0, 0, 0o600)
+    ):
+        raise RuntimeError('root-only migration credential permissions invalid')
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (path_info.st_dev, path_info.st_ino):
+            raise RuntimeError('root-only migration credential changed while opening')
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > 16_384:
+                raise RuntimeError('root-only migration credential is oversized')
+        value = b''.join(chunks).decode('utf-8').strip()
+    finally:
+        os.close(fd)
+    if not value.startswith(('postgres://', 'postgresql://')) or any(ch.isspace() for ch in value):
+        raise RuntimeError('root-only migration credential malformed')
+    return value
+
+
+action, target_release_sha, previous_release_sha = sys.argv[1:4]
+with psycopg.connect(read_migration_dsn(), autocommit=False, prepare_threshold=None) as conn:
+    assert_takyon_pg_role(conn, 'migration')
+    if action == 'activate':
+        receipt = conn.execute(
+            'select takyon_activate_worker_release(%s)', (target_release_sha,)
+        ).fetchone()[0]
+    elif action == 'restore':
+        receipt = conn.execute(
+            'select takyon_restore_worker_release(%s, %s)',
+            (target_release_sha, previous_release_sha),
+        ).fetchone()[0]
+    else:
+        active_release_sha = conn.execute(
+            'select takyon_get_worker_active_release()'
+        ).fetchone()[0]
+        jobs = conn.execute(
+            """
+            select id::text, business_slug, kind, status, attempts,
+                   required_release_sha, claimed_release_sha, coalesce(locked_by, '')
+            from jobs
+            where status = 'running'
+               or (status = 'queued' and required_release_sha <> %s)
+            order by created_at, id
+            """,
+            (target_release_sha,),
+        ).fetchall()
+        pools = conn.execute(
+            """
+            select pool_id, hostname, status, release_sha, lease_expires_at::text
+            from worker_pools
+            where status in ('joining', 'active')
+              and lease_expires_at > now()
+              and release_sha <> %s
+            order by pool_id
+            """,
+            (target_release_sha,),
+        ).fetchall()
+        receipt = {
+            'active_release_sha': active_release_sha,
+            'jobs': [list(row) for row in jobs],
+            'pools': [list(row) for row in pools],
+            'ok': active_release_sha == target_release_sha and not jobs and not pools,
+        }
+    conn.commit()
+print(json.dumps(receipt, default=str, separators=(',', ':'), sort_keys=True))
+PY
+}
+
+activate_remote_worker_release() {
+  worker_release_activation_receipt="$(
+    remote_worker_release_fence activate "$TAKYON_DEPLOY_SOURCE_REVISION"
+  )"
+  worker_release_previous_sha="$(
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["previous_release_sha"])' \
+      <<<"$worker_release_activation_receipt"
+  )"
+  [[ "$worker_release_previous_sha" =~ ^[0-9a-f]{40}$ ]] \
+    || { echo "worker release activation returned an invalid previous SHA" >&2; return 1; }
+  worker_release_fence_activated=1
+  echo "worker release fence activated: $worker_release_activation_receipt"
+}
+
+verify_remote_worker_release_cutover() {
+  local receipt
+  receipt="$(remote_worker_release_fence inspect "$TAKYON_DEPLOY_SOURCE_REVISION")"
+  if ! python3 -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)' \
+    <<<"$receipt"; then
+    echo "worker release cutover is not sealed to $TAKYON_DEPLOY_SOURCE_REVISION: $receipt" >&2
+    return 1
+  fi
+  echo "worker release cutover verified: $receipt"
+}
+
 wait_for_remote_runtime_idle() {
   if ! ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
     "grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null"; then
@@ -399,14 +566,15 @@ wait_for_remote_runtime_idle() {
 
   local deadline=$((SECONDS + TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS))
   while true; do
-    local counts
-    counts="$(
+    local probe summary
+    probe="$(
       ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
         "set -euo pipefail
         env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
           '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
 from plugins.takyon.core import load_takyon_env
 from plugins.takyon.runtime_app import assert_takyon_pg_role, resolve_database_url
+import json
 import psycopg
 
 load_takyon_env()
@@ -415,61 +583,47 @@ with psycopg.connect(resolve_database_url(plane='operator'), autocommit=True, pr
     with conn.cursor() as cur:
         cur.execute(
             \"\"\"
-            SELECT COUNT(*)
-            FROM business_work_requests AS work_request
-            WHERE work_request.status = 'running'
-              AND NULLIF(work_request.updated_at, '')::timestamptz >= (NOW() - %s::interval)
-              -- A live Mac worker is outside the VPS restart boundary. Ignore its mirrored work
-              -- request only when no other queued/running execution for that request has an
-              -- unknown or non-Mac owner. Missing links and ambiguous owners remain counted.
-              AND NOT (
-                  EXISTS (
-                      SELECT 1
-                      FROM jobs AS mac_job
-                      WHERE mac_job.payload->>'work_request_id' = work_request.id
-                        AND mac_job.status = 'running'
-                        AND COALESCE(mac_job.locked_by, '') LIKE 'mac-operator-%%'
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM jobs AS other_job
-                      WHERE other_job.payload->>'work_request_id' = work_request.id
-                        AND other_job.status = 'running'
-                        AND (
-                            COALESCE(other_job.locked_by, '') NOT LIKE 'mac-operator-%%'
-                        )
-                  )
-              )
+            SELECT id, business_slug, kind, status
+            FROM business_work_requests
+            WHERE status = 'running'
+              AND NULLIF(updated_at, '')::timestamptz >= (NOW() - %s::interval)
+            ORDER BY created_at, id
             \"\"\",
             (f\"$TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS seconds\",),
         )
-        work_requests = int(cur.fetchone()[0] or 0)
-        # Restarting the operator VPS services cannot terminate a job claimed by an operator Mac;
-        # those workers execute from their own local runtime trees. Drain only claims that may live
-        # in the target-host process we are about to restart, while still failing closed for empty or
-        # unknown owner labels.
+        work_requests = list(cur.fetchall())
         cur.execute(
             \"\"\"
-            SELECT COUNT(*)
+            SELECT id::text, business_slug, kind, status, attempts,
+                   COALESCE(locked_by, '')
             FROM jobs
             WHERE status = 'running'
-              AND COALESCE(locked_by, '') NOT LIKE 'mac-operator-%'
+               OR (status = 'queued' AND attempts > 0)
+            ORDER BY created_at, id
             \"\"\"
         )
-        worker_jobs = int(cur.fetchone()[0] or 0)
-print(f\"{work_requests} {worker_jobs}\")
+        jobs = list(cur.fetchall())
+print(f\"{len(work_requests)} {len(jobs)}\")
+for row in work_requests:
+    print('work_request ' + json.dumps(list(row), default=str, separators=(',', ':')))
+for row in jobs:
+    print('job ' + json.dumps(list(row), default=str, separators=(',', ':')))
 PY"
     )"
-    local queued_or_running_work_requests="${counts%% *}"
-    local running_worker_jobs="${counts##* }"
-    if [[ "$queued_or_running_work_requests" == "0" && "$running_worker_jobs" == "0" ]]; then
+    summary="${probe%%$'\n'*}"
+    local running_work_requests blocking_jobs
+    read -r running_work_requests blocking_jobs <<<"$summary"
+    if [[ "$running_work_requests" == "0" \
+      && "$blocking_jobs" == "0" ]]; then
       return 0
     fi
     if (( SECONDS >= deadline )); then
-      echo "deploy drain timed out with ${queued_or_running_work_requests} active work request(s) and ${running_worker_jobs} running worker job(s)" >&2
+      echo "deploy cutover timed out: ${running_work_requests} recent running work request(s), ${blocking_jobs} running/previously-attempted job(s)" >&2
+      echo "no job was killed or repinned; resolve the exact durable rows, then redeploy:" >&2
+      printf '%s\n' "$probe" >&2
       return 1
     fi
-    echo "waiting for operator runtime to go idle: ${queued_or_running_work_requests} active work request(s), ${running_worker_jobs} running worker job(s)" >&2
+    echo "waiting for sealed operator cutover: ${running_work_requests} recent running work request(s), ${blocking_jobs} running/previously-attempted job(s)" >&2
     sleep "$TAKYON_DEPLOY_DRAIN_POLL_SECONDS"
   done
 }
@@ -494,10 +648,6 @@ preflight_remote_staged_runtime() {
 preflight_remote_staged_runtime
 wait_for_remote_runtime_idle
 
-# Migrations are additive and run against the newly rsynced tree after the VPS worker has stopped
-# accepting work. The dashboard remains healthy until the short stop/restart cutover.
-run_remote_migrations
-
 takyon_prepare_runtime_rollback "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"
 
 operator_dashboard_stopped=1
@@ -506,6 +656,19 @@ TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
 TAKYON_REMOTE_HOME="$TAKYON_REMOTE_HOME" \
 TAKYON_STOP_CORE_SERVICES=1 \
   "$REPAIR_PRODUCT_RUNTIME_SCRIPT"
+
+# The first drain happened while the old dashboard was still serving. Stop that canonical enqueue
+# source, then recheck the shared queue state. Mac pools are never killed; the activation transaction
+# fences their enqueue/claim race and marks every non-target pool draining.
+wait_for_remote_runtime_idle
+
+# Migrations run only after the old release has no running or previously-attempted work. Untouched
+# queued rows are deliberately left for the migration-only activation transaction to repin
+# atomically; idle old pools are marked draining in that same transaction. The release fence stays
+# reversible until that privileged activation step seals the target SHA.
+run_remote_migrations
+activate_remote_worker_release
+verify_remote_worker_release_cutover
 
 operator_runtime_activation_started=1
 takyon_begin_runtime_activation "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"
@@ -562,11 +725,6 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   systemctl is-active --quiet takyon-docker-broker.service
   systemctl restart takyon-dashboard.service
   systemctl is-active --quiet takyon-dashboard.service
-  if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
-    systemctl enable takyon-worker.service >/dev/null
-    systemctl restart takyon-worker.service
-    systemctl is-active --quiet takyon-worker.service
-  fi
   if grep -Eq '^[[:space:]]*(export[[:space:]]+)?(TAKYON_MIGRATION_DATABASE_URL|MIGRATION_DATABASE_URL)=' \
       /opt/takyon/.takyon/.env /opt/takyon/secrets/.env 2>/dev/null; then
     echo 'migration credential remains in a service-readable env file' >&2
@@ -574,7 +732,7 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   fi
   test \"\$(stat -c '%u:%g:%a' /root/.config/takyon/migration)\" = '0:0:700'
   test \"\$(stat -c '%u:%g:%a' /root/.config/takyon/migration/database-url)\" = '0:0:600'
-  for unit in takyon-dashboard.service takyon-worker.service; do
+  for unit in takyon-dashboard.service; do
     pid=\$(systemctl show -p MainPID --value "\$unit")
     [ "\$pid" != 0 ]
     process_env=\$(tr '\\000' '\\n' < "/proc/\$pid/environ")
@@ -658,6 +816,32 @@ if [[ "$operator_smoke_succeeded" != "1" ]]; then
   run_remote_smoke
 fi
 
+# Prove the customer-facing dashboard before opening the queue. Until this point rollback can
+# restore the previous release fence because no target worker has been allowed to attempt a job.
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "set -euo pipefail
+  if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
+    systemctl enable takyon-worker.service >/dev/null
+    systemctl restart takyon-worker.service
+    systemctl is-active --quiet takyon-worker.service
+    pid=\$(systemctl show -p MainPID --value takyon-worker.service)
+    [ \"\$pid\" != 0 ]
+    process_env=\$(tr '\\000' '\\n' < \"/proc/\$pid/environ\")
+    grep -Fx -- 'TAKYON_STRICT_MODEL_ROLES=1' <<<\"\$process_env\" >/dev/null
+    grep -Fx -- 'TAKYON_MODEL=gpt-5.5' <<<\"\$process_env\" >/dev/null
+    grep -Fx -- 'TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
+    grep -Fx -- 'ANTHROPIC_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
+    grep -Fx -- 'ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
+    grep -Fx -- 'ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
+    grep -Fx -- 'ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
+    grep -Fx -- 'CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
+    if grep -Eq '^(TAKYON_MIGRATION_DATABASE_URL|MIGRATION_DATABASE_URL)=' <<<\"\$process_env\"; then
+      echo 'migration credential present in takyon-worker.service process environment' >&2
+      exit 1
+    fi
+  fi"
+
 operator_runtime_activation_started=0
 operator_services_activated=1
 takyon_finalize_runtime_release "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"
+worker_release_fence_activated=0

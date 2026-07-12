@@ -9,6 +9,10 @@ name = "takyon-product-worker"
 main = "worker.js"
 compatibility_date = "2025-06-01"
 
+# Publish owns the per-business route table. Keep workers.dev disabled and omit route/routes so a
+# version upload/deployment cannot replace those independently managed triggers.
+workers_dev = false
+
 # ── R2 binding ──────────────────────────────────────────────────────────────
 # Read-only at runtime (the worker only GETs `<slug>/current` and
 # `<slug>/<build_id>/<rel>`). The bucket holds ONLY public built dist; nothing

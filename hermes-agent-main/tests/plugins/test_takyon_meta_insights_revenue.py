@@ -188,11 +188,3 @@ def test_app_checkout_stamps_only_server_owned_meta_capi_metadata():
     assert 'params["metadata[takyon_meta_pixel_id]"] = meta_pixel_id' in source
     assert 'params["metadata[takyon_meta_site_host]"] = meta_site_host.lower()' in source
     assert "checkout_metadata" not in source[source.index("params: dict[str, Any]") :]
-
-
-def test_dead_legacy_starter_carries_no_pixel_code():
-    # The _subuser_app_starter_*_js family has zero callers (legacy Next starter); Purchase
-    # tracking must live ONLY in the real vite scaffold so nobody mistakes the dead file
-    # for the live implementation again.
-    js = core._subuser_app_starter_access_page_js()
-    assert "fbq" not in js

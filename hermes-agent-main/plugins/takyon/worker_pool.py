@@ -100,6 +100,7 @@ class WorkerPool:
         # an empty reservation set (it would claim nothing at all).
         self.exclusive = bool(exclusive) or (env_exclusive and self.pool_id == env_pool and bool(env_pool))
         self.register = register
+        self.release_sha = _cs.runtime_release_sha()
         self.pool_lease_seconds = max(
             120.0, float(os.getenv("TAKYON_WORKER_POOL_LEASE_SECONDS") or 300.0)
         )
@@ -223,6 +224,7 @@ class WorkerPool:
             stop=stop,
             max_jobs=self.max_jobs if max_jobs is None else max_jobs,
             heartbeat_conn_factory=heartbeat_conn_factory,
+            worker_release_sha=self.release_sha,
         )
 
     def run_one_inline(self, conn) -> "jobs.JobOutcome | None":
@@ -237,6 +239,7 @@ class WorkerPool:
             owner_user_id=self.owner_user_id,
             claim_pool_id=self.pool_id,
             exclusive_pool=False,
+            worker_release_sha=self.release_sha,
         )
 
     # ── the process shell (body lifted verbatim from worker.run_worker_loop) ───────────
@@ -313,6 +316,7 @@ class WorkerPool:
                         exclusive=self.exclusive,
                         concurrency=concurrency,
                         lease_seconds=self.pool_lease_seconds,
+                        release_sha=self.release_sha,
                     )
                     registered = True
                 finally:
@@ -366,6 +370,7 @@ class WorkerPool:
                                 exclusive=self.exclusive,
                                 concurrency=concurrency,
                                 lease_seconds=self.pool_lease_seconds,
+                                release_sha=self.release_sha,
                             )
                     finally:
                         conn.close()
@@ -456,6 +461,7 @@ class WorkerPool:
                         stop=stop,
                         max_jobs=max_jobs,
                         heartbeat_conn_factory=_heartbeat_conn_factory,
+                        worker_release_sha=self.release_sha,
                     )
                     total_drained += counts["drained"]
                 except Exception as exc:  # noqa: BLE001 — a tick failure must not crash the daemon

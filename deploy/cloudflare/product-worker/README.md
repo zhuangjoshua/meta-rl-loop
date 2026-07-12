@@ -146,9 +146,10 @@ cd deploy/cloudflare/product-worker
 wrangler tail takyon-product-worker
 ```
 
-The tracked command uploads an immutable Worker version tagged with the published Git revision,
-then deploys that version at 100%. It does not require a `workers.dev` subdomain and does not
-replace the per-business routes managed by publish.
+The tracked command snapshots `worker.js` and `wrangler.toml` from the clean published Git object,
+uploads a version tagged with that revision, rechecks `HEAD == origin/main`, then deploys the version
+at 100%. `workers_dev = false` is explicit and no trigger command runs, so this cannot require a
+`workers.dev` subdomain or replace the per-business routes managed by publish.
 
 ### Exact route binding
 

@@ -1118,6 +1118,46 @@ def _canonical_action_handler_signature(source: str) -> bool:
     return False
 
 
+def _resolve_bounded_type_import(path: Path, target: str, site_root: Path) -> Path | None:
+    """Resolve an erased relative import with TypeScript's common file spellings.
+
+    Runtime imports remain explicit bundled ``.ts`` files below.  Type-only imports are erased, so
+    they may use normal TypeScript extensionless syntax, but every candidate must still resolve
+    inside product/site.  This intentionally does not implement package or tsconfig path aliases.
+    """
+
+    unresolved = path.parent / target
+    suffixes = (".ts", ".tsx", ".d.ts")
+    candidates = [unresolved]
+    if not unresolved.suffix:
+        candidates.extend(Path(f"{unresolved}{suffix}") for suffix in suffixes)
+        candidates.extend(unresolved / f"index{suffix}" for suffix in suffixes)
+    for candidate in candidates:
+        try:
+            lexical = candidate.absolute()
+            relative = lexical.relative_to(site_root)
+        except (OSError, ValueError):
+            continue
+        current = site_root
+        symlinked = False
+        for part in relative.parts:
+            current /= part
+            if current.is_symlink():
+                symlinked = True
+                break
+        if symlinked:
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if site_root not in resolved.parents:
+            continue
+        if resolved.is_file():
+            return resolved
+    return None
+
+
 def _validate_bundled_action_imports(actions_root: Path, candidates: list[Path]) -> None:
     """Fail publish when TypeScript accepts a module the immutable runtime bundle omits.
 
@@ -1159,9 +1199,9 @@ def _validate_bundled_action_imports(actions_root: Path, candidates: list[Path])
                         f"action module {path.relative_to(actions_root.parent).as_posix()} type-imports "
                         f"unsupported module {target!r}; type-only imports must stay inside product/site"
                     )
-                resolved_type = (path.parent / target).resolve()
                 site_root = actions_root.parent.resolve()
-                if site_root not in resolved_type.parents or not resolved_type.is_file():
+                resolved_type = _resolve_bounded_type_import(path, target, site_root)
+                if resolved_type is None:
                     raise ActionContractError(
                         f"action module {path.relative_to(actions_root.parent).as_posix()} type-import "
                         f"{target!r} escapes or is missing from product/site"

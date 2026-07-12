@@ -83,7 +83,7 @@ def _compile_client(tmp_path: Path) -> Path:
     return output
 
 
-def test_mobile_record_refs_roundtrip_and_keep_legacy_runtime_compatibility(tmp_path):
+def test_mobile_record_refs_roundtrip_as_server_owned_opaque_locators(tmp_path):
     compiled = _compile_client(tmp_path)
     harness = tmp_path / "behavior.mjs"
     harness.write_text(
@@ -119,10 +119,11 @@ const client = createMobileRuntimeClient(
     clearToken: async () => undefined,
   }},
 );
-const serverRef = "takyon-record-v1.%5b1%2c%20%22proposal%22%2c%20%22runtime-owned-42%22%5d";
+const serverRef = "tkr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const canonical = {{
   id: "runtime-owned-42",
   type: "proposal",
+  ref: serverRef,
   title: "Acme SOW",
   data: {{ route_slug: "ui-invented-slug" }},
 }};
@@ -130,7 +131,6 @@ const canonical = {{
 responses.push({{
   success: true,
   id: "envelope-operation-id",
-  ref: "envelope-not-a-record-ref",
   record: canonical,
 }});
 const saved = await client.saveRecord({{
@@ -170,15 +170,15 @@ try {{
   mismatchedIdError = String(error && error.message);
 }}
 
-let conflictingRefAliasesError = "";
+let rawRefAliasError = "";
 try {{
   await client.saveRecord({{
     ref: saved.ref,
-    record_ref: "takyon-record-v1.%5B1%2C%22proposal%22%2C%22other%22%5D",
+    record_ref: "tkr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     data: canonical.data,
   }});
 }} catch (error) {{
-  conflictingRefAliasesError = String(error && error.message);
+  rawRefAliasError = String(error && error.message);
 }}
 
 let conflictingTypeAliasesError = "";
@@ -204,23 +204,10 @@ responses.push({{ success: true, records: [canonical] }});
 const listed = await client.listRecords({{ type: "proposal" }});
 
 responses.push({{ success: true, record: canonical }});
-const legacy = await client.getRecord("proposal", canonical.id);
-
-responses.push({{ success: true, record: canonical }});
-const legacyUpdated = await client.saveRecord({{
-  record_type: "proposal",
-  record_id: canonical.id,
-  title: canonical.title,
-  data: canonical.data,
-}});
-
-responses.push({{ success: true, record: canonical }});
-const legacyDeleted = await client.deleteRecord("proposal", canonical.id);
-
-responses.push({{ success: true, record: canonical }});
 const deleted = await client.deleteRecord(saved.record.ref);
 
-responses.push({{ success: true, records: [{{ ...canonical, ref: serverRef }}] }});
+const secondRef = "tkr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+responses.push({{ success: true, records: [{{ ...canonical, ref: secondRef }}] }});
 const serverReferenced = await client.listRecords({{ type: "proposal" }});
 
 let rawIdError = "";
@@ -233,7 +220,7 @@ try {{
 console.log(JSON.stringify({{
   ref: saved.record.ref,
   flatRef: saved.ref,
-  flatId: saved.id,
+  hasRawId: "id" in saved || "id" in saved.record || "record_id" in saved.record,
   refStableOnRead: read.ref === saved.ref,
   refStableOnUpdate: updated.record.ref === saved.ref,
   refStableOnList: listed.records[0].ref === saved.ref,
@@ -241,20 +228,14 @@ console.log(JSON.stringify({{
   readUrl: calls[1].url,
   updateUrl: calls[2].url,
   updateBody: calls[2].body,
-  legacyUrl: calls[4].url,
-  legacyRef: legacy.ref,
-  legacyUpdateUrl: calls[5].url,
-  legacyUpdatedRef: legacyUpdated.ref,
-  legacyDeleteUrl: calls[6].url,
-  legacyDeletedRef: legacyDeleted.ref,
-  deleteUrl: calls[7].url,
+  deleteUrl: calls[4].url,
   deletedRef: deleted.ref,
   serverRefPreserved: serverReferenced.records[0].ref,
   authorization: calls[0].authorization,
   missingDataError,
   mismatchedTypeError,
   mismatchedIdError,
-  conflictingRefAliasesError,
+  rawRefAliasError,
   conflictingTypeAliasesError,
   conflictingIdAliasesError,
   rawIdError,
@@ -276,37 +257,29 @@ console.log(JSON.stringify({{
     assert proc.returncode == 0, proc.stdout + proc.stderr
     out = json.loads(proc.stdout.strip().splitlines()[-1])
 
-    assert out["ref"].startswith("takyon-record-v1.")
+    assert out["ref"].startswith("tkr_")
     assert out["flatRef"] == out["ref"]
-    assert out["flatId"] == "runtime-owned-42"
+    assert out["hasRawId"] is False
     assert out["refStableOnRead"] is True
     assert out["refStableOnUpdate"] is True
     assert out["refStableOnList"] is True
     assert out["createUrl"].endswith("/records")
-    assert out["readUrl"].endswith("/records/proposal/runtime-owned-42")
-    assert out["updateUrl"].endswith("/records/proposal/runtime-owned-42")
-    assert '"record_id":"runtime-owned-42"' in out["updateBody"]
-    assert "takyon-record-v1" not in out["updateBody"]
-    assert out["legacyUrl"].endswith("/records/proposal/runtime-owned-42")
-    assert out["legacyRef"] == out["ref"]
-    assert out["legacyUpdateUrl"].endswith("/records/proposal/runtime-owned-42")
-    assert out["legacyUpdatedRef"] == out["ref"]
-    assert out["legacyDeleteUrl"].endswith("/records/proposal/runtime-owned-42")
-    assert out["legacyDeletedRef"] == out["ref"]
-    assert out["deleteUrl"].endswith("/records/proposal/runtime-owned-42")
+    assert out["readUrl"].endswith(f"/records/by-ref/{out['ref']}")
+    assert out["updateUrl"].endswith(f"/records/by-ref/{out['ref']}")
+    assert "record_id" not in out["updateBody"]
+    assert "record_type" not in out["updateBody"]
+    assert out["deleteUrl"].endswith(f"/records/by-ref/{out['ref']}")
     assert out["deletedRef"] == out["ref"]
-    assert out["serverRefPreserved"] == (
-        "takyon-record-v1.%5b1%2c%20%22proposal%22%2c%20%22runtime-owned-42%22%5d"
-    )
+    assert out["serverRefPreserved"] == "tkr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     assert out["authorization"] == "Bearer mobile-session"
     assert out["missingDataError"] == "data is required"
-    assert out["mismatchedTypeError"] == "record_type does not match the supplied record ref"
-    assert out["mismatchedIdError"] == "record_id does not match the supplied record ref"
-    assert out["conflictingRefAliasesError"] == "ref does not match the supplied record_ref"
+    assert out["mismatchedTypeError"] == "record_type cannot accompany a ref update"
+    assert out["mismatchedIdError"] == "raw record identifiers are not accepted; use the runtime-owned ref"
+    assert out["rawRefAliasError"] == "raw record identifiers are not accepted; use the runtime-owned ref"
     assert out["conflictingTypeAliasesError"] == "record_type does not match the supplied type"
-    assert out["conflictingIdAliasesError"] == "record_id does not match the supplied id"
+    assert out["conflictingIdAliasesError"] == "raw record identifiers are not accepted; use the runtime-owned ref"
     assert "pass the ref returned by saveRecord" in out["rawIdError"]
-    assert out["callCount"] == 9
+    assert out["callCount"] == 6
 
 
 def test_mobile_generated_sdk_exposes_only_ref_based_record_mutations(tmp_path):

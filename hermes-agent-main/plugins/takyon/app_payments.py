@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from plugins.takyon import app_entitlements, custody, safebox
-from plugins.takyon.app_runtime_constants import subscription_cancellation_policy
+from plugins.takyon.app_runtime_constants import product_runtime_contract
 
 _SUBSCRIPTION_EVENT_TYPES = (
     "customer.subscription.created",
@@ -97,6 +97,16 @@ class CancelableSubscriptionNotFound(AppPaymentError):
 
 class InvalidSubscriptionCancellation(AppPaymentError):
     """Stripe did not confirm immediate cancellation of the exact subscription requested."""
+
+
+def _runtime_contract_payload() -> dict[str, Any]:
+    """Compatibility key plus the typed product contract, both from one source."""
+
+    contract = product_runtime_contract()
+    return {
+        "product_runtime_contract": contract,
+        "subscription_cancellation_policy": contract["subscription"]["cancellation"],
+    }
 
 
 @dataclass(frozen=True)
@@ -1128,7 +1138,7 @@ def cancel_subscription(
                     metadata.get("stripe_subscription_status") or "canceled"
                 ),
                 "effective_immediately": True,
-                "subscription_cancellation_policy": subscription_cancellation_policy(),
+                **_runtime_contract_payload(),
                 "already_canceled": True,
                 "already_canceling": False,
             }
@@ -1212,7 +1222,7 @@ def cancel_subscription(
             "current_period_end": refreshed.current_period_end,
             "stripe_subscription_status": returned_status,
             "effective_immediately": True,
-            "subscription_cancellation_policy": subscription_cancellation_policy(),
+            **_runtime_contract_payload(),
             "already_canceled": False,
             "already_canceling": False,
             "reconciliation_fallback": fallback_reason or None,

@@ -11,7 +11,6 @@ declare const recordRefBrand: unique symbol;
 export type RecordRef = string & { readonly [recordRefBrand]: "TakyonRecordRef" };
 
 export interface AppRecord {
-  id: string;
   type: string;
   ref: RecordRef;
   title?: string | null;
@@ -24,12 +23,12 @@ export interface AppRecord {
 
 export interface RecordResponse extends AppRecord {
   record: AppRecord;
-  [key: string]: unknown;
 }
 
 export interface RecordListResponse {
   records: AppRecord[];
-  [key: string]: unknown;
+  count?: number;
+  next_cursor?: string;
 }
 
 export interface SaveRecordFields {
@@ -60,12 +59,69 @@ export type SaveRecordPayload = SaveRecordFields & (
   | {
       /** Update the record addressed by this exact runtime-owned reference. */
       ref: RecordRef;
-      record_type?: string;
-      type?: string;
+      record_type?: never;
+      type?: never;
     }
 );
 
 export type RuntimePayload = Record<string, any>;
+
+export type SubscriptionState =
+  | "active"
+  | "trialing"
+  | "past_due"
+  | "canceled"
+  | "sandbox_retired"
+  | "none";
+
+export interface SubscriptionCancellationPolicy {
+  readonly version: 1;
+  readonly effective_timing: "immediate";
+  readonly refund_policy: "none";
+}
+
+export interface ProductRuntimeContract {
+  readonly version: 1;
+  readonly subscription: {
+    readonly cancellation: SubscriptionCancellationPolicy;
+  };
+  readonly records: {
+    readonly identifier: "opaque_ref";
+  };
+}
+
+export interface AppEntitlement {
+  status?: SubscriptionState | "cancelled" | "paid" | string;
+  tier?: string;
+  source?: string;
+  plan_key?: string | null;
+  planKey?: string | null;
+  stripe_subscription_id?: string | null;
+  stripeSubscriptionId?: string | null;
+  [key: string]: unknown;
+}
+
+export interface AccountPayload {
+  authenticated?: boolean;
+  user?: Record<string, unknown>;
+  entitlements?: AppEntitlement[];
+  /** Backward-compatible projection; AppKit reads the canonical nested contract below. */
+  subscription_cancellation_policy?: SubscriptionCancellationPolicy;
+  product_runtime_contract: ProductRuntimeContract;
+  [key: string]: unknown;
+}
+
+export interface SubscriptionCancellationResult {
+  recorded: true;
+  cancel_at_period_end: false;
+  effective_immediately: true;
+  stripe_subscription_status: "canceled" | "cancelled";
+  current_period_end?: string | null;
+  already_canceled?: boolean;
+  subscription_cancellation_policy: SubscriptionCancellationPolicy;
+  product_runtime_contract?: ProductRuntimeContract;
+  [key: string]: unknown;
+}
 
 export interface ActionRunner {
   readonly action: string;
@@ -85,8 +141,8 @@ export interface SubuserRuntimeClient {
   logout(): Promise<any>;
   session(): Promise<any>;
 
-  account(): Promise<any>;
-  cancelSubscription(): Promise<any>;
+  account(): Promise<AccountPayload>;
+  cancelSubscription(): Promise<SubscriptionCancellationResult>;
   deleteAccount(): Promise<any>;
   profile(): Promise<any>;
   updateProfile(payload?: RuntimePayload): Promise<any>;

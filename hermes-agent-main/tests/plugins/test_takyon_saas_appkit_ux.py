@@ -220,16 +220,14 @@ def test_subscription_cancel_control_is_starter_owned_and_backend_truthful():
     assert "hasNonterminalStripeSubscription(access.account)" in component
     assert "client.cancelSubscription()" in component
     assert "Cancel subscription now" in component
-    assert "subscription_cancellation_policy" in component
+    assert "product_runtime_contract" in component
     assert 'policy?.effective_timing === "immediate"' in component
     assert 'policy?.refund_policy === "none"' in component
-    assert "outcome.effective_immediately === true" in component
-    assert "outcome.cancel_at_period_end === false" in component
+    assert "SubscriptionCancellationResult" in component
     assert "window.confirm" in component
     assert "setSuccessMessage(cancellationResultCopy(outcome))" in component
     assert "cancellation already succeeded" in component
     assert 'data-takyon-appkit="subscription-cancellation-success"' in component
-    assert "current_period_end" in component
     assert "export function hasNonterminalStripeSubscription" in hooks
     assert "sandbox_retired" in hooks
     assert 'source === "stripe"' in hooks
@@ -255,6 +253,7 @@ def test_backend_cancellation_policy_is_one_machine_source_of_truth():
     }
     account_handler = inspect.getsource(takyon_core.handle_business_read_app_account)
     assert '"subscription_cancellation_policy": subscription_cancellation_policy()' in account_handler
+    assert '"product_runtime_contract": product_runtime_contract()' in account_handler
 
 
 def test_subscription_cancel_conformance_blocks_support_mediation(tmp_path):
@@ -388,14 +387,13 @@ def test_mobile_profile_exposes_the_same_backend_truthful_self_service_cancel():
     assert 'source === "stripe"' in auth
     assert "await client.cancelSubscription()" in cancellation
     assert "Cancel subscription now" in cancellation
-    assert "subscription_cancellation_policy" in cancellation
+    assert "product_runtime_contract" in cancellation
     assert 'policy?.effective_timing === "immediate"' in cancellation
     assert 'policy?.refund_policy === "none"' in cancellation
-    assert "outcome?.effective_immediately === true" in cancellation
-    assert "outcome?.cancel_at_period_end === false" in cancellation
+    assert "SubscriptionCancellationResult" in cancellation
     assert "setCanceledLocally(true)" in cancellation
     assert "Stripe cancellation is complete" in cancellation
-    assert "cancelSubscription(): Promise<any>" in runtime
+    assert "cancelSubscription(): Promise<SubscriptionCancellationResult>" in runtime
     cancel_method = runtime.split("async cancelSubscription()", 1)[1].split("async profile", 1)[0]
     assert 'JSON.stringify({ action: "cancel_subscription" })' in cancel_method
     assert "payload" not in cancel_method

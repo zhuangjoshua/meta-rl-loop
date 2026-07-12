@@ -29,6 +29,7 @@ import os
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -38,6 +39,12 @@ from psycopg.conninfo import make_conninfo  # noqa: E402
 
 from plugins.takyon import billing, jobs  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _local_test_safebox(monkeypatch):
+    # This throwaway database is the test Safebox authority; production roles remain fail-closed.
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
 
 
 def _provision_business(conn, *, allowance_cents: int = 0) -> tuple[str, str]:
@@ -843,6 +850,244 @@ def test_run_one_lost_claim_on_successful_finish_refuses_stale_completion(pg_con
     assert job.status == "completed"
     bal = billing.get_billing_balances(pg_conn, uid)
     assert bal.reserved_cents == 0  # original attempt's hold refunded on the lost-claim finalize
+
+
+def test_product_writer_lease_waits_for_stale_attempt_to_join(pg_conn, monkeypatch):
+    """A requeued retry cannot enter while the superseded handler still owns the business lane."""
+    slug, _uid = _provision_business(pg_conn)
+    jobs.enqueue(
+        pg_conn,
+        slug,
+        "claude.agent_task",
+        idempotency_key=f"writer-lease-{uuid.uuid4().hex}",
+        max_attempts=2,
+    )
+    monkeypatch.setattr(jobs, "_live_local_job_ids", lambda: [])
+    dsn = pg_conn.info.dsn
+
+    def conn_factory():
+        return psycopg.connect(dsn, autocommit=True)
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    outcomes: dict[str, jobs.JobOutcome | None] = {}
+
+    def first_handler(_job):
+        first_entered.set()
+        assert release_first.wait(5)
+        return jobs.JobRunResult(result={"attempt": 1})
+
+    def second_handler(_job):
+        second_entered.set()
+        return jobs.JobRunResult(result={"attempt": 2})
+
+    def run_first():
+        with conn_factory() as conn:
+            outcomes["first"] = jobs.run_one(
+                conn,
+                worker_id="writer-one",
+                handlers={"claude.agent_task": first_handler},
+                heartbeat_interval_seconds=0.05,
+                heartbeat_conn_factory=conn_factory,
+            )
+
+    first_thread = threading.Thread(target=run_first)
+    first_thread.start()
+    assert first_entered.wait(5)
+    running = pg_conn.execute(
+        "select id from jobs where business_slug=%s and status='running'",
+        (slug,),
+    ).fetchone()
+    assert running is not None
+    _go_stale(pg_conn, str(running[0]))
+    assert jobs.requeue_stale(pg_conn, older_than_seconds=900) == 1
+
+    def run_second():
+        with conn_factory() as conn:
+            outcomes["second"] = jobs.run_one(
+                conn,
+                worker_id="writer-two",
+                handlers={"claude.agent_task": second_handler},
+                heartbeat_interval_seconds=0.05,
+                heartbeat_conn_factory=conn_factory,
+            )
+
+    second_thread = threading.Thread(target=run_second)
+    second_thread.start()
+    time.sleep(0.3)
+    assert not second_entered.is_set(), "retry overlapped the stale writer"
+
+    release_first.set()
+    first_thread.join(5)
+    second_thread.join(5)
+    assert not first_thread.is_alive() and not second_thread.is_alive()
+    assert second_entered.is_set()
+    assert outcomes["first"].reason == "lost_claim"
+    assert outcomes["second"].status == "completed"
+
+
+def test_product_writer_lease_preserves_parallel_different_businesses(pg_conn):
+    first_slug, _ = _provision_business(pg_conn)
+    second_slug, _ = _provision_business(pg_conn)
+    for slug in (first_slug, second_slug):
+        jobs.enqueue(
+            pg_conn,
+            slug,
+            "claude.agent_task",
+            idempotency_key=f"parallel-{slug}-{uuid.uuid4().hex}",
+        )
+    dsn = pg_conn.info.dsn
+
+    def conn_factory():
+        return psycopg.connect(dsn, autocommit=True)
+
+    entered: set[str] = set()
+    entered_lock = threading.Lock()
+    both_entered = threading.Event()
+    release = threading.Event()
+    outcomes: list[jobs.JobOutcome | None] = []
+
+    def handler(job):
+        with entered_lock:
+            entered.add(job.business_slug)
+            if len(entered) == 2:
+                both_entered.set()
+        assert release.wait(5)
+        return jobs.JobRunResult(result={"business": job.business_slug})
+
+    def run(worker_id):
+        with conn_factory() as conn:
+            outcomes.append(
+                jobs.run_one(
+                    conn,
+                    worker_id=worker_id,
+                    handlers={"claude.agent_task": handler},
+                    heartbeat_interval_seconds=0.05,
+                    heartbeat_conn_factory=conn_factory,
+                )
+            )
+
+    threads = [threading.Thread(target=run, args=(f"parallel-{i}",)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    assert both_entered.wait(5), "different businesses were serialized"
+    release.set()
+    for thread in threads:
+        thread.join(5)
+    assert len(outcomes) == 2
+    assert all(outcome is not None and outcome.status == "completed" for outcome in outcomes)
+
+
+def test_product_writer_connection_loss_aborts_old_handler_before_replacement_claim(
+    pg_conn,
+    monkeypatch,
+):
+    """Losing the lock socket fails the live generation while its durable lane stays occupied."""
+    slug, _ = _provision_business(pg_conn)
+    first = jobs.enqueue(
+        pg_conn,
+        slug,
+        "claude.agent_task",
+        idempotency_key=f"lease-loss-first-{uuid.uuid4().hex}",
+    )
+    jobs.enqueue(
+        pg_conn,
+        slug,
+        "product.surface_refresh",
+        idempotency_key=f"lease-loss-second-{uuid.uuid4().hex}",
+    )
+    monkeypatch.setattr(jobs, "_PRODUCT_WRITER_LEASE_PROBE_SECONDS", 0.05)
+    dsn = pg_conn.info.dsn
+
+    def conn_factory():
+        return psycopg.connect(dsn, autocommit=True)
+
+    lease_ready = threading.Event()
+    lease_lost = threading.Event()
+    finish_abort = threading.Event()
+    lease_backend_pid: list[int] = []
+    outcome: list[jobs.JobOutcome | None] = []
+
+    def handler(_job):
+        lease_guard = jobs.current_execution_lease_guard()
+        assert lease_guard is not None
+        lease_backend_pid.append(lease_guard.backend_pid)
+        lease_ready.set()
+        while not lease_guard.lost:
+            time.sleep(0.01)
+        lease_lost.set()
+        assert finish_abort.wait(5)
+        lease_guard.assert_owned("handler drain")
+        raise AssertionError("lost lease must raise")
+
+    def run_first():
+        with conn_factory() as conn:
+            outcome.append(
+                jobs.run_one(
+                    conn,
+                    worker_id="lease-loss-owner",
+                    handlers={"claude.agent_task": handler},
+                    heartbeat_interval_seconds=0.05,
+                    heartbeat_conn_factory=conn_factory,
+                )
+            )
+
+    worker = threading.Thread(target=run_first)
+    worker.start()
+    assert lease_ready.wait(5)
+    terminated = pg_conn.execute(
+        "select pg_terminate_backend(%s)",
+        (lease_backend_pid[0],),
+    ).fetchone()
+    assert terminated is not None and bool(terminated[0])
+    assert lease_lost.wait(5)
+
+    # The running durable row still gates this business lane while the old child drains, so no
+    # replacement product handler can enter after the advisory socket disappears.
+    assert jobs.claim_one(pg_conn, worker_id="lease-loss-replacement") is None
+    assert jobs.get_job(pg_conn, first.id).status == "running"
+
+    finish_abort.set()
+    worker.join(10)
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert outcome[0] is not None and outcome[0].status == "failed"
+    assert jobs.get_job(pg_conn, first.id).status == "failed"
+
+
+def test_product_writer_acquires_business_lease_before_budget_reserve(pg_conn, monkeypatch):
+    slug, _ = _provision_business(pg_conn)
+    jobs.enqueue(
+        pg_conn,
+        slug,
+        "claude.agent_task",
+        idempotency_key=f"lease-before-money-{uuid.uuid4().hex}",
+        payload={"estimate_cents": 50},
+    )
+    dsn = pg_conn.info.dsn
+    observed: list[str] = []
+
+    def conn_factory():
+        return psycopg.connect(dsn, autocommit=True)
+
+    def reserve(*_args, **_kwargs):
+        observed.append(jobs.current_execution_lease_key())
+        return SimpleNamespace(allowance_cents=50)
+
+    monkeypatch.setattr(jobs.billing, "reserve", reserve)
+    monkeypatch.setattr(jobs.billing, "settle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(jobs.billing, "refund", lambda *_args, **_kwargs: None)
+
+    outcome = jobs.run_one(
+        pg_conn,
+        worker_id="lease-before-money",
+        handlers={"claude.agent_task": lambda _job: jobs.JobRunResult(result={"ok": True})},
+        heartbeat_conn_factory=conn_factory,
+    )
+
+    assert outcome is not None and outcome.status == "completed"
+    assert observed == [jobs.product_writer_lease_key(slug)]
 
 
 # ── crash recovery ─────────────────────────────────────────────────────────────────────────────────

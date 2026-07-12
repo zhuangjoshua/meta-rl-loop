@@ -1,6 +1,6 @@
 const DEFAULT_FRONTEND_API_MODE = "prefixed_runtime_api";
 const ALLOW_CALL_STATES = new Set(["live", "declared"]);
-const RECORD_REF_PREFIX = "takyon-record-v1.";
+const RECORD_REF_PATTERN = /^tkr_[0-9a-f]{32}$/;
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -47,62 +47,21 @@ function encodeRoutePart(value) {
   return encodeURIComponent(String(value || "").trim());
 }
 
-// A RecordRef is an opaque, serializable handle over the runtime's canonical (type, id) pair.
-// It is deliberately NOT an authority token: the records rail still resolves the current session
-// and owner scope on every read. App code receives refs from save/list/read responses and passes
-// them back unchanged instead of deriving a second identifier from titles, slugs, or form state.
-function recordRefFromRecord(record) {
-  if (!isObject(record)) return "";
-  const type = String(record.type || record.record_type || "").trim();
-  const id = String(record.id || record.record_id || "").trim();
-  if (!type || !id) return "";
-  // Prefer the runtime's exact canonical handle when it supplies one. Older record APIs expose
-  // only type/id, so the deterministic v1 encoding remains the compatibility fallback. Never
-  // replace a valid server ref with a freshly serialized lookalike: product state must preserve
-  // the opaque value byte-for-byte across save/read/update/delete.
-  const existingRef = typeof record.ref === "string" ? record.ref : "";
-  if (existingRef) {
-    try {
-      const existingKey = recordKeyFromRef(existingRef);
-      if (existingKey.type === type && existingKey.id === id) return existingRef;
-    } catch {
-      // A stale/malformed legacy response ref cannot become the locator; synthesize from type/id.
-    }
-  }
-  return `${RECORD_REF_PREFIX}${encodeURIComponent(JSON.stringify([1, type, id]))}`;
-}
-
-function recordKeyFromRef(ref) {
-  if (typeof ref !== "string" || !ref.startsWith(RECORD_REF_PREFIX)) {
+// A RecordRef is a server-owned opaque locator, never an authorization capability. Clients only
+// preserve it byte-for-byte; the backend resolves it under the current business/session scope.
+function requireRecordRef(ref) {
+  if (typeof ref !== "string" || !RECORD_REF_PATTERN.test(ref)) {
     throw new TypeError(
       "record_ref is invalid; pass the ref returned by saveRecord, listRecords, or readRecord",
     );
   }
-  try {
-    const decoded = JSON.parse(decodeURIComponent(ref.slice(RECORD_REF_PREFIX.length)));
-    if (
-      !Array.isArray(decoded) ||
-      decoded.length !== 3 ||
-      decoded[0] !== 1 ||
-      typeof decoded[1] !== "string" ||
-      !decoded[1].trim() ||
-      typeof decoded[2] !== "string" ||
-      !decoded[2].trim()
-    ) {
-      throw new Error("invalid record ref payload");
-    }
-    return { type: decoded[1], id: decoded[2] };
-  } catch {
-    throw new TypeError(
-      "record_ref is invalid; pass the ref returned by saveRecord, listRecords, or readRecord",
-    );
-  }
+  return ref;
 }
 
 function recordWithRef(record) {
-  if (!isObject(record)) return record;
-  const ref = recordRefFromRecord(record);
-  return ref ? { ...record, ref } : record;
+  if (!isObject(record)) throw new TypeError("record response is invalid");
+  const { id: _id, record_id: _recordId, ...publicRecord } = record;
+  return { ...publicRecord, ref: requireRecordRef(record.ref) };
 }
 
 function payloadWithRecordRefs(payload) {
@@ -118,6 +77,8 @@ function payloadWithRecordRefs(payload) {
     for (const [key, value] of Object.entries(record)) {
       out[key] = value;
     }
+    delete out.id;
+    delete out.record_id;
   }
   if (Array.isArray(payload.records)) out.records = payload.records.map(recordWithRef);
   return out;
@@ -165,6 +126,47 @@ async function jsonRequest(url, init = {}) {
     error.status = response.status;
     error.payload = payload;
     throw error;
+  }
+  return payload;
+}
+
+function requireProductRuntimeContract(payload) {
+  const contract = isObject(payload) ? payload.product_runtime_contract : null;
+  const cancellation = isObject(contract?.subscription)
+    ? contract.subscription.cancellation
+    : null;
+  if (
+    !isObject(contract) ||
+    contract.version !== 1 ||
+    !isObject(cancellation) ||
+    cancellation.version !== 1 ||
+    cancellation.effective_timing !== "immediate" ||
+    cancellation.refund_policy !== "none" ||
+    !isObject(contract.records) ||
+    contract.records.identifier !== "opaque_ref"
+  ) {
+    throw new Error("invalid_product_runtime_contract");
+  }
+  return payload;
+}
+
+function requireImmediateCancellationResult(payload) {
+  const policy = isObject(payload) ? payload.subscription_cancellation_policy : null;
+  const status = String(isObject(payload) ? payload.stripe_subscription_status || "" : "")
+    .trim()
+    .toLowerCase();
+  if (
+    !isObject(payload) ||
+    payload.recorded !== true ||
+    payload.cancel_at_period_end !== false ||
+    payload.effective_immediately !== true ||
+    !["canceled", "cancelled"].includes(status) ||
+    !isObject(policy) ||
+    policy.version !== 1 ||
+    policy.effective_timing !== "immediate" ||
+    policy.refund_policy !== "none"
+  ) {
+    throw new Error("invalid_subscription_cancellation_result");
   }
   return payload;
 }
@@ -293,14 +295,18 @@ export function createSubuserRuntimeClient(context = {}) {
     },
     async account() {
       ensureRail("account");
-      return jsonRequest(routeUrl("account"), { method: "GET" });
+      return requireProductRuntimeContract(
+        await jsonRequest(routeUrl("account"), { method: "GET" }),
+      );
     },
     async cancelSubscription() {
       ensureRail("account");
-      return jsonRequest(routeUrl("account"), {
-        method: "POST",
-        body: JSON.stringify({ action: "cancel_subscription" }),
-      });
+      return requireImmediateCancellationResult(
+        await jsonRequest(routeUrl("account"), {
+          method: "POST",
+          body: JSON.stringify({ action: "cancel_subscription" }),
+        }),
+      );
     },
     // Apple 5.1.1(v) account deletion. The server resolves the target user from the session — no
     // id is sent. Callers should clear their local session after a success (the server clears the
@@ -380,23 +386,17 @@ export function createSubuserRuntimeClient(context = {}) {
         method: "GET",
       }));
     },
-    async getRecord(refOrType, legacyId) {
+    async getRecord(ref) {
       ensureRail("records");
-      // One argument is the canonical API. The positional (type, id) form remains only so already
-      // published products keep working while generated products migrate to runtime-owned refs.
-      const key = legacyId === undefined
-        ? recordKeyFromRef(refOrType)
-        : { type: String(refOrType || "").trim(), id: String(legacyId || "").trim() };
       return payloadWithRecordRefs(await jsonRequest(
-        routeUrl(`records/${encodeRoutePart(key.type)}/${encodeRoutePart(key.id)}`),
+        routeUrl(`records/by-ref/${encodeRoutePart(requireRecordRef(ref))}`),
         { method: "GET" },
       ));
     },
     async readRecord(ref) {
       ensureRail("records");
-      const key = recordKeyFromRef(ref);
       return payloadWithRecordRefs(await jsonRequest(
-        routeUrl(`records/${encodeRoutePart(key.type)}/${encodeRoutePart(key.id)}`),
+        routeUrl(`records/by-ref/${encodeRoutePart(requireRecordRef(ref))}`),
         { method: "GET" },
       ));
     },
@@ -405,66 +405,39 @@ export function createSubuserRuntimeClient(context = {}) {
       if (!Object.prototype.hasOwnProperty.call(payload, "data") || payload.data == null) {
         throw new TypeError("data is required");
       }
-      const suppliedRefs = [payload.ref, payload.record_ref]
-        .map((value) => String(value || "").trim())
-        .filter(Boolean);
-      if (new Set(suppliedRefs).size > 1) {
-        throw new TypeError("ref does not match the supplied record_ref");
+      if (payload.record_ref != null || payload.id != null || payload.record_id != null) {
+        throw new TypeError("raw record identifiers are not accepted; use the runtime-owned ref");
       }
-      const suppliedRef = suppliedRefs[0] || "";
-      const refKey = suppliedRef ? recordKeyFromRef(suppliedRef) : null;
+      const suppliedRef = payload.ref == null ? "" : requireRecordRef(payload.ref);
       const suppliedTypes = [payload.record_type, payload.type]
-        .map((value) => String(value || "").trim())
-        .filter(Boolean);
-      const legacyRecordIds = [payload.record_id, payload.id]
         .map((value) => String(value || "").trim())
         .filter(Boolean);
       if (new Set(suppliedTypes).size > 1) {
         throw new TypeError("record_type does not match the supplied type");
       }
-      if (new Set(legacyRecordIds).size > 1) {
-        throw new TypeError("record_id does not match the supplied id");
-      }
       const suppliedType = suppliedTypes[0] || "";
-      const legacyRecordId = legacyRecordIds[0] || "";
-      if (refKey && suppliedTypes.some((value) => value !== refKey.type)) {
-        throw new TypeError("record_type does not match the supplied record ref");
+      if (suppliedRef && suppliedType) {
+        throw new TypeError("record_type cannot accompany a ref update");
       }
-      if (refKey && legacyRecordIds.some((value) => value !== refKey.id)) {
-        throw new TypeError("record_id does not match the supplied record ref");
-      }
-      const recordType = refKey ? refKey.type : suppliedType;
-      if (!recordType) {
+      if (!suppliedRef && !suppliedType) {
         throw new Error("record_type is required");
       }
-      // New generated code updates with the opaque ref it received from save/list/read. The raw-id
-      // path remains runtime-only compatibility for already-published products; the TypeScript SDK
-      // deliberately does not expose it.
-      const recordId = refKey ? refKey.id : legacyRecordId;
-      const route = recordId
-        ? `records/${encodeRoutePart(recordType)}/${encodeRoutePart(recordId)}`
+      const route = suppliedRef
+        ? `records/by-ref/${encodeRoutePart(suppliedRef)}`
         : "records";
-      const {
-        ref: _ref,
-        record_ref: _recordRef,
-        ...recordPayload
-      } = payload;
+      const { ref: _ref, record_type: _recordType, type: _type, ...recordPayload } = payload;
       return payloadWithRecordRefs(await jsonRequest(routeUrl(route), {
         method: "POST",
         body: JSON.stringify({
           ...recordPayload,
-          record_type: recordType,
-          record_id: recordId || undefined,
+          ...(suppliedType ? { record_type: suppliedType } : {}),
         }),
       }));
     },
-    async deleteRecord(refOrType, legacyId) {
+    async deleteRecord(ref) {
       ensureRail("records");
-      const key = legacyId === undefined
-        ? recordKeyFromRef(refOrType)
-        : { type: String(refOrType || "").trim(), id: String(legacyId || "").trim() };
       return payloadWithRecordRefs(await jsonRequest(
-        routeUrl(`records/${encodeRoutePart(key.type)}/${encodeRoutePart(key.id)}`),
+        routeUrl(`records/by-ref/${encodeRoutePart(requireRecordRef(ref))}`),
         { method: "DELETE" },
       ));
     },

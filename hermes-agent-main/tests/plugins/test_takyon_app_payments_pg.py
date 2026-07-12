@@ -662,6 +662,11 @@ def test_cancel_subscription_ends_access_immediately_and_retries_idempotently(pg
         "effective_timing": "immediate",
         "refund_policy": "none",
     }
+    assert result["product_runtime_contract"] == {
+        "version": 1,
+        "subscription": {"cancellation": result["subscription_cancellation_policy"]},
+        "records": {"identifier": "opaque_ref"},
+    }
     assert result["already_canceled"] is False
     ent = app_entitlements.list_entitlements(pg_conn, slug, app_user_id=user.id)[0]
     assert ent.metadata["cancel_at_period_end"] is False
@@ -687,6 +692,7 @@ def test_cancel_subscription_ends_access_immediately_and_retries_idempotently(pg
     assert repeated["already_canceled"] is True
     assert repeated["stripe_subscription_status"] == "canceled"
     assert repeated["subscription_cancellation_policy"]["refund_policy"] == "none"
+    assert repeated["product_runtime_contract"]["records"]["identifier"] == "opaque_ref"
 
 
 def test_cancel_subscription_revoke_fallback_is_terminal_on_real_postgres(pg_conn, monkeypatch):

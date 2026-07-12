@@ -5,18 +5,28 @@ import {
   hasNonterminalStripeSubscription,
   useProductAuth,
 } from "../lib/product-auth";
-import { useTakyon } from "../lib/takyon";
+import {
+  useTakyon,
+  type AccountPayload,
+  type SubscriptionCancellationPolicy,
+  type SubscriptionCancellationResult,
+} from "../lib/takyon";
 
-function cancellationPolicy(account: any): Record<string, unknown> | null {
-  const policy = account?.subscription_cancellation_policy;
-  return policy && typeof policy === "object" && !Array.isArray(policy) ? policy : null;
+function cancellationPolicy(account: AccountPayload | null): SubscriptionCancellationPolicy | null {
+  const policy = account?.product_runtime_contract.subscription.cancellation;
+  return policy &&
+    policy.version === 1 &&
+    policy.effective_timing === "immediate" &&
+    policy.refund_policy === "none"
+    ? policy
+    : null;
 }
 
-function noRefundSuffix(policy: Record<string, unknown> | null): string {
+function noRefundSuffix(policy: SubscriptionCancellationPolicy | null): string {
   return policy?.refund_policy === "none" ? " Cancellation does not issue a refund." : "";
 }
 
-function preCancellationCopy(account: any): { description: string; confirmation: string } {
+function preCancellationCopy(account: AccountPayload | null): { description: string; confirmation: string } {
   const policy = cancellationPolicy(account);
   const refund = noRefundSuffix(policy);
   if (policy?.effective_timing === "immediate") {
@@ -25,38 +35,16 @@ function preCancellationCopy(account: any): { description: string; confirmation:
       confirmation: `Your access will end immediately.${refund}`,
     };
   }
-  if (policy?.effective_timing === "period_end") {
-    return {
-      description: `Cancellation takes effect at the end of the current billing period.${refund}`,
-      confirmation: `Access will remain available until the end of the current billing period.${refund}`,
-    };
-  }
   return {
     description: "The server will confirm when cancellation takes effect.",
     confirmation: "The server response will confirm when access ends.",
   };
 }
 
-function cancellationResultCopy(outcome: any): string {
-  const policy =
-    outcome?.subscription_cancellation_policy &&
-    typeof outcome.subscription_cancellation_policy === "object"
-      ? outcome.subscription_cancellation_policy
-      : null;
+function cancellationResultCopy(outcome: SubscriptionCancellationResult): string {
+  const policy = outcome.subscription_cancellation_policy;
   const refund = policy?.refund_policy === "none" ? " No refund was issued." : "";
-  if (outcome?.effective_immediately === true && outcome?.cancel_at_period_end === false) {
-    return `Your access ended immediately.${refund}`;
-  }
-  if (outcome?.cancel_at_period_end === true && outcome?.effective_immediately !== true) {
-    const rawEnd = String(outcome?.current_period_end ?? "").trim();
-    const parsedEnd = rawEnd ? new Date(rawEnd) : null;
-    const endLabel =
-      parsedEnd && !Number.isNaN(parsedEnd.getTime())
-        ? new Intl.DateTimeFormat(undefined, { dateStyle: "long" }).format(parsedEnd)
-        : "the end of the current billing period";
-    return `Your subscription will end on ${endLabel}.${refund}`;
-  }
-  return "Cancellation confirmed. Refresh your account to see the current access state.";
+  return `Your access ended immediately.${refund}`;
 }
 
 /** Platform-owned backend-truthful cancellation control; product screens may compose it anywhere. */
@@ -94,7 +82,7 @@ export function SubscriptionCancellation() {
           onPress={async () => {
             if (!(await confirmCancellation())) return;
             setBusy(true);
-            let outcome: any;
+            let outcome: SubscriptionCancellationResult;
             try {
               outcome = await client.cancelSubscription();
             } catch (error: unknown) {

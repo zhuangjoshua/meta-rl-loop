@@ -30,8 +30,9 @@ _MAX_RECORD_DATA_BYTES = 262_144
 _MAX_RECORD_METADATA_BYTES = 65_536
 _MAX_RECORD_TITLE_CHARS = 240
 _RECORD_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
+_RECORD_REF_RE = re.compile(r"^tkr_[0-9a-f]{32}$")
 _RECORD_COLUMNS = (
-    "id, business_slug, app_user_id, record_type, title, data, metadata, created_at, updated_at"
+    "id, business_slug, app_user_id, record_type, title, data, metadata, created_at, updated_at, record_ref"
 )
 
 class AppRecordError(Exception):
@@ -364,6 +365,7 @@ class AppRecord:
     metadata: dict
     created_at: object
     updated_at: object
+    ref: str
 
 
 def _json_dumps(value) -> str:
@@ -397,6 +399,19 @@ def _normalize_record_id(value: str | None) -> str:
     if len(record_id) > 128:
         raise ValueError("record_id must be <= 128 characters")
     return record_id
+
+
+def _new_record_ref() -> str:
+    """Return an unguessable server-owned locator; authorization remains owner/session scoped."""
+
+    return f"tkr_{uuid.uuid4().hex}"
+
+
+def _normalize_record_ref(value: str) -> str:
+    record_ref = str(value or "").strip()
+    if not _RECORD_REF_RE.fullmatch(record_ref):
+        raise ValueError("record_ref is invalid; pass the exact ref returned by the runtime")
+    return record_ref
 
 
 def _normalize_title(value: str | None) -> str | None:
@@ -436,6 +451,7 @@ def _record_from_row(row) -> AppRecord:
         metadata=row[6] if isinstance(row[6], dict) else {},
         created_at=row[7],
         updated_at=row[8],
+        ref=str(row[9]),
     )
 
 
@@ -577,6 +593,34 @@ def get_record(
     return user, _record_from_row(row)
 
 
+def get_record_by_ref(
+    conn,
+    business_slug: str,
+    *,
+    record_ref: str,
+    app_user_id: str | None = None,
+    email: str | None = None,
+    session_token: str | None = None,
+) -> tuple[app_identity.AppUser, AppRecord] | None:
+    """Resolve one opaque locator inside the authenticated business/user scope."""
+
+    user = _resolve_existing_user(
+        conn,
+        business_slug,
+        app_user_id=app_user_id,
+        email=email,
+        session_token=session_token,
+    )
+    if user is None:
+        return None
+    row = conn.execute(
+        f"select {_RECORD_COLUMNS} from app_records "
+        "where business_slug = %s and app_user_id = %s and record_ref = %s",
+        (business_slug, user.id, _normalize_record_ref(record_ref)),
+    ).fetchone()
+    return None if row is None else (user, _record_from_row(row))
+
+
 def save_record(
     conn,
     business_slug: str,
@@ -608,6 +652,7 @@ def save_record(
 
     normalized_type = _normalize_record_type(record_type)
     normalized_id = _normalize_record_id(record_id)
+    record_ref = _new_record_ref()
     normalized_title = _normalize_title(title)
     normalized_data = _normalize_data(data)
     normalized_metadata = _normalize_metadata(metadata)
@@ -627,8 +672,8 @@ def save_record(
                 raise AppRecordQuotaExceeded(user.id, _MAX_RECORDS_PER_USER)
             row = conn.execute(
                 "insert into app_records ("
-                " id, business_slug, app_user_id, record_type, title, data, metadata"
-                ") values (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb) "
+                " id, business_slug, app_user_id, record_type, title, data, metadata, record_ref"
+                ") values (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s) "
                 f"returning {_RECORD_COLUMNS}",
                 (
                     normalized_id,
@@ -638,6 +683,7 @@ def save_record(
                     normalized_title,
                     _json_dumps(normalized_data),
                     _json_dumps(normalized_metadata),
+                    record_ref,
                 ),
             ).fetchone()
         else:
@@ -655,6 +701,79 @@ def save_record(
                     normalized_id,
                 ),
             ).fetchone()
+    return user, _record_from_row(row)
+
+
+def create_record(
+    conn,
+    business_slug: str,
+    *,
+    record_type: str,
+    data,
+    title: str | None = None,
+    metadata: dict | None = None,
+    app_user_id: str | None = None,
+    email: str | None = None,
+    session_token: str | None = None,
+) -> tuple[app_identity.AppUser, AppRecord]:
+    """Create with server-owned id and ref; callers cannot choose either locator."""
+
+    return save_record(
+        conn,
+        business_slug,
+        record_type=record_type,
+        data=data,
+        title=title,
+        metadata=metadata,
+        app_user_id=app_user_id,
+        email=email,
+        session_token=session_token,
+    )
+
+
+def update_record_by_ref(
+    conn,
+    business_slug: str,
+    *,
+    record_ref: str,
+    data,
+    title: str | None = None,
+    metadata: dict | None = None,
+    app_user_id: str | None = None,
+    email: str | None = None,
+    session_token: str | None = None,
+) -> tuple[app_identity.AppUser, AppRecord]:
+    """Update exactly one owner-scoped row addressed only by its opaque ref."""
+
+    user = _resolve_existing_user(
+        conn,
+        business_slug,
+        app_user_id=app_user_id,
+        email=email,
+        session_token=session_token,
+    )
+    if user is None:
+        raise AppRecordUserNotFound("app user not found")
+    normalized_ref = _normalize_record_ref(record_ref)
+    normalized_title = _normalize_title(title)
+    normalized_data = _normalize_data(data)
+    normalized_metadata = _normalize_metadata(metadata)
+    with conn.transaction():
+        row = conn.execute(
+            "update app_records set title = %s, data = %s::jsonb, metadata = %s::jsonb, "
+            "updated_at = now() where business_slug = %s and app_user_id = %s and record_ref = %s "
+            f"returning {_RECORD_COLUMNS}",
+            (
+                normalized_title,
+                _json_dumps(normalized_data),
+                _json_dumps(normalized_metadata),
+                business_slug,
+                user.id,
+                normalized_ref,
+            ),
+        ).fetchone()
+    if row is None:
+        raise AppRecordNotFound("app record not found")
     return user, _record_from_row(row)
 
 
@@ -683,6 +802,38 @@ def delete_record(
             "where business_slug = %s and app_user_id = %s and record_type = %s and id = %s "
             f"returning {_RECORD_COLUMNS}",
             (business_slug, user.id, _normalize_record_type(record_type), _normalize_record_id(record_id)),
+        ).fetchone()
+    if row is None:
+        raise AppRecordNotFound("app record not found")
+    return user, _record_from_row(row)
+
+
+def delete_record_by_ref(
+    conn,
+    business_slug: str,
+    *,
+    record_ref: str,
+    app_user_id: str | None = None,
+    email: str | None = None,
+    session_token: str | None = None,
+) -> tuple[app_identity.AppUser, AppRecord]:
+    """Delete by exact opaque ref, still constrained by business and authenticated user."""
+
+    user = _resolve_existing_user(
+        conn,
+        business_slug,
+        app_user_id=app_user_id,
+        email=email,
+        session_token=session_token,
+    )
+    if user is None:
+        raise AppRecordUserNotFound("app user not found")
+    with conn.transaction():
+        row = conn.execute(
+            "delete from app_records "
+            "where business_slug = %s and app_user_id = %s and record_ref = %s "
+            f"returning {_RECORD_COLUMNS}",
+            (business_slug, user.id, _normalize_record_ref(record_ref)),
         ).fetchone()
     if row is None:
         raise AppRecordNotFound("app record not found")

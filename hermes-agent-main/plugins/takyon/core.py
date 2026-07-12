@@ -64,7 +64,11 @@ from agent.skill_utils import get_all_skills_dirs, parse_frontmatter
 from takyon_constants import get_default_takyon_root, get_takyon_home
 from tools.registry import tool_error, tool_result
 
-from .app_runtime_constants import APP_SESSION_COOKIE, subscription_cancellation_policy
+from .app_runtime_constants import (
+    APP_SESSION_COOKIE,
+    product_runtime_contract,
+    subscription_cancellation_policy,
+)
 from .product_claims import (
     customer_feature_claims,
     feature_claim_blocker,
@@ -423,13 +427,15 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "endpoints": [
             ("GET", "records"),
             ("POST", "records"),
-            ("GET", "records/<type>/<id>"),
-            ("POST", "records/<type>/<id>"),
-            ("DELETE", "records/<type>/<id>"),
+            ("POST", "records/query"),
+            ("GET", "records/by-ref/<record_ref>"),
+            ("POST", "records/by-ref/<record_ref>"),
+            ("DELETE", "records/by-ref/<record_ref>"),
         ],
         "worker_contract": [
             "Persist real saved product entities through the shared records rail instead of localStorage or fake synced browser data.",
             "Use the records rail for history/detail/reopen flows so saved state survives sign-out/sign-in honestly.",
+            "Treat record.ref as an opaque server-owned locator: preserve it byte-for-byte for read/update/delete, and never send or derive a raw record id.",
             "For feeds, browse, search, or filtered lists, pass listRecords({filters, sort, cursor}) — a bounded server-side query (ops eq/neq/gt/gte/lt/lte/in/ilike/exists over record_type/title/created_at/updated_at or data.<key>, keyset paginated). Never fetch every record and filter in the browser.",
         ],
     },
@@ -783,11 +789,14 @@ _RAIL_ROUTES: dict[str, tuple[RailRoute, ...]] = {
     ),
     "records": (
         RailRoute("GET", ("records",), "records_list_get", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("GET", ("records", "by-ref", "<record_ref>"), "record_by_ref_get", APP_AUTH_SESSION_REQUIRED),
         RailRoute("GET", ("records", "<record_type>", "<record_id>"), "record_get", APP_AUTH_SESSION_REQUIRED),
         RailRoute("POST", ("records", "query"), "records_query_post", APP_AUTH_SESSION_REQUIRED),
         RailRoute("POST", ("records",), "records_upsert_post", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("POST", ("records", "by-ref", "<record_ref>"), "record_by_ref_post", APP_AUTH_SESSION_REQUIRED),
         RailRoute("POST", ("records", "<record_type>"), "records_upsert_post", APP_AUTH_SESSION_REQUIRED),
         RailRoute("POST", ("records", "<record_type>", "<record_id>"), "records_upsert_post", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("DELETE", ("records", "by-ref", "<record_ref>"), "record_by_ref_delete", APP_AUTH_SESSION_REQUIRED),
         RailRoute("DELETE", ("records", "<record_type>", "<record_id>"), "record_delete", APP_AUTH_SESSION_REQUIRED),
     ),
     "actions": (
@@ -3717,3582 +3726,6 @@ def _starter_seed_replacements(
     }
 
 
-def _subuser_app_starter_root_layout_js() -> str:
-    return (
-        dedent(
-            """
-            import "../../_takyon/tokens.css";
-            import "./globals.css";
-            import { starterRootMetadata } from "../components/starter-metadata.js";
-
-            export const metadata = starterRootMetadata;
-
-            export default function RootLayout({ children }) {
-              return (
-                <html lang="en">
-                  <body>{children}</body>
-                </html>
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_metadata_js(
-    *,
-    title_literal: str,
-    description_literal: str,
-    og_alt_literal: str,
-) -> str:
-    return (
-        dedent(
-            """
-            import surfaceContext from "../../_takyon/surface-context.js";
-
-            export const starterSiteName = __STARTER_SITE_NAME__;
-            export const starterSiteDescription = __STARTER_SITE_DESCRIPTION__;
-            export const starterOgImageAlt = __STARTER_OG_ALT__;
-            export const starterMetadataBase = new URL(String(surfaceContext.publishTarget || "https://example.com/"));
-            export const starterDefaultPublicRoutes = ["/", "/privacy", "/terms", "/faq", "/articles"];
-            export const starterAppRobotsMetadata = {
-              robots: {
-                index: false,
-                follow: true,
-              },
-            };
-
-            function normalizeRoute(route) {
-              const value = String(route || "").trim();
-              if (!value) return "";
-              const normalized = `/${value.replace(/^\\/+/, "")}`.replace(/\\/+$/, "") || "/";
-              return normalized === "" ? "/" : normalized;
-            }
-
-            function routeFromSurfaceEntry(entry) {
-              if (typeof entry === "string") {
-                return entry;
-              }
-              if (entry && typeof entry === "object") {
-                return entry.path || entry.pathname || "";
-              }
-              return "";
-            }
-
-            export function starterAbsoluteUrl(route = "/") {
-              const normalized = normalizeRoute(route) || "/";
-              const relative = normalized === "/" ? "" : normalized.replace(/^\\/+/, "");
-              return new URL(relative, starterMetadataBase).toString();
-            }
-
-            export function starterPageMetadata({ title = "", description = starterSiteDescription, path = "/" } = {}) {
-              const canonicalPath = normalizeRoute(path) || "/";
-              const resolvedTitle = title ? `${title} | ${starterSiteName}` : starterSiteName;
-              return {
-                metadataBase: starterMetadataBase,
-                title: resolvedTitle,
-                description,
-                alternates: {
-                  canonical: canonicalPath,
-                },
-                openGraph: {
-                  title: resolvedTitle,
-                  description,
-                  url: canonicalPath,
-                  siteName: starterSiteName,
-                  locale: "en_US",
-                  type: "website",
-                },
-                twitter: {
-                  card: "summary_large_image",
-                  title: resolvedTitle,
-                  description,
-                },
-              };
-            }
-
-            export const starterRootMetadata = starterPageMetadata();
-
-            export function starterPublicRoutes() {
-              const declaredRoutes = Array.isArray(surfaceContext.routes)
-                ? surfaceContext.routes.map(routeFromSurfaceEntry)
-                : [];
-              const unique = new Set();
-              for (const candidate of [...starterDefaultPublicRoutes, ...declaredRoutes]) {
-                const normalized = normalizeRoute(candidate);
-                if (!normalized) continue;
-                if (normalized === "/app" || normalized.startsWith("/app/")) continue;
-                unique.add(normalized);
-              }
-              return Array.from(unique);
-            }
-
-            export const starterSitemapEntries = starterPublicRoutes().map((route) => ({
-              url: starterAbsoluteUrl(route),
-            }));
-
-            export const starterRobotsConfig = {
-              rules: {
-                userAgent: "*",
-                allow: "/",
-              },
-              sitemap: starterAbsoluteUrl("/sitemap.xml"),
-            };
-            """
-        )
-        .strip()
-        .replace("__STARTER_SITE_NAME__", title_literal)
-        .replace("__STARTER_SITE_DESCRIPTION__", description_literal)
-        .replace("__STARTER_OG_ALT__", og_alt_literal)
-        + "\n"
-    )
-
-
-def _subuser_app_starter_globals_css() -> str:
-    return (
-        dedent(
-            """
-            :root {
-              --starter-bg: #f5f7fb;
-              --starter-bg-accent: rgba(76, 110, 245, 0.08);
-              --starter-panel: rgba(255, 255, 255, 0.92);
-              --starter-panel-soft: rgba(245, 247, 251, 0.96);
-              --starter-border: rgba(15, 23, 42, 0.1);
-              --starter-border-strong: rgba(15, 23, 42, 0.18);
-              --starter-ink: #0f172a;
-              --starter-muted: #475569;
-              --starter-accent: #1d4ed8;
-              --starter-accent-strong: #1e40af;
-              --starter-accent-ink: #ffffff;
-              --starter-success: #166534;
-              --starter-success-bg: #dcfce7;
-              --starter-warn: #92400e;
-              --starter-warn-bg: #fef3c7;
-              --starter-danger: #b91c1c;
-              --starter-danger-bg: #fee2e2;
-              --starter-shadow: 0 18px 44px rgba(15, 23, 42, 0.08);
-              --starter-radius-lg: 20px;
-              --starter-radius-md: 14px;
-              --starter-radius-sm: 10px;
-              --starter-max: 1120px;
-            }
-
-            * {
-              box-sizing: border-box;
-            }
-
-            html,
-            body {
-              margin: 0;
-              min-height: 100%;
-              background:
-                radial-gradient(circle at top left, var(--starter-bg-accent), transparent 28%),
-                radial-gradient(circle at bottom right, rgba(255, 255, 255, 0.85), transparent 32%),
-                var(--starter-bg);
-              color: var(--starter-ink);
-              font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            }
-
-            body {
-              line-height: 1.55;
-            }
-
-            a {
-              color: inherit;
-              text-decoration: none;
-            }
-
-            button,
-            input,
-            textarea {
-              font: inherit;
-            }
-
-            button {
-              border: 0;
-              background: none;
-            }
-
-            .starter-site-shell,
-            .starter-app-shell {
-              min-height: 100vh;
-            }
-
-            .starter-site-shell {
-              display: flex;
-              align-items: center;
-              padding: clamp(48px, 9vw, 112px) 0;
-            }
-
-            .starter-wrap {
-              width: min(calc(100% - clamp(24px, 4vw, 64px)), var(--starter-max));
-              margin: 0 auto;
-            }
-
-            .starter-landing-card,
-            .starter-card,
-            .starter-status-banner {
-              border: 1px solid var(--starter-border);
-              background: var(--starter-panel);
-              box-shadow: var(--starter-shadow);
-            }
-
-            .starter-landing-card,
-            .starter-card {
-              border-radius: var(--starter-radius-lg);
-            }
-
-            .starter-landing-card {
-              max-width: 760px;
-              padding: clamp(28px, 4vw, 44px);
-            }
-
-            .starter-stack {
-              display: grid;
-              gap: 1rem;
-            }
-
-            .starter-app-header {
-              position: sticky;
-              top: 0;
-              z-index: 10;
-              backdrop-filter: blur(16px);
-              background: rgba(245, 247, 251, 0.85);
-              border-bottom: 1px solid var(--starter-border);
-            }
-
-            .starter-app-header-inner {
-              min-height: 72px;
-              display: flex;
-              align-items: center;
-              justify-content: space-between;
-              gap: 1rem;
-            }
-
-            .starter-app-main {
-              padding: 32px 0 56px;
-            }
-
-            .starter-brand {
-              display: inline-flex;
-              align-items: center;
-              gap: 0.5rem;
-              font-size: 1rem;
-              font-weight: 700;
-              letter-spacing: -0.02em;
-            }
-
-            .starter-app-nav,
-            .starter-actions {
-              display: flex;
-              flex-wrap: wrap;
-              align-items: center;
-              gap: 0.8rem;
-            }
-
-            .starter-app-nav a {
-              color: var(--starter-muted);
-              font-size: 0.98rem;
-              transition: color 140ms ease;
-            }
-
-            .starter-app-nav a:hover {
-              color: var(--starter-ink);
-            }
-
-            .starter-eyebrow {
-              margin: 0 0 0.8rem;
-              color: var(--starter-accent);
-              font-size: 0.8rem;
-              font-weight: 700;
-              letter-spacing: 0.16em;
-              text-transform: uppercase;
-            }
-
-            .starter-title,
-            .starter-title-sm {
-              margin: 0;
-              letter-spacing: -0.04em;
-              line-height: 1.02;
-            }
-
-            .starter-title {
-              font-size: clamp(2.4rem, 6vw, 4.5rem);
-            }
-
-            .starter-title-sm {
-              font-size: clamp(1.5rem, 3vw, 2rem);
-            }
-
-            .starter-copy,
-            .starter-note,
-            .starter-status-copy span,
-            .starter-field label,
-            .starter-key-value dt {
-              color: var(--starter-muted);
-            }
-
-            .starter-copy {
-              margin: 1rem 0 0;
-              font-size: 1.05rem;
-            }
-
-            .starter-note {
-              margin: 0;
-              font-size: 0.95rem;
-            }
-
-            .starter-footer {
-              margin-top: 1.5rem;
-              padding: 1rem 0 0;
-              border-top: 1px solid var(--starter-border);
-            }
-
-            .starter-footer-row {
-              display: flex;
-              flex-wrap: wrap;
-              align-items: center;
-              justify-content: space-between;
-              gap: 0.75rem;
-            }
-
-            .starter-footer-links {
-              display: flex;
-              flex-wrap: wrap;
-              gap: 0.75rem;
-              color: var(--starter-muted);
-              font-size: 0.95rem;
-            }
-
-            .starter-footer-links a {
-              color: inherit;
-            }
-
-            .starter-footer-links a:hover {
-              color: var(--starter-ink);
-            }
-
-            .starter-support-page {
-              max-width: 760px;
-            }
-
-            .starter-button {
-              display: inline-flex;
-              align-items: center;
-              justify-content: center;
-              gap: 0.4rem;
-              min-height: 44px;
-              padding: 0 1rem;
-              border-radius: 999px;
-              border: 1px solid var(--starter-border-strong);
-              background: rgba(255, 255, 255, 0.8);
-              color: var(--starter-ink);
-              cursor: pointer;
-              transition:
-                transform 140ms ease,
-                box-shadow 140ms ease,
-                border-color 140ms ease,
-                background 140ms ease;
-            }
-
-            .starter-button:hover {
-              transform: translateY(-1px);
-              box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
-            }
-
-            .starter-button-primary {
-              background: var(--starter-accent);
-              color: var(--starter-accent-ink);
-              border-color: var(--starter-accent);
-            }
-
-            .starter-button-primary:hover {
-              background: var(--starter-accent-strong);
-              border-color: var(--starter-accent-strong);
-            }
-
-            .starter-button-secondary {
-              background: rgba(255, 255, 255, 0.68);
-            }
-
-            .starter-button:disabled {
-              opacity: 0.6;
-              cursor: not-allowed;
-              transform: none;
-              box-shadow: none;
-            }
-
-            .starter-actions {
-              margin-top: 1.25rem;
-            }
-
-            .starter-actions-compact {
-              margin-top: 1rem;
-            }
-
-            .starter-card {
-              padding: 1.25rem;
-            }
-
-            .starter-card-soft {
-              background: var(--starter-panel-soft);
-              border: 1px solid var(--starter-border);
-              border-radius: var(--starter-radius-md);
-              padding: 1rem;
-            }
-
-            .starter-section-card {
-              padding: clamp(20px, 3vw, 28px);
-            }
-
-            .starter-status-banner {
-              border-radius: var(--starter-radius-md);
-              padding: 1rem 1.1rem;
-              display: flex;
-              align-items: center;
-              justify-content: space-between;
-              gap: 1rem;
-            }
-
-            .starter-status-copy {
-              display: grid;
-              gap: 0.25rem;
-            }
-
-            .starter-pill {
-              display: inline-flex;
-              align-items: center;
-              min-height: 32px;
-              padding: 0 0.75rem;
-              border-radius: 999px;
-              font-size: 0.9rem;
-              font-weight: 600;
-              background: #e2e8f0;
-              color: var(--starter-ink);
-            }
-
-            .starter-pill-success {
-              background: var(--starter-success-bg);
-              color: var(--starter-success);
-            }
-
-            .starter-pill-warn {
-              background: var(--starter-warn-bg);
-              color: var(--starter-warn);
-            }
-
-            .starter-pill-danger {
-              background: var(--starter-danger-bg);
-              color: var(--starter-danger);
-            }
-
-            .starter-pill-muted {
-              background: #e2e8f0;
-              color: #334155;
-            }
-
-            .starter-form,
-            .starter-field {
-              display: grid;
-              gap: 0.85rem;
-            }
-
-            .starter-field label {
-              font-size: 0.95rem;
-              font-weight: 600;
-            }
-
-            .starter-input,
-            .starter-textarea {
-              width: 100%;
-              border: 1px solid var(--starter-border-strong);
-              border-radius: var(--starter-radius-sm);
-              background: #ffffff;
-              color: var(--starter-ink);
-              padding: 0.8rem 0.95rem;
-            }
-
-            .starter-input:focus,
-            .starter-textarea:focus {
-              outline: 2px solid rgba(29, 78, 216, 0.16);
-              outline-offset: 1px;
-              border-color: var(--starter-accent);
-            }
-
-            .starter-textarea {
-              min-height: 120px;
-              resize: vertical;
-            }
-
-            .starter-alert,
-            .starter-response {
-              border-radius: var(--starter-radius-sm);
-              padding: 0.85rem 0.95rem;
-              background: rgba(29, 78, 216, 0.08);
-              color: var(--starter-ink);
-            }
-
-            .starter-alert-error {
-              background: var(--starter-danger-bg);
-              color: var(--starter-danger);
-            }
-
-            .starter-account-grid {
-              display: grid;
-              gap: 1rem;
-              grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
-
-            .starter-key-value {
-              margin: 1rem 0 0;
-              display: grid;
-              grid-template-columns: repeat(2, minmax(0, 1fr));
-              gap: 0.9rem 1rem;
-            }
-
-            .starter-key-value div {
-              min-width: 0;
-            }
-
-            .starter-key-value dt,
-            .starter-key-value dd {
-              margin: 0;
-            }
-
-            .starter-key-value dd {
-              margin-top: 0.3rem;
-              font-weight: 600;
-              word-break: break-word;
-            }
-
-            @media (max-width: 900px) {
-              .starter-account-grid {
-                grid-template-columns: 1fr;
-              }
-            }
-
-            @media (max-width: 760px) {
-              .starter-site-shell {
-                padding: 32px 0 48px;
-              }
-
-              .starter-app-header-inner,
-              .starter-status-banner,
-              .starter-actions {
-                flex-direction: column;
-                align-items: stretch;
-              }
-
-              .starter-app-header-inner {
-                padding: 14px 0;
-              }
-
-              .starter-app-nav,
-              .starter-actions,
-              .starter-key-value {
-                width: 100%;
-              }
-
-              .starter-app-nav {
-                display: flex;
-                flex-direction: column;
-                align-items: stretch;
-                gap: 0.6rem;
-              }
-
-              .starter-key-value {
-                grid-template-columns: 1fr;
-              }
-
-              .starter-app-nav a,
-              .starter-button,
-              .starter-brand {
-                justify-content: center;
-              }
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_home_page_js() -> str:
-    return (
-        dedent(
-            """
-            import { redirect } from "next/navigation";
-
-            export default function HomePage() {
-              redirect("/app");
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_app_layout_js() -> str:
-    return (
-        dedent(
-            """
-            import Link from "next/link";
-            import { starterBusinessName } from "../../components/starter-context.js";
-            import { starterAppRobotsMetadata } from "../../components/starter-metadata.js";
-
-            export const metadata = starterAppRobotsMetadata;
-
-            export default function AppLayout({ children }) {
-              return (
-                <div className="starter-app-shell">
-                  <header className="starter-app-header">
-                    <div className="starter-wrap starter-app-header-inner">
-                      <Link className="starter-brand" href="/">
-                        {starterBusinessName}
-                      </Link>
-                      <nav className="starter-app-nav" aria-label="App">
-                        <Link href="/app">Access</Link>
-                        <Link href="/app/profile">Account</Link>
-                      </nav>
-                    </div>
-                  </header>
-                  <main className="starter-app-main">
-                    <div className="starter-wrap">{children}</div>
-                  </main>
-                  <footer className="starter-footer">
-                    <div className="starter-wrap starter-footer-row">
-                      <span className="starter-note">© {starterBusinessName}</span>
-                      <nav className="starter-footer-links" aria-label="Support">
-                        <Link href="/faq">FAQ</Link>
-                        <Link href="/articles">Articles</Link>
-                        <Link href="/privacy">Privacy</Link>
-                        <Link href="/terms">Terms</Link>
-                      </nav>
-                    </div>
-                  </footer>
-                </div>
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_app_page_js() -> str:
-    return (
-        dedent(
-            """
-            import { StarterAccessPage } from "../../components/starter-access-page";
-            import ProductRoot from "./(product)/root";
-            import { loadServerAppState } from "../../components/starter-server";
-
-            export const dynamic = "force-dynamic";
-
-            export default async function AppPage({ searchParams }) {
-              const initialAppState = await loadServerAppState();
-              if (initialAppState?.access?.state === "ready") {
-                return <ProductRoot initialAppState={initialAppState} searchParams={searchParams} />;
-              }
-              return <StarterAccessPage initialAppState={initialAppState} />;
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_product_layout_js() -> str:
-    return (
-        dedent(
-            """
-            import { redirect } from "next/navigation";
-            import { loadServerAppState } from "../../../components/starter-server";
-
-            export const dynamic = "force-dynamic";
-
-            export default async function ProductLayout({ children }) {
-              const initialAppState = await loadServerAppState();
-              if (initialAppState?.access?.state !== "ready") {
-                redirect("/app");
-              }
-              return children;
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_product_root_js() -> str:
-    return (
-        dedent(
-            """
-            import { StarterProductHome } from "../../../components/starter-product-home";
-
-            export default function ProductRoot({ initialAppState }) {
-              return <StarterProductHome initialAppState={initialAppState} />;
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_profile_page_js() -> str:
-    return (
-        dedent(
-            """
-            import { StarterAccountPage } from "../../../components/starter-account-page";
-            import { loadServerAppState } from "../../../components/starter-server";
-
-            export const dynamic = "force-dynamic";
-
-            export default async function ProfilePage() {
-              const initialAppState = await loadServerAppState();
-              return <StarterAccountPage initialAppState={initialAppState} />;
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_privacy_page_js() -> str:
-    return (
-        dedent(
-            """
-            import Link from "next/link";
-            import { starterPageMetadata, starterSiteName } from "../../components/starter-metadata.js";
-
-            export const metadata = starterPageMetadata({
-              title: "Privacy",
-              description: `Read the privacy policy for ${starterSiteName}.`,
-              path: "/privacy",
-            });
-
-            export default function PrivacyPage() {
-              return (
-                <main className="starter-site-shell">
-                  <div className="starter-wrap starter-stack starter-support-page">
-                    <article className="starter-stack">
-                      <header className="starter-stack">
-                        <p className="starter-eyebrow">Privacy</p>
-                        <h1 className="starter-title-sm">Privacy policy</h1>
-                        <p className="starter-copy">
-                          This page describes what information {starterSiteName} collects, how it is used, and the choices available to you.
-                        </p>
-                      </header>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Information we collect</h2>
-                        <p className="starter-copy">
-                          We collect the email address you sign in with, any profile details you choose to add, your subscription status, and the content you create or save while using the product. We also keep basic operational logs needed to run the service securely.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">How information is used</h2>
-                        <p className="starter-copy">
-                          Information is used to sign you in, keep your account and saved work available, process billing, respond to support and security issues, and improve product quality. It is not sold, and it is not used for cross-site advertising.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Cookies and sessions</h2>
-                        <p className="starter-copy">
-                          {starterSiteName} uses a session cookie to keep you signed in after you verify your email. Signing out ends that session. The product does not depend on third-party advertising cookies.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Payments</h2>
-                        <p className="starter-copy">
-                          Subscription payments are handled by a dedicated payment processor. Full card details are sent directly to that processor and are not stored by {starterSiteName}.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Sharing and vendors</h2>
-                        <p className="starter-copy">
-                          Data may be processed by the infrastructure, payments, and messaging vendors that help run the service, only to the extent needed to operate it.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Retention and your choices</h2>
-                        <p className="starter-copy">
-                          Information is retained while your account is active and only as long as needed for operations, legal obligations, and account history. You can review and update your profile details and subscription from your account page at any time.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Changes to this policy</h2>
-                        <p className="starter-copy">
-                          If this policy changes, the current version will always be published at this address.
-                        </p>
-                      </section>
-                    </article>
-                    <footer className="starter-footer">
-                      <div className="starter-footer-row">
-                        <p className="starter-note">© {starterSiteName}</p>
-                        <nav className="starter-footer-links" aria-label="Support">
-                          <Link href="/faq">FAQ</Link>
-                          <Link href="/articles">Articles</Link>
-                          <Link href="/privacy">Privacy</Link>
-                          <Link href="/terms">Terms</Link>
-                          <Link href="/app">App</Link>
-                        </nav>
-                      </div>
-                    </footer>
-                  </div>
-                </main>
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_terms_page_js() -> str:
-    return (
-        dedent(
-            """
-            import Link from "next/link";
-            import { starterPageMetadata, starterSiteName } from "../../components/starter-metadata.js";
-
-            export const metadata = starterPageMetadata({
-              title: "Terms",
-              description: `Review the terms of service for ${starterSiteName}.`,
-              path: "/terms",
-            });
-
-            export default function TermsPage() {
-              return (
-                <main className="starter-site-shell">
-                  <div className="starter-wrap starter-stack starter-support-page">
-                    <article className="starter-stack">
-                      <header className="starter-stack">
-                        <p className="starter-eyebrow">Terms</p>
-                        <h1 className="starter-title-sm">Terms of service</h1>
-                        <p className="starter-copy">
-                          These terms govern access to and use of {starterSiteName}. By creating an account or using the service, you agree to them.
-                        </p>
-                      </header>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Your account</h2>
-                        <p className="starter-copy">
-                          Sign-in happens through the email address on your account, so keep access to that inbox secure. You are responsible for activity that occurs through your account.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Subscriptions and billing</h2>
-                        <p className="starter-copy">
-                          Paid access is provided as a subscription that renews automatically each billing period. The price and plan shown at checkout and inside your account are authoritative. You can manage or cancel the subscription from your account page, and your subscription status there reflects your current access.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Acceptable use</h2>
-                        <p className="starter-copy">
-                          Use the service only for lawful purposes. Do not attempt to disrupt the service, probe or bypass its security, access other accounts, or misuse information about other members.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Your content</h2>
-                        <p className="starter-copy">
-                          You keep ownership of the content you create or save in the product. You grant {starterSiteName} permission to store and process that content as needed to operate the service for you.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Availability and changes</h2>
-                        <p className="starter-copy">
-                          The service may evolve over time, and access may be suspended or limited to protect security, comply with law, or address misuse.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Disclaimer</h2>
-                        <p className="starter-copy">
-                          The service may change, pause, or become unavailable from time to time. Any business-specific warranty or liability terms can be added here if needed.
-                        </p>
-                      </section>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Changes to these terms</h2>
-                        <p className="starter-copy">
-                          If these terms change, the current version will always be published at this address, and continued use of the service means you accept the updated terms.
-                        </p>
-                      </section>
-                    </article>
-                    <footer className="starter-footer">
-                      <div className="starter-footer-row">
-                        <p className="starter-note">© {starterSiteName}</p>
-                        <nav className="starter-footer-links" aria-label="Support">
-                          <Link href="/faq">FAQ</Link>
-                          <Link href="/articles">Articles</Link>
-                          <Link href="/privacy">Privacy</Link>
-                          <Link href="/terms">Terms</Link>
-                          <Link href="/app">App</Link>
-                        </nav>
-                      </div>
-                    </footer>
-                  </div>
-                </main>
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_faq_page_js() -> str:
-    return (
-        dedent(
-            """
-            import Link from "next/link";
-            import { starterPageMetadata, starterSiteName } from "../../components/starter-metadata.js";
-
-            export const metadata = starterPageMetadata({
-              title: "FAQ",
-              description: `Read frequently asked questions for ${starterSiteName}.`,
-              path: "/faq",
-            });
-
-            export default function FaqPage() {
-              return (
-                <main className="starter-site-shell">
-                  <div className="starter-wrap starter-stack starter-support-page">
-                    <article className="starter-stack">
-                      <header className="starter-stack">
-                        <p className="starter-eyebrow">FAQ</p>
-                        <h1 className="starter-title-sm">Frequently asked questions</h1>
-                        <p className="starter-copy">
-                          This page can hold common customer questions for {starterSiteName}.
-                        </p>
-                      </header>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Current status</h2>
-                        <p className="starter-copy">No public FAQ entries are published yet.</p>
-                      </section>
-                    </article>
-                    <footer className="starter-footer">
-                      <div className="starter-footer-row">
-                        <p className="starter-note">© {starterSiteName}</p>
-                        <nav className="starter-footer-links" aria-label="Support">
-                          <Link href="/faq">FAQ</Link>
-                          <Link href="/articles">Articles</Link>
-                          <Link href="/privacy">Privacy</Link>
-                          <Link href="/terms">Terms</Link>
-                          <Link href="/app">App</Link>
-                        </nav>
-                      </div>
-                    </footer>
-                  </div>
-                </main>
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_articles_page_js() -> str:
-    return (
-        dedent(
-            """
-            import Link from "next/link";
-            import { starterPageMetadata, starterSiteName } from "../../components/starter-metadata.js";
-
-            export const metadata = starterPageMetadata({
-              title: "Articles",
-              description: `Browse published articles from ${starterSiteName}.`,
-              path: "/articles",
-            });
-
-            export default function ArticlesPage() {
-              return (
-                <main className="starter-site-shell">
-                  <div className="starter-wrap starter-stack starter-support-page">
-                    <article className="starter-stack">
-                      <header className="starter-stack">
-                        <p className="starter-eyebrow">Articles</p>
-                        <h1 className="starter-title-sm">Articles</h1>
-                        <p className="starter-copy">
-                          This page can hold published articles from {starterSiteName}.
-                        </p>
-                      </header>
-                      <section className="starter-stack">
-                        <h2 className="starter-title-sm">Current status</h2>
-                        <p className="starter-copy">No public articles are published yet.</p>
-                      </section>
-                    </article>
-                    <footer className="starter-footer">
-                      <div className="starter-footer-row">
-                        <p className="starter-note">© {starterSiteName}</p>
-                        <nav className="starter-footer-links" aria-label="Support">
-                          <Link href="/faq">FAQ</Link>
-                          <Link href="/articles">Articles</Link>
-                          <Link href="/privacy">Privacy</Link>
-                          <Link href="/terms">Terms</Link>
-                          <Link href="/app">App</Link>
-                        </nav>
-                      </div>
-                    </footer>
-                  </div>
-                </main>
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_sitemap_js() -> str:
-    return (
-        dedent(
-            """
-            import { starterSitemapEntries } from "../components/starter-metadata.js";
-
-            export default function sitemap() {
-              return starterSitemapEntries;
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_robots_js() -> str:
-    return (
-        dedent(
-            """
-            import { starterRobotsConfig } from "../components/starter-metadata.js";
-
-            export default function robots() {
-              return starterRobotsConfig;
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_twitter_image_js() -> str:
-    return (
-        dedent(
-            """
-            export { alt, contentType, default, size } from "./opengraph-image.js";
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_opengraph_image_js() -> str:
-    return (
-        dedent(
-            """
-            import { ImageResponse } from "next/og";
-
-            import {
-              starterOgImageAlt,
-              starterSiteDescription,
-              starterSiteName,
-            } from "../components/starter-metadata.js";
-
-            export const alt = starterOgImageAlt;
-            export const size = {
-              width: 1200,
-              height: 630,
-            };
-            export const contentType = "image/png";
-
-            function clampDescription(value) {
-              const text = String(value || "").trim();
-              if (text.length <= 140) return text;
-              return `${text.slice(0, 137).trimEnd()}...`;
-            }
-
-            export default function OpenGraphImage() {
-              const description = clampDescription(starterSiteDescription);
-              return new ImageResponse(
-                (
-                  <div
-                    style={{
-                      height: "100%",
-                      width: "100%",
-                      display: "flex",
-                      flexDirection: "column",
-                      justifyContent: "space-between",
-                      background: "linear-gradient(135deg, #0f172a 0%, #1d4ed8 100%)",
-                      color: "#ffffff",
-                      padding: "72px",
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "20px",
-                        maxWidth: "900px",
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          fontSize: "28px",
-                          fontWeight: 600,
-                          letterSpacing: "0.08em",
-                          textTransform: "uppercase",
-                          opacity: 0.8,
-                        }}
-                      >
-                        Product Site
-                      </div>
-                      <div
-                        style={{
-                          display: "flex",
-                          fontSize: "82px",
-                          fontWeight: 700,
-                          lineHeight: 1,
-                          letterSpacing: "-0.05em",
-                        }}
-                      >
-                        {starterSiteName}
-                      </div>
-                      <div
-                        style={{
-                          display: "flex",
-                          fontSize: "34px",
-                          lineHeight: 1.3,
-                          color: "rgba(255, 255, 255, 0.84)",
-                        }}
-                      >
-                        {description}
-                      </div>
-                    </div>
-                  </div>
-                ),
-                size,
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_server_js() -> str:
-    return (
-        dedent(
-            """
-            import "server-only";
-
-            import { headers } from "next/headers";
-
-            import surfaceContext from "../../_takyon/surface-context.js";
-            import { resolveSubuserRuntimeBase } from "../../_takyon/runtime-client.js";
-            import { starterAppState, starterIsAuthenticated } from "./starter-context.js";
-
-            function joinRoute(base, route) {
-              const cleanRoute = String(route || "").replace(/^\\/+/, "");
-              const cleanBase = String(base || "").trim().replace(/\\/+$/, "");
-              return cleanBase ? `${cleanBase}/${cleanRoute}` : `/${cleanRoute}`;
-            }
-
-            function requestOrigin() {
-              const requestHeaders = headers();
-              const host = requestHeaders.get("x-forwarded-host") || requestHeaders.get("host") || "localhost:3000";
-              const proto = requestHeaders.get("x-forwarded-proto") || (host.startsWith("localhost") ? "http" : "https");
-              return `${proto}://${host}`;
-            }
-
-            function requestCookieHeader() {
-              return headers().get("cookie") || "";
-            }
-
-            function requestHasSessionCookie() {
-              const target = "__APP_SESSION_COOKIE__=";
-              return requestCookieHeader()
-                .split(";")
-                .some((part) => String(part || "").trim().startsWith(target));
-            }
-
-            function requestLocation(origin) {
-              const url = new URL(origin);
-              return {
-                hostname: url.hostname,
-                href: `${origin}/app`,
-                pathname: "/app",
-                origin,
-              };
-            }
-
-            function runtimeUrl(route) {
-              const origin = requestOrigin();
-              const base = resolveSubuserRuntimeBase({
-                runtimeApiBase: surfaceContext.runtimeApiBase,
-                frontendApiMode: surfaceContext.frontendApiMode,
-                location: requestLocation(origin),
-              });
-              return new URL(joinRoute(base, route), origin).toString();
-            }
-
-            async function serverJson(route) {
-              const response = await fetch(runtimeUrl(route), {
-                method: "GET",
-                cache: "no-store",
-                headers: {
-                  Accept: "application/json",
-                  Cookie: requestCookieHeader(),
-                },
-              });
-              const payload = await response
-                .json()
-                .catch(() => ({ success: false, error: `non_json_response:${response.status}` }));
-              if (!response.ok) {
-                const error = new Error(
-                  String(payload.error || payload.detail || `request_failed:${response.status}`),
-                );
-                error.status = response.status;
-                error.payload = payload;
-                throw error;
-              }
-              return payload;
-            }
-
-            export async function loadServerAppState() {
-              const errors = {};
-              if (!requestHasSessionCookie()) {
-                return starterAppState({}, null, { errors });
-              }
-              const session = await serverJson("session").catch((error) => {
-                errors.session = String(error?.message || error || "session_unavailable");
-                return {};
-              });
-              let account = null;
-              if (starterIsAuthenticated(session || {}, null)) {
-                account = await serverJson("account").catch((error) => {
-                  errors.account = String(error?.message || error || "account_unavailable");
-                  return null;
-                });
-              }
-              return starterAppState(session || {}, account, { errors });
-            }
-            """
-        ).strip().replace("__APP_SESSION_COOKIE__", APP_SESSION_COOKIE)
-        + "\n"
-    )
-
-
-def _subuser_app_starter_context_js(*, title_literal: str) -> str:
-    return (
-        dedent(
-            """
-            import surfaceContext from "../../_takyon/surface-context.js";
-            import { createSubuserRuntimeClient } from "../../_takyon/runtime-client.js";
-            import { planSubuserSurface } from "../../_takyon/packs.js";
-
-            export const starterBusinessName = __STARTER_BUSINESS_NAME__;
-            export const starterSurfaceContext = surfaceContext;
-            export const starterRuntime = createSubuserRuntimeClient(surfaceContext);
-            export const starterPlan = planSubuserSurface({
-              appMode: surfaceContext.appMode,
-              subscriptionStyle: surfaceContext.subscriptionStyle,
-              apiMode: surfaceContext.apiMode,
-              routes: Array.isArray(surfaceContext.routes)
-                ? surfaceContext.routes.map((route) =>
-                    typeof route === "string" ? String(route || "") : String(route?.path || route?.pathname || "")
-                  )
-                : [],
-            });
-            export const starterConfiguredPlans = Array.isArray(surfaceContext.plans)
-              ? surfaceContext.plans
-                  .filter((plan) => plan && typeof plan === "object" && String(plan.planKey || "").trim())
-                  .map((plan) => ({ ...plan }))
-              : [];
-            export const starterDefaultMonthlyPlan =
-              starterConfiguredPlans.find((plan) => String(plan.planKey || "").trim() === "monthly") || null;
-            export const starterDefaultPlanKey =
-              starterDefaultMonthlyPlan?.planKey
-                ? String(starterDefaultMonthlyPlan.planKey)
-                : String(surfaceContext.subscriptionStyle || "").trim() === "monthly"
-                  ? "monthly"
-                : "";
-
-            export const starterFeatures = Array.isArray(surfaceContext.runtimeFeatures)
-              ? surfaceContext.runtimeFeatures.map((value) => String(value || "").trim()).filter(Boolean)
-              : [];
-
-            function defaultLocation() {
-              if (typeof window !== "undefined" && window.location) {
-                return window.location;
-              }
-              return {
-                origin: "http://localhost",
-                href: "http://localhost/",
-                pathname: "/",
-              };
-            }
-
-            async function starterJsonRequest(url, init = {}) {
-              const response = await fetch(url, {
-                credentials: "same-origin",
-                headers: {
-                  Accept: "application/json",
-                  ...(init.body ? { "Content-Type": "application/json" } : {}),
-                  ...(init.headers || {}),
-                },
-                ...init,
-              });
-              const text = await response.text();
-              let data = {};
-              if (text) {
-                try {
-                  data = JSON.parse(text);
-                } catch (_error) {
-                  data = { raw: text };
-                }
-              }
-              if (!response.ok) {
-                const message = typeof data?.error === "string"
-                  ? data.error
-                  : `Request failed (${response.status})`;
-                const error = new Error(message);
-                error.status = response.status;
-                error.data = data;
-                throw error;
-              }
-              return data;
-            }
-
-            export function railDeclared(rail) {
-              return starterFeatures.includes(String(rail || "").trim());
-            }
-
-            export function railCallable(rail) {
-              return starterRuntime.isRailCallable(String(rail || "").trim());
-            }
-
-            function lowerText(value) {
-              return String(value || "").trim().toLowerCase();
-            }
-
-            function looksLikeAccountPayload(value) {
-              return !!(
-                value &&
-                typeof value === "object" &&
-                !Array.isArray(value) &&
-                (
-                  Array.isArray(value.entitlements) ||
-                  value.user ||
-                  value.plan ||
-                  value.entitled !== undefined ||
-                  value.revenue ||
-                  value.usage_this_period
-                )
-              );
-            }
-
-            function normalizeViewerInputs(sessionPayload = {}, accountPayload = null) {
-              let session = sessionPayload && typeof sessionPayload === "object" ? sessionPayload : {};
-              let account = accountPayload && typeof accountPayload === "object" ? accountPayload : null;
-              if (account === null && looksLikeAccountPayload(session)) {
-                account = session;
-                session = {};
-              }
-              return { session, account };
-            }
-
-            function accountUser(accountPayload = {}) {
-              return accountPayload && typeof accountPayload === "object" && accountPayload.user && typeof accountPayload.user === "object"
-                ? accountPayload.user
-                : null;
-            }
-
-            function accountEntitlements(accountPayload = {}) {
-              return accountPayload && typeof accountPayload === "object" && Array.isArray(accountPayload.entitlements)
-                ? accountPayload.entitlements.filter((item) => item && typeof item === "object")
-                : [];
-            }
-
-            function isPaidTier(value) {
-              return ["paid", "pro", "trial"].includes(lowerText(value));
-            }
-
-            function entitlementStatus(entitlement = {}) {
-              const status = lowerText(entitlement.status);
-              if (status === "paid") return "active";
-              if (status === "cancelled") return "canceled";
-              return status;
-            }
-
-            function activePaidEntitlement(entitlement = {}) {
-              const status = entitlementStatus(entitlement);
-              const tier = lowerText(entitlement.tier);
-              if (!["active", "trialing", "paid"].includes(status)) return false;
-              if (isPaidTier(tier)) return true;
-              if (String(entitlement.plan_key || entitlement.planKey || "").trim()) return true;
-              if (entitlement.stripe_subscription_id || entitlement.stripeSubscriptionId) return true;
-              return false;
-            }
-
-            function paidEntitlements(accountPayload = {}) {
-              return accountEntitlements(accountPayload)
-                .filter((item) => {
-                  const tier = lowerText(item.tier);
-                  return Boolean(
-                    isPaidTier(tier) ||
-                    String(item.plan_key || item.planKey || "").trim() ||
-                    item.stripe_subscription_id ||
-                    item.stripeSubscriptionId
-                  );
-                })
-                .map((item) => ({
-                  ...item,
-                  status: entitlementStatus(item),
-                }));
-            }
-
-            function subscriptionStatusRank(status) {
-              return {
-                active: 0,
-                trialing: 1,
-                past_due: 2,
-                canceled: 3,
-                revoked: 4,
-              }[status] ?? 9;
-            }
-
-            export function starterIsAuthenticated(sessionPayload = {}, accountPayload = null) {
-              const { session, account } = normalizeViewerInputs(sessionPayload, accountPayload);
-              const user = accountUser(account || {});
-              if (user && String(user.id || "").trim()) return true;
-              if (session && typeof session === "object") {
-                if (session.authenticated === true) return true;
-                if (session.session && typeof session.session === "object") return true;
-                if (String(session.email || "").trim()) return true;
-              }
-              return false;
-            }
-
-            export function starterIsEntitled(accountPayload = {}) {
-              if (!accountPayload || typeof accountPayload !== "object") return false;
-              if (accountPayload.entitled === true) return true;
-              if (accountPayload.plan && typeof accountPayload.plan === "object" && accountPayload.plan.active === true) return true;
-              if (accountEntitlements(accountPayload).some((item) => activePaidEntitlement(item))) return true;
-              const user = accountUser(accountPayload);
-              const userTier = lowerText(user?.tier);
-              if (isPaidTier(userTier)) return true;
-              return false;
-            }
-
-            export function starterSubscriptionState(accountPayload = {}) {
-              const ranked = paidEntitlements(accountPayload).sort((left, right) => {
-                return subscriptionStatusRank(left.status) - subscriptionStatusRank(right.status);
-              });
-              const primary = ranked[0] || null;
-              const fallbackUser = accountUser(accountPayload || {});
-              if (primary) {
-                const state = ["active", "trialing", "past_due", "canceled"].includes(primary.status)
-                  ? primary.status
-                  : activePaidEntitlement(primary)
-                    ? "active"
-                    : "none";
-                const entitled = ["active", "trialing"].includes(state);
-                return {
-                  state,
-                  entitled,
-                  planKey: String(primary.plan_key || primary.planKey || "").trim(),
-                  tier: String(primary.tier || "").trim(),
-                  currentPeriodEnd: String(primary.current_period_end || primary.currentPeriodEnd || "").trim(),
-                  cancelAtPeriodEnd: Boolean(
-                    primary.cancel_at_period_end ||
-                    primary.cancelAtPeriodEnd ||
-                    (primary.metadata && (primary.metadata.cancel_at_period_end || primary.metadata.cancelAtPeriodEnd))
-                  ),
-                  source: primary,
-                  entitlements: ranked,
-                };
-              }
-              if (isPaidTier(fallbackUser?.tier)) {
-                return {
-                  state: lowerText(fallbackUser.tier) === "trial" ? "trialing" : "active",
-                  entitled: true,
-                  planKey: "",
-                  tier: String(fallbackUser.tier || "").trim(),
-                  currentPeriodEnd: "",
-                  cancelAtPeriodEnd: false,
-                  source: null,
-                  entitlements: ranked,
-                };
-              }
-              return {
-                state: "none",
-                entitled: false,
-                planKey: "",
-                tier: "",
-                currentPeriodEnd: "",
-                cancelAtPeriodEnd: false,
-                source: null,
-                entitlements: ranked,
-              };
-            }
-
-            export function starterCanUseApp(sessionPayload = {}, accountPayload = null) {
-              const { session, account } = normalizeViewerInputs(sessionPayload, accountPayload);
-              return starterIsAuthenticated(session, account) && starterIsEntitled(account || {});
-            }
-
-            export function starterCanCheckout(sessionPayload = {}, accountPayload = null) {
-              const { session, account } = normalizeViewerInputs(sessionPayload, accountPayload);
-              return (
-                starterIsAuthenticated(session, account) &&
-                railDeclared("checkout") &&
-                railCallable("checkout") &&
-                !starterIsEntitled(account || {})
-              );
-            }
-
-            export function starterCanGenerate(sessionPayload = {}, accountPayload = null) {
-              const { session, account } = normalizeViewerInputs(sessionPayload, accountPayload);
-              return starterCanUseApp(session, account) && railDeclared("generate") && railCallable("generate");
-            }
-
-            export function starterViewerState(sessionPayload = {}, accountPayload = null) {
-              const { session, account } = normalizeViewerInputs(sessionPayload, accountPayload);
-              const authenticated = starterIsAuthenticated(session, account);
-              const entitled = starterIsEntitled(account || {});
-              const user = accountUser(account || {});
-              const entitlements = accountEntitlements(account || {});
-              const hasAccount = !!(user && String(user.id || "").trim());
-              const signedUp = authenticated && hasAccount;
-              const canCheckout = starterCanCheckout(session, account);
-              const canGenerate = starterCanGenerate(session, account);
-              let state = "anonymous";
-              if (authenticated) {
-                state = entitled ? "authenticated_entitled" : "authenticated_unentitled";
-              }
-              return {
-                state,
-                authenticated,
-                signedUp,
-                entitled,
-                canCheckout,
-                canGenerate,
-                user,
-                entitlements,
-                session: session && typeof session === "object" ? session : null,
-                account: account && typeof account === "object" ? account : null,
-              };
-            }
-
-            export function starterAppState(sessionPayload = {}, accountPayload = null, options = {}) {
-              const viewer = starterViewerState(sessionPayload, accountPayload);
-              const subscription = starterSubscriptionState(viewer.account || {});
-              const canUseApp = starterCanUseApp(viewer.session || {}, viewer.account || null);
-              const canManageProfile = viewer.authenticated && railDeclared("profile") && railCallable("profile");
-              const errors = options && typeof options === "object" && options.errors && typeof options.errors === "object"
-                ? options.errors
-                : {};
-              let accessState = "sign_in_required";
-              if (viewer.authenticated) {
-                accessState = canUseApp ? "ready" : "subscription_required";
-              }
-              if (viewer.authenticated && errors.account) {
-                accessState = "blocked";
-              }
-              return {
-                viewer,
-                subscription,
-                access: {
-                  state: accessState,
-                  requiresAuth: accessState === "sign_in_required",
-                  requiresSubscription: accessState === "subscription_required",
-                  ready: accessState === "ready",
-                  blocked: accessState === "blocked",
-                  reason: accessState === "blocked" ? String(errors.account || errors.session || "account_unavailable") : "",
-                },
-                state: viewer.state,
-                authenticated: viewer.authenticated,
-                signedUp: viewer.signedUp,
-                entitled: viewer.entitled,
-                canCheckout: viewer.canCheckout,
-                canGenerate: viewer.canGenerate,
-                canUseApp,
-                canManageProfile,
-                user: viewer.user,
-                entitlements: viewer.entitlements,
-                session: viewer.session,
-                account: viewer.account,
-                errors,
-              };
-            }
-
-            export async function starterRequestAuth(payload = {}) {
-              void payload;
-              throw new Error("Supabase Auth is the only supported product sign-in path. Use the seeded ProductAuthProvider flow and POST auth/session with a Supabase access token.");
-            }
-
-            export async function starterSession() {
-              if (railCallable("auth")) {
-                return starterRuntime.session();
-              }
-              return starterJsonRequest(starterRuntime.routeUrl("session"), { method: "GET" });
-            }
-
-            export async function starterAccount() {
-              if (railCallable("account")) {
-                return starterRuntime.account();
-              }
-              return starterJsonRequest(starterRuntime.routeUrl("account"), { method: "GET" });
-            }
-
-            export async function starterCancelSubscription(payload = {}) {
-              if (railCallable("account")) {
-                return starterRuntime.cancelSubscription(payload);
-              }
-              return starterJsonRequest(starterRuntime.routeUrl("account"), {
-                method: "POST",
-                body: JSON.stringify({
-                  ...payload,
-                  action: "cancel_subscription",
-                }),
-              });
-            }
-
-            export async function starterProfile() {
-              if (railCallable("profile")) {
-                return starterRuntime.profile();
-              }
-              return starterJsonRequest(starterRuntime.routeUrl("profile"), { method: "GET" });
-            }
-
-            export async function starterUpdateProfile(payload = {}) {
-              if (railCallable("profile")) {
-                return starterRuntime.updateProfile(payload);
-              }
-              return starterJsonRequest(starterRuntime.routeUrl("profile"), {
-                method: "POST",
-                body: JSON.stringify(payload),
-              });
-            }
-
-            export async function starterCheckout(payload = {}) {
-              const location = defaultLocation();
-              const success_url = payload.success_url || payload.successUrl || `${location.origin}/app?checkout=success`;
-              const cancel_url = payload.cancel_url || payload.cancelUrl || `${location.origin}/app?checkout=cancel`;
-              if (railCallable("checkout")) {
-                return starterRuntime.checkout({
-                  ...payload,
-                  success_url,
-                  cancel_url,
-                });
-              }
-              return starterJsonRequest(starterRuntime.routeUrl("checkout"), {
-                method: "POST",
-                body: JSON.stringify({
-                  ...payload,
-                  success_url,
-                  cancel_url,
-                }),
-              });
-            }
-
-            export async function starterGenerate(payload = {}) {
-              if (railCallable("generate")) {
-                return starterRuntime.generate(payload);
-              }
-              return starterJsonRequest(starterRuntime.routeUrl("generate"), {
-                method: "POST",
-                body: JSON.stringify(payload),
-              });
-            }
-
-            export async function starterLoadViewer() {
-              const appState = await starterLoadAppState();
-              return appState.viewer;
-            }
-
-            export async function starterLoadAppState() {
-              const errors = {};
-              const session = await starterSession().catch((error) => {
-                errors.session = String(error?.message || error || "session_unavailable");
-                return {};
-              });
-              let account = null;
-              if (starterIsAuthenticated(session || {}, null)) {
-                account = await starterAccount().catch((error) => {
-                  errors.account = String(error?.message || error || "account_unavailable");
-                  return null;
-                });
-              }
-              return starterAppState(session || {}, account, { errors });
-            }
-            """
-        ).strip().replace("__STARTER_BUSINESS_NAME__", title_literal)
-        + "\n"
-    )
-
-
-def _subuser_app_starter_primitives_js() -> str:
-    return (
-        dedent(
-            """
-            "use client";
-
-            import Link from "next/link";
-            import { createContext, useContext, useEffect, useState } from "react";
-
-            import {
-              starterBusinessName,
-              starterConfiguredPlans,
-              starterDefaultMonthlyPlan,
-              starterDefaultPlanKey,
-              starterSurfaceContext,
-              starterAppState,
-              starterViewerState,
-              starterIsAuthenticated,
-              starterIsEntitled,
-              starterSubscriptionState,
-              starterCanUseApp,
-              starterCanCheckout,
-              starterCanGenerate,
-              starterLoadAppState,
-              starterRequestAuth,
-              starterSession,
-              starterAccount,
-              starterCancelSubscription,
-              starterCheckout,
-              starterGenerate,
-              starterProfile,
-              starterUpdateProfile,
-            } from "./starter-context.js";
-
-            const StarterAppStateContext = createContext({ appState: null, setAppState: () => {} });
-
-            export {
-              starterBusinessName,
-              starterConfiguredPlans,
-              starterDefaultMonthlyPlan,
-              starterDefaultPlanKey,
-              starterSurfaceContext,
-              starterAppState,
-              starterViewerState,
-              starterIsAuthenticated,
-              starterIsEntitled,
-              starterSubscriptionState,
-              starterCanUseApp,
-              starterCanCheckout,
-              starterCanGenerate,
-              starterLoadAppState,
-              starterRequestAuth,
-              starterSession,
-              starterAccount,
-              starterCheckout,
-              starterGenerate,
-              starterProfile,
-              starterUpdateProfile,
-              starterCancelSubscription,
-            };
-
-            export function humanize(value) {
-              return String(value || "")
-                .replace(/[_-]+/g, " ")
-                .replace(/\\s+/g, " ")
-                .trim()
-                .replace(/\\b\\w/g, (letter) => letter.toUpperCase());
-            }
-
-            export function formatMoney(cents = 0, currency = "usd") {
-              return new Intl.NumberFormat("en-US", {
-                style: "currency",
-                currency: String(currency || "usd").toUpperCase(),
-                minimumFractionDigits: 0,
-                maximumFractionDigits: 2,
-              }).format((Number(cents || 0) || 0) / 100);
-            }
-
-            export function formatDate(value) {
-              if (!value) return "—";
-              const date = new Date(value);
-              if (Number.isNaN(date.getTime())) return "—";
-              return new Intl.DateTimeFormat("en-US", {
-                month: "short",
-                day: "numeric",
-                year: "numeric",
-              }).format(date);
-            }
-
-            export function currentPlan() {
-              return starterDefaultMonthlyPlan || starterConfiguredPlans[0] || null;
-            }
-
-            export function planSummary(plan = null) {
-              if (!plan) return "No active plan yet";
-              const amount = formatMoney(plan.priceCents, plan.currency);
-              const interval = String(plan.billingInterval || "").trim();
-              return interval ? `${amount} / ${interval}` : amount;
-            }
-
-            function toneClass(state) {
-              if (state === "ready" || state === "active" || state === "trialing") return "starter-pill-success";
-              if (state === "past_due" || state === "subscription_required") return "starter-pill-warn";
-              if (state === "blocked" || state === "canceled") return "starter-pill-danger";
-              return "starter-pill-muted";
-            }
-
-            export function StarterAppStateProvider({ initialAppState, children }) {
-              const [appState, setAppState] = useState(initialAppState || null);
-              useEffect(() => {
-                setAppState(initialAppState || null);
-              }, [initialAppState]);
-              return (
-                <StarterAppStateContext.Provider value={{ appState, setAppState }}>
-                  {children}
-                </StarterAppStateContext.Provider>
-              );
-            }
-
-            export function useStarterAppState() {
-              return useContext(StarterAppStateContext);
-            }
-
-            export function useStarterApp() {
-              const { appState, setAppState } = useStarterAppState();
-              return {
-                appState,
-                setAppState,
-                requestAuth: starterRequestAuth,
-                session: starterSession,
-                account: starterAccount,
-                checkout: starterCheckout,
-                cancelSubscription: starterCancelSubscription,
-                profile: starterProfile,
-                updateProfile: starterUpdateProfile,
-                generate: starterGenerate,
-                loadAppState: starterLoadAppState,
-              };
-            }
-
-            export function StarterStatePill({ label, state }) {
-              return (
-                <span className={`starter-pill ${toneClass(String(state || "").trim().toLowerCase())}`}>
-                  {label}: {humanize(state || "unknown")}
-                </span>
-              );
-            }
-
-            export function StarterStatusBanner({ title, body, actions = null }) {
-              return (
-                <section className="starter-status-banner">
-                  <div className="starter-status-copy">
-                    <strong>{title}</strong>
-                    <span>{body}</span>
-                  </div>
-                  {actions ? <div className="starter-actions starter-actions-compact">{actions}</div> : null}
-                </section>
-              );
-            }
-
-            export function StarterAuthCard({
-              intent = "signin",
-              onComplete = null,
-              title = "",
-              copy = "",
-              kicker = "",
-              backHref = "/",
-              backLabel = "Back",
-            }) {
-              const [email, setEmail] = useState("");
-              const [message, setMessage] = useState("");
-              const [error, setError] = useState("");
-              const [pending, setPending] = useState(false);
-              const actionLabel = intent === "subscribe" ? "Continue to subscribe" : "Continue with Supabase";
-              const resolvedTitle =
-                title || (intent === "subscribe" ? "Sign in to continue to subscription." : "Sign in to continue.");
-              const resolvedCopy =
-                copy || "Use the Supabase sign-in flow configured for this product.";
-              const resolvedKicker = kicker || (intent === "subscribe" ? "Continue" : "Sign in");
-
-              async function handleSubmit(event) {
-                event.preventDefault();
-                setPending(true);
-                setMessage("");
-                setError("");
-                try {
-                  await starterRequestAuth({ email });
-                  setMessage("Continue in the Supabase sign-in window.");
-                  if (onComplete) onComplete();
-                } catch (requestError) {
-                  setError(String(requestError?.message || requestError || "Unable to start Supabase sign-in."));
-                } finally {
-                  setPending(false);
-                }
-              }
-
-              return (
-                <section className="starter-card starter-section-card">
-                  <p className="starter-eyebrow">{resolvedKicker}</p>
-                  <h1 className="starter-title starter-title-sm">{resolvedTitle}</h1>
-                  <p className="starter-copy">{resolvedCopy}</p>
-                  <form className="starter-form" onSubmit={handleSubmit}>
-                    <div className="starter-field">
-                      <label htmlFor="starter-email">Email</label>
-                      <input
-                        id="starter-email"
-                        className="starter-input"
-                        type="email"
-                        autoComplete="email"
-                        required
-                        value={email}
-                        onChange={(event) => setEmail(event.target.value)}
-                        placeholder="you@example.com"
-                      />
-                    </div>
-                    <div className="starter-actions starter-actions-compact">
-                      <button className="starter-button starter-button-primary" type="submit" disabled={pending || !email}>
-                        {pending ? "Sending..." : actionLabel}
-                      </button>
-                      <Link className="starter-button starter-button-secondary" href={backHref}>
-                        {backLabel}
-                      </Link>
-                    </div>
-                  </form>
-                  {message ? <div className="starter-alert">{message}</div> : null}
-                  {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
-                </section>
-              );
-            }
-
-            export function StarterSubscriptionCard({ appState, checkoutState = "" }) {
-              const plan = currentPlan();
-              const [error, setError] = useState("");
-              const [pending, setPending] = useState(false);
-
-              async function handleCheckout() {
-                setPending(true);
-                setError("");
-                try {
-                  const payload = await starterCheckout({
-                    plan_key: starterDefaultPlanKey,
-                  });
-                  if (payload?.checkout_url) {
-                    window.location.assign(String(payload.checkout_url));
-                    return;
-                  }
-                } catch (checkoutError) {
-                  setError(String(checkoutError?.message || checkoutError || "Unable to start checkout."));
-                } finally {
-                  setPending(false);
-                }
-              }
-
-              return (
-                <section className="starter-card starter-section-card">
-                  <p className="starter-eyebrow">Subscription</p>
-                  <h1 className="starter-title starter-title-sm">Finish subscription to continue.</h1>
-                  <p className="starter-copy">
-                    {checkoutState === "success"
-                      ? "We received your checkout. Account access updates as soon as the subscription confirms."
-                      : appState.subscription.state === "past_due"
-                        ? "Update billing to restore access."
-                        : "Your private account unlocks as soon as checkout completes."}
-                  </p>
-                  <div className="starter-card starter-card-soft">
-                    <strong>{plan ? humanize(plan.planKey || "plan") : "Plan"}</strong>
-                    <p className="starter-note">{plan ? planSummary(plan) : "Plan setup is still pending."}</p>
-                  </div>
-                  <div className="starter-actions starter-actions-compact">
-                    <button
-                      className="starter-button starter-button-primary"
-                      type="button"
-                      disabled={!appState.canCheckout || pending || !starterDefaultPlanKey}
-                      onClick={handleCheckout}
-                    >
-                      {pending ? "Starting checkout..." : "Subscribe"}
-                    </button>
-                    <Link className="starter-button starter-button-secondary" href="/app/profile">
-                      Account
-                    </Link>
-                  </div>
-                  {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
-                </section>
-              );
-            }
-
-            export function StarterBlockedCard({ appState }) {
-              return (
-                <section className="starter-card starter-section-card">
-                  <p className="starter-eyebrow">Please try again</p>
-                  <h1 className="starter-title starter-title-sm">We couldn't load your account.</h1>
-                  <p className="starter-copy">Refresh the page or try again in a moment.</p>
-                  <div className="starter-response">
-                    {String(appState?.access?.reason || appState?.errors?.account || "account_unavailable")}
-                  </div>
-                  <div className="starter-actions starter-actions-compact">
-                    <Link className="starter-button starter-button-primary" href="/app/profile">
-                      Open account
-                    </Link>
-                    <Link className="starter-button starter-button-secondary" href="/">
-                      Back to site
-                    </Link>
-                  </div>
-                </section>
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_access_page_js() -> str:
-    return (
-        dedent(
-            """
-            "use client";
-
-            import Link from "next/link";
-            import { useEffect, useState } from "react";
-
-            import {
-              StarterAppStateProvider,
-              StarterAuthCard,
-              StarterBlockedCard,
-              StarterStatePill,
-              StarterStatusBanner,
-              StarterSubscriptionCard,
-              currentPlan,
-              planSummary,
-              starterBusinessName,
-              useStarterAppState,
-            } from "./starter-primitives.js";
-
-            function StarterReadyCard() {
-              const { appState } = useStarterAppState();
-              const plan = currentPlan();
-              const membershipState = String(appState.subscription?.state || "active").trim().toLowerCase();
-              return (
-                <div className="starter-stack">
-                  <StarterStatusBanner
-                    title="Access ready."
-                    body="You're signed in. Manage your membership and profile in Account."
-                    actions={
-                      <>
-                        <Link className="starter-button starter-button-primary" href="/app/profile">
-                          Open account
-                        </Link>
-                        <Link className="starter-button starter-button-secondary" href="/">
-                          Back to site
-                        </Link>
-                      </>
-                    }
-                  />
-                  <section className="starter-card starter-section-card">
-                    <p className="starter-eyebrow">Private access</p>
-                    <h1 className="starter-title starter-title-sm">{starterBusinessName}</h1>
-                    <p className="starter-copy">
-                      Your membership is active. Use Account to review your plan, billing state, and profile details.
-                    </p>
-                    <div className="starter-actions starter-actions-compact">
-                      <StarterStatePill label="Membership" state={membershipState} />
-                      <StarterStatePill label="Access" state={appState.access?.state || "ready"} />
-                    </div>
-                    <div className="starter-card starter-card-soft">
-                      <strong>{plan ? planSummary(plan) : "Plan details will appear here."}</strong>
-                      <p className="starter-note">
-                        {appState.user?.email ? `Signed in as ${String(appState.user.email)}` : "Account access is active."}
-                      </p>
-                    </div>
-                  </section>
-                </div>
-              );
-            }
-
-            function StarterAccessInner() {
-              const { appState } = useStarterAppState();
-              const [intent, setIntent] = useState("signin");
-              const [checkoutState, setCheckoutState] = useState("");
-
-              useEffect(() => {
-                if (typeof window === "undefined") return;
-                const params = new URLSearchParams(window.location.search);
-                const nextIntent = String(params.get("intent") || "signin").trim().toLowerCase();
-                const nextCheckout = String(params.get("checkout") || "").trim().toLowerCase();
-                setIntent(nextIntent === "subscribe" ? "subscribe" : "signin");
-                setCheckoutState(nextCheckout === "success" ? "success" : "");
-              }, []);
-
-              if (!appState) {
-                return (
-                  <section className="starter-card starter-section-card">
-                    <h1 className="starter-title starter-title-sm">Loading access state...</h1>
-                  </section>
-                );
-              }
-              if (appState.access.state === "ready") {
-                return <StarterReadyCard />;
-              }
-              if (appState.access.state === "blocked") {
-                return <StarterBlockedCard appState={appState} />;
-              }
-              if (appState.access.state === "subscription_required") {
-                return <StarterSubscriptionCard appState={appState} checkoutState={checkoutState} />;
-              }
-              return <StarterAuthCard intent={intent === "subscribe" ? "subscribe" : "signin"} />;
-            }
-
-            export function StarterAccessPage({ initialAppState }) {
-              return (
-                <StarterAppStateProvider initialAppState={initialAppState}>
-                  <StarterAccessInner />
-                </StarterAppStateProvider>
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_product_home_js() -> str:
-    return (
-        dedent(
-            """
-            "use client";
-
-            import Link from "next/link";
-
-            import {
-              StarterAppStateProvider,
-              StarterStatePill,
-              StarterStatusBanner,
-              currentPlan,
-              planSummary,
-              starterBusinessName,
-              useStarterAppState,
-            } from "./starter-primitives.js";
-
-            function StarterProductHomeInner() {
-              const { appState } = useStarterAppState();
-              const plan = currentPlan();
-              const membershipState = String(appState?.subscription?.state || "active").trim().toLowerCase();
-              return (
-                <div className="starter-stack">
-                  <StarterStatusBanner
-                    title="Access ready."
-                    body="Your private account area is active. Use Account to review your membership and profile."
-                    actions={
-                      <>
-                        <Link className="starter-button starter-button-primary" href="/app/profile">
-                          Open account
-                        </Link>
-                        <Link className="starter-button starter-button-secondary" href="/">
-                          Back to site
-                        </Link>
-                      </>
-                    }
-                  />
-                  <section className="starter-card starter-section-card">
-                    <p className="starter-eyebrow">Private access</p>
-                    <h1 className="starter-title starter-title-sm">{starterBusinessName}</h1>
-                    <p className="starter-copy">
-                      Your membership is active. Keep the main product flow here, and use Account for subscription and profile details.
-                    </p>
-                    <div className="starter-actions starter-actions-compact">
-                      <StarterStatePill label="Membership" state={membershipState} />
-                      <StarterStatePill label="Access" state={appState?.access?.state || "ready"} />
-                    </div>
-                    <div className="starter-card starter-card-soft">
-                      <strong>{plan ? planSummary(plan) : "Plan details will appear here."}</strong>
-                      <p className="starter-note">
-                        {appState?.user?.email ? `Signed in as ${String(appState.user.email)}` : "Account access is active."}
-                      </p>
-                    </div>
-                  </section>
-                </div>
-              );
-            }
-
-            export function StarterProductHome({ initialAppState }) {
-              return (
-                <StarterAppStateProvider initialAppState={initialAppState}>
-                  <StarterProductHomeInner />
-                </StarterAppStateProvider>
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_account_page_js() -> str:
-    return (
-        dedent(
-            """
-            "use client";
-
-            import Link from "next/link";
-            import { useEffect, useState } from "react";
-
-            import {
-              StarterAppStateProvider,
-              StarterAuthCard,
-              StarterStatePill,
-              StarterStatusBanner,
-              currentPlan,
-              formatDate,
-              formatMoney,
-              planSummary,
-              starterCancelSubscription,
-              starterLoadAppState,
-              starterProfile,
-              starterUpdateProfile,
-              useStarterAppState,
-            } from "./starter-primitives.js";
-
-            function StarterAccountInner() {
-              const { appState, setAppState } = useStarterAppState();
-              const [profile, setProfile] = useState(null);
-              const [displayName, setDisplayName] = useState("");
-              const [headline, setHeadline] = useState("");
-              const [bio, setBio] = useState("");
-              const [message, setMessage] = useState("");
-              const [error, setError] = useState("");
-              const [pending, setPending] = useState(false);
-              const [cancelMessage, setCancelMessage] = useState("");
-              const [cancelError, setCancelError] = useState("");
-              const [cancelPending, setCancelPending] = useState(false);
-
-              useEffect(() => {
-                if (!appState?.canManageProfile) return;
-                let active = true;
-                starterProfile()
-                  .then((payload) => {
-                    if (!active) return;
-                    const nextProfile = payload?.profile || null;
-                    setProfile(nextProfile);
-                    setDisplayName(String(nextProfile?.display_name || nextProfile?.displayName || ""));
-                    setHeadline(String(nextProfile?.headline || ""));
-                    setBio(String(nextProfile?.bio || ""));
-                  })
-                  .catch((loadError) => {
-                    if (!active) return;
-                    setError(String(loadError?.message || loadError || "Unable to load profile."));
-                  });
-                return () => {
-                  active = false;
-                };
-              }, [appState?.canManageProfile]);
-
-              if (!appState) {
-                return (
-                  <section className="starter-card starter-section-card">
-                    <h1 className="starter-title starter-title-sm">Loading account...</h1>
-                  </section>
-                );
-              }
-
-              if (!appState.authenticated) {
-                return (
-                  <StarterAuthCard
-                    intent="signin"
-                    kicker="Account"
-                    title="Sign in to open your account."
-                    copy="Use your email to manage your subscription and profile."
-                    backHref="/"
-                    backLabel="Back to site"
-                  />
-                );
-              }
-
-              const plan = currentPlan();
-              const usage = appState.account?.usage_this_period || {};
-              const revenue = appState.account?.revenue || {};
-              const statusState = String(appState.subscription?.state || "none").trim().toLowerCase();
-              const accessState = String(appState.access?.state || "unknown").trim().toLowerCase();
-              const currentPeriodEnd = appState.subscription?.currentPeriodEnd || "";
-              const cancelScheduled = Boolean(appState.subscription?.cancelAtPeriodEnd);
-              const canCancelSubscription = Boolean(
-                (appState.subscription?.source?.stripe_subscription_id || appState.subscription?.source?.stripeSubscriptionId) &&
-                !cancelScheduled
-              );
-              const paidLabel = formatMoney(revenue.amount_paid_cents || 0, "usd");
-              const profileName =
-                String(
-                  profile?.display_name ||
-                  profile?.displayName ||
-                  appState.user?.name ||
-                  ""
-                ).trim() || "Not set yet";
-              const bannerTitle = cancelScheduled
-                ? "Cancellation pending."
-                : appState.entitled
-                  ? "Account ready."
-                  : "Subscription required.";
-              const bannerBody = cancelScheduled
-                ? "Refresh this account for the authoritative cancellation result."
-                : appState.entitled
-                  ? "Manage your plan, billing state, and profile from one place."
-                  : statusState === "past_due"
-                    ? "Billing needs attention before access is restored."
-                    : "Finish subscription to unlock private access.";
-
-              async function handleSave(event) {
-                event.preventDefault();
-                setPending(true);
-                setMessage("");
-                setError("");
-                try {
-                  const payload = await starterUpdateProfile({
-                    display_name: displayName,
-                    headline,
-                    bio,
-                  });
-                  const nextProfile = payload?.profile || null;
-                  setProfile(nextProfile);
-                  setMessage("Profile saved.");
-                } catch (saveError) {
-                  setError(String(saveError?.message || saveError || "Unable to save profile."));
-                } finally {
-                  setPending(false);
-                }
-              }
-
-              async function handleCancelSubscription() {
-                if (typeof window !== "undefined") {
-                  const confirmed = window.confirm("Cancel this subscription? The server response will confirm when access ends.");
-                  if (!confirmed) return;
-                }
-                setCancelPending(true);
-                setCancelMessage("");
-                setCancelError("");
-                try {
-                  const cancellation = await starterCancelSubscription();
-                  const nextAppState = await starterLoadAppState();
-                  setAppState(nextAppState);
-                  setCancelMessage(
-                    cancellation?.effective_immediately === true && cancellation?.cancel_at_period_end === false
-                      ? "Cancellation confirmed. Access ended immediately."
-                      : cancellation?.cancel_at_period_end === true
-                        ? `Cancellation confirmed. Subscription ends ${formatDate(cancellation?.current_period_end)}.`
-                        : "Cancellation confirmed."
-                  );
-                } catch (cancelRequestError) {
-                  setCancelError(
-                    String(
-                      cancelRequestError?.message ||
-                      cancelRequestError ||
-                      "Unable to cancel the subscription."
-                    )
-                  );
-                } finally {
-                  setCancelPending(false);
-                }
-              }
-
-              return (
-                <div className="starter-stack">
-                  <StarterStatusBanner
-                    title={bannerTitle}
-                    body={bannerBody}
-                    actions={
-                      <>
-                        <Link className="starter-button starter-button-secondary" href="/app">
-                          Access
-                        </Link>
-                        <Link className="starter-button starter-button-secondary" href="/">
-                          Site
-                        </Link>
-                      </>
-                    }
-                  />
-                  <div className="starter-account-grid">
-                    <section className="starter-card starter-section-card">
-                      <p className="starter-eyebrow">Account</p>
-                      <h1 className="starter-title starter-title-sm">Subscription & access</h1>
-                      <p className="starter-copy">Everything tied to your membership lives here.</p>
-                      <div className="starter-actions starter-actions-compact">
-                        <StarterStatePill label="Membership" state={statusState} />
-                        <StarterStatePill label="Access" state={accessState} />
-                      </div>
-                      <dl className="starter-key-value">
-                        <div>
-                          <dt>Email</dt>
-                          <dd>{String(appState.user?.email || "—")}</dd>
-                        </div>
-                        <div>
-                          <dt>Plan</dt>
-                          <dd>{plan ? planSummary(plan) : "No paid plan yet"}</dd>
-                        </div>
-                        <div>
-                          <dt>Usage this period</dt>
-                          <dd>{Number(usage.events || 0)} events</dd>
-                        </div>
-                        <div>
-                          <dt>Paid so far</dt>
-                          <dd>{paidLabel}</dd>
-                        </div>
-                        <div>
-                          <dt>Billing cadence</dt>
-                          <dd>{plan ? String(plan.billingInterval || "month") : "Monthly"}</dd>
-                        </div>
-                        <div>
-                          <dt>Current period end</dt>
-                          <dd>{formatDate(currentPeriodEnd)}</dd>
-                        </div>
-                      </dl>
-                      <div className="starter-actions starter-actions-compact">
-                        {!appState.entitled ? (
-                          <Link className="starter-button starter-button-primary" href="/app?intent=subscribe">
-                            {statusState === "past_due" ? "Update billing" : "Subscribe"}
-                          </Link>
-                        ) : null}
-                        {canCancelSubscription ? (
-                          <button
-                            className="starter-button starter-button-secondary"
-                            type="button"
-                            onClick={handleCancelSubscription}
-                            disabled={cancelPending}
-                          >
-                            {cancelPending ? "Cancelling..." : "Cancel subscription"}
-                          </button>
-                        ) : null}
-                      </div>
-                      {cancelScheduled ? (
-                        <div className="starter-alert">
-                          Cancellation is pending. Refresh for the authoritative result.
-                        </div>
-                      ) : null}
-                      {cancelMessage ? <div className="starter-alert">{cancelMessage}</div> : null}
-                      {cancelError ? <div className="starter-alert starter-alert-error">{cancelError}</div> : null}
-                    </section>
-                    <section className="starter-card starter-section-card">
-                      <p className="starter-eyebrow">Profile</p>
-                      <h1 className="starter-title starter-title-sm">Account profile</h1>
-                      <p className="starter-copy">Update the name and details attached to your account.</p>
-                      <dl className="starter-key-value">
-                        <div>
-                          <dt>Display name</dt>
-                          <dd>{profileName}</dd>
-                        </div>
-                        <div>
-                          <dt>Headline</dt>
-                          <dd>{String(profile?.headline || headline || "Not set yet") || "Not set yet"}</dd>
-                        </div>
-                      </dl>
-                      {appState.canManageProfile ? (
-                        <form className="starter-form" onSubmit={handleSave}>
-                          <div className="starter-field">
-                            <label htmlFor="starter-display-name">Display name</label>
-                            <input
-                              id="starter-display-name"
-                              className="starter-input"
-                              value={displayName}
-                              onChange={(event) => setDisplayName(event.target.value)}
-                            />
-                          </div>
-                          <div className="starter-field">
-                            <label htmlFor="starter-headline">Headline</label>
-                            <input
-                              id="starter-headline"
-                              className="starter-input"
-                              value={headline}
-                              onChange={(event) => setHeadline(event.target.value)}
-                            />
-                          </div>
-                          <div className="starter-field">
-                            <label htmlFor="starter-bio">Bio</label>
-                            <textarea
-                              id="starter-bio"
-                              className="starter-textarea"
-                              value={bio}
-                              onChange={(event) => setBio(event.target.value)}
-                            />
-                          </div>
-                          <div className="starter-actions starter-actions-compact">
-                            <button className="starter-button starter-button-primary" type="submit" disabled={pending}>
-                              {pending ? "Saving..." : "Save profile"}
-                            </button>
-                          </div>
-                          {message ? <div className="starter-alert">{message}</div> : null}
-                          {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
-                        </form>
-                      ) : (
-                        <div className="starter-card starter-card-soft">
-                          <p className="starter-note">
-                            Profile editing is not live on this surface yet, but your subscription and account state are.
-                          </p>
-                        </div>
-                      )}
-                    </section>
-                  </div>
-                </div>
-              );
-            }
-
-            export function StarterAccountPage({ initialAppState }) {
-              return (
-                <StarterAppStateProvider initialAppState={initialAppState}>
-                  <StarterAccountInner />
-                </StarterAppStateProvider>
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_pages_js() -> str:
-    return (
-        dedent(
-            """
-            "use client";
-
-            import Link from "next/link";
-            import { useEffect, useState, createContext, useContext } from "react";
-
-            import {
-              starterBusinessName,
-              starterSurfaceContext,
-              starterPlan,
-              starterConfiguredPlans,
-              starterDefaultMonthlyPlan,
-              starterDefaultPlanKey,
-              starterLoadAppState,
-              starterRequestAuth,
-              starterCancelSubscription,
-              starterCheckout,
-              starterGenerate,
-              starterProfile,
-              starterUpdateProfile,
-            } from "./starter-context.js";
-
-            const StarterAppStateContext = createContext({ appState: null, setAppState: () => {} });
-
-            const DEFAULT_SITE_LINKS = [
-              { href: "#how", label: "How it works" },
-              { href: "#what", label: "What you get" },
-              { href: "#pricing", label: "Pricing" },
-              { href: "#app", label: "Inside the app" },
-            ];
-
-            function humanize(value) {
-              return String(value || "")
-                .replace(/[_-]+/g, " ")
-                .replace(/\\s+/g, " ")
-                .trim()
-                .replace(/\\b\\w/g, (letter) => letter.toUpperCase());
-            }
-
-            function formatMoney(cents = 0, currency = "usd") {
-              return new Intl.NumberFormat("en-US", {
-                style: "currency",
-                currency: String(currency || "usd").toUpperCase(),
-                minimumFractionDigits: 0,
-                maximumFractionDigits: 2,
-              }).format((Number(cents || 0) || 0) / 100);
-            }
-
-            function currentPlan() {
-              return starterDefaultMonthlyPlan || starterConfiguredPlans[0] || null;
-            }
-
-            function planSummary(plan = null) {
-              if (!plan) return "Membership pricing";
-              const amount = formatMoney(plan.priceCents, plan.currency);
-              const interval = String(plan.billingInterval || "").trim();
-              return interval ? `${amount} / ${interval}` : amount;
-            }
-
-            function formatDate(value) {
-              if (!value) return "—";
-              const date = new Date(value);
-              if (Number.isNaN(date.getTime())) return "—";
-              return new Intl.DateTimeFormat("en-US", {
-                month: "short",
-                day: "numeric",
-                year: "numeric",
-              }).format(date);
-            }
-
-            function subscriptionTone(state) {
-              if (state === "ready" || state === "active" || state === "trialing") return "starter-pill-success";
-              if (state === "past_due" || state === "subscription_required") return "starter-pill-warn";
-              if (state === "blocked" || state === "canceled") return "starter-pill-danger";
-              return "starter-pill-muted";
-            }
-
-            function appTabs() {
-              return ["Membership", "Billing", "Account"];
-            }
-
-            function featureCards() {
-              const rendered = starterPlan.recommendedSections || [];
-              const picked = rendered.slice(0, 6);
-              if (!picked.length) {
-                return [
-                  { tag: "Offer", title: "What is included", body: "Use this space to show the core offer, the format, and what members actually receive." },
-                  { tag: "Plan", title: "Simple pricing", body: "Keep the plan clear, visible, and easy to understand before anyone starts checkout." },
-                  { tag: "Access", title: "Private app access", body: "Members sign in and continue inside a private account area built for the product." },
-                ];
-              }
-              return picked.map((section, index) => ({
-                tag: ["Offer", "Plan", "Flow", "Access", "Proof", "Account"][index] || "Section",
-                title: humanize(section),
-                body: `Clear details about ${humanize(section).toLowerCase()} belong here.`,
-              }));
-            }
-
-            function stepCards() {
-              const tabs = appTabs();
-              return [
-                "See the offer and understand what makes the product worth starting.",
-                "Sign in once and preserve subscription intent all the way into the app.",
-                tabs.length ? `Continue into a private member area with room for ${tabs.slice(0, 2).join(" and ")}.` : "Continue into a private member area instead of a blank screen.",
-              ];
-            }
-
-            function landingState(appState = null) {
-              if (!appState || !appState.authenticated) {
-                return {
-                  primaryHref: "/app?intent=subscribe",
-                  primaryLabel: "Subscribe",
-                  secondaryHref: "/app?intent=signin",
-                  secondaryLabel: "Sign in",
-                  membershipState: "",
-                };
-              }
-              const subscriptionState = String(appState.subscription?.state || "").trim().toLowerCase();
-              if (appState.entitled) {
-                return {
-                  primaryHref: "/app",
-                  primaryLabel: "Open app",
-                  secondaryHref: "/app/profile",
-                  secondaryLabel: "Account",
-                  membershipState: subscriptionState || "active",
-                };
-              }
-              return {
-                primaryHref: "/app?intent=subscribe",
-                primaryLabel: subscriptionState === "past_due" ? "Update billing" : "Complete subscription",
-                secondaryHref: "/app/profile",
-                secondaryLabel: "Account",
-                membershipState: subscriptionState || "signed_in",
-              };
-            }
-
-            function useStarterAppState() {
-              return useContext(StarterAppStateContext);
-            }
-
-            function StarterAppStateProvider({ initialAppState, children }) {
-              const [appState, setAppState] = useState(initialAppState || null);
-              useEffect(() => {
-                setAppState(initialAppState || null);
-              }, [initialAppState]);
-              return (
-                <StarterAppStateContext.Provider value={{ appState, setAppState }}>
-                  {children}
-                </StarterAppStateContext.Provider>
-              );
-            }
-
-            function StarterStatePill({ label, state }) {
-              return (
-                <span className={`starter-pill ${subscriptionTone(state)}`}>
-                  {label}: {humanize(state || "unknown")}
-                </span>
-              );
-            }
-
-            function StarterStatusBanner({ title, body, actions }) {
-              return (
-                <section className="starter-status-banner">
-                  <div className="starter-status-copy">
-                    <strong>{title}</strong>
-                    <span className="starter-helper">{body}</span>
-                  </div>
-                  {actions ? <div className="starter-inline-actions">{actions}</div> : null}
-                </section>
-              );
-            }
-
-            function StarterAuthCard({
-              intent = "signin",
-              onComplete,
-              title,
-              copy,
-              kicker,
-              backHref = "/",
-              backLabel = "Back",
-            }) {
-              const [email, setEmail] = useState("");
-              const [message, setMessage] = useState("");
-              const [error, setError] = useState("");
-              const [pending, setPending] = useState(false);
-              const actionLabel = intent === "subscribe" ? "Continue to subscribe" : "Continue with Supabase";
-              const resolvedTitle =
-                title || (intent === "subscribe" ? "Sign in to continue to checkout." : "Sign in to continue.");
-              const resolvedCopy =
-                copy || "Use the Supabase sign-in flow configured for this product.";
-              const resolvedKicker =
-                kicker || (intent === "subscribe" ? "Continue" : "Sign in");
-
-              async function handleSubmit(event) {
-                event.preventDefault();
-                setPending(true);
-                setMessage("");
-                setError("");
-                try {
-                  await starterRequestAuth({ email });
-                  setMessage("Continue in the Supabase sign-in window.");
-                  if (onComplete) onComplete();
-                } catch (requestError) {
-                  setError(String(requestError?.message || requestError || "Unable to start Supabase sign-in."));
-                } finally {
-                  setPending(false);
-                }
-              }
-
-              return (
-                <section className="starter-auth-card">
-                  <div className="starter-auth-stack">
-                    <p className="starter-kicker">{resolvedKicker}</p>
-                    <h2 className="starter-auth-title">{resolvedTitle}</h2>
-                    <p className="starter-auth-copy">{resolvedCopy}</p>
-                  </div>
-                  <form className="starter-form" onSubmit={handleSubmit}>
-                    <div className="starter-field">
-                      <label htmlFor="starter-email">Email</label>
-                      <input
-                        id="starter-email"
-                        className="starter-input"
-                        type="email"
-                        autoComplete="email"
-                        required
-                        value={email}
-                        onChange={(event) => setEmail(event.target.value)}
-                        placeholder="you@example.com"
-                      />
-                    </div>
-                    <div className="starter-inline-actions">
-                      <button className="starter-button starter-button-primary" type="submit" disabled={pending || !email}>
-                        {pending ? "Sending..." : actionLabel}
-                      </button>
-                      <Link className="starter-link-button starter-link-quiet" href={backHref}>
-                        {backLabel}
-                      </Link>
-                    </div>
-                  </form>
-                  {message ? <div className="starter-alert">{message}</div> : null}
-                  {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
-                </section>
-              );
-            }
-
-            function StarterSubscriptionCard({ appState, checkoutState = "", onCheckoutComplete }) {
-              const plan = currentPlan();
-              const [error, setError] = useState("");
-              const [pending, setPending] = useState(false);
-
-              async function handleCheckout() {
-                setPending(true);
-                setError("");
-                try {
-                  const payload = await starterCheckout({
-                    plan_key: starterDefaultPlanKey,
-                  });
-                  if (payload?.checkout_url) {
-                    window.location.assign(String(payload.checkout_url));
-                    return;
-                  }
-                  if (onCheckoutComplete) onCheckoutComplete();
-                } catch (checkoutError) {
-                  setError(String(checkoutError?.message || checkoutError || "Unable to start checkout."));
-                } finally {
-                  setPending(false);
-                }
-              }
-
-              return (
-                <section className="starter-auth-card">
-                  <div className="starter-auth-stack">
-                    <p className="starter-kicker">Membership</p>
-                    <h2 className="starter-auth-title">Choose a plan to continue.</h2>
-                    <p className="starter-auth-copy">Unlock full access to the app with an active subscription.</p>
-                  </div>
-                  <div className="starter-price-card">
-                    <h3>{plan ? humanize(plan.planKey || "plan") : "Plan"}</h3>
-                    <p className="starter-price-value">
-                      {plan ? formatMoney(plan.priceCents, plan.currency) : "Pricing pending"}{" "}
-                      <small>{plan?.billingInterval ? `/ ${plan.billingInterval}` : ""}</small>
-                    </p>
-                    <p className="starter-price-copy">
-                      {checkoutState === "success"
-                        ? "We received your checkout. If access has not unlocked yet, open Account while we confirm the subscription."
-                        : appState.subscription.state === "past_due"
-                          ? "Update billing to restore access."
-                          : "Your membership starts as soon as checkout is complete."}
-                    </p>
-                    <div className="starter-inline-actions">
-                      <button
-                        className="starter-button starter-button-primary"
-                        type="button"
-                        disabled={!appState.canCheckout || pending || !starterDefaultPlanKey}
-                        onClick={handleCheckout}
-                      >
-                        {pending ? "Starting checkout..." : "Subscribe"}
-                      </button>
-                      <Link className="starter-link-button starter-link-quiet" href="/app/profile">
-                        Account
-                      </Link>
-                    </div>
-                    {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
-                  </div>
-                </section>
-              );
-            }
-
-            function StarterBlockedCard({ appState }) {
-              return (
-                <section className="starter-auth-card">
-                  <div className="starter-auth-stack">
-                    <p className="starter-kicker">Please try again</p>
-                    <h2 className="starter-auth-title">We couldn't load your account.</h2>
-                    <p className="starter-auth-copy">Refresh the page or try again in a moment.</p>
-                  </div>
-                  <div className="starter-response">
-                    {String(appState?.access?.reason || appState?.errors?.account || "account_unavailable")}
-                  </div>
-                  <div className="starter-inline-actions">
-                    <Link className="starter-link-button starter-link-primary" href="/app/profile">
-                      Open account page
-                    </Link>
-                    <Link className="starter-link-button starter-link-quiet" href="/">
-                      Back to landing page
-                    </Link>
-                  </div>
-                </section>
-              );
-            }
-
-            function StarterProductGateInner() {
-              const { appState } = useStarterAppState();
-              const [intent, setIntent] = useState("signin");
-              const [checkoutState, setCheckoutState] = useState("");
-              useEffect(() => {
-                if (typeof window === "undefined") return;
-                const params = new URLSearchParams(window.location.search);
-                const nextIntent = String(params.get("intent") || "signin")
-                  .trim()
-                  .toLowerCase();
-                const nextCheckout = String(params.get("checkout") || "")
-                  .trim()
-                  .toLowerCase();
-                setIntent(nextIntent === "subscribe" ? "subscribe" : "signin");
-                setCheckoutState(nextCheckout === "success" ? "success" : "");
-              }, []);
-              if (!appState) {
-                return (
-                  <section className="starter-auth-card">
-                    <h2 className="starter-auth-title">Loading access state…</h2>
-                  </section>
-                );
-              }
-              if (appState.access.state === "ready") {
-                return <StarterProductHomeInner />;
-              }
-              if (appState.access.state === "blocked") {
-                return <StarterBlockedCard appState={appState} />;
-              }
-              if (appState.access.state === "subscription_required") {
-                return <StarterSubscriptionCard appState={appState} checkoutState={checkoutState} />;
-              }
-              return <StarterAuthCard intent={intent === "subscribe" ? "subscribe" : "signin"} />;
-            }
-
-            export function StarterProductAccessGate({ initialAppState }) {
-              return (
-                <StarterAppStateProvider initialAppState={initialAppState}>
-                  <StarterProductGateInner />
-                </StarterAppStateProvider>
-              );
-            }
-
-            export function StarterLandingPage({ initialAppState = null }) {
-              const plan = currentPlan();
-              const sections = featureCards();
-              const steps = stepCards();
-              const [appState, setAppState] = useState(initialAppState);
-              useEffect(() => {
-                let active = true;
-                starterLoadAppState()
-                  .then((payload) => {
-                    if (!active) return;
-                    setAppState(payload);
-                  })
-                  .catch(() => {});
-                return () => {
-                  active = false;
-                };
-              }, []);
-              const landing = landingState(appState);
-              return (
-                <main className="starter-root starter-page">
-                  <header className="starter-nav">
-                    <div className="starter-wrap starter-nav-inner">
-                      <Link className="starter-brand" href="/">
-                        <span className="starter-brand-mark" aria-hidden="true" />
-                        {starterBusinessName}
-                      </Link>
-                      <nav className="starter-nav-links" aria-label="Primary">
-                        {DEFAULT_SITE_LINKS.map((link) => (
-                          <a key={link.href} href={link.href}>
-                            {link.label}
-                          </a>
-                        ))}
-                      </nav>
-                      <div className="starter-actions">
-                        <Link className="starter-link-button starter-link-quiet" href={landing.secondaryHref}>
-                          {landing.secondaryLabel}
-                        </Link>
-                        <Link className="starter-link-button starter-link-primary" href={landing.primaryHref}>
-                          {landing.primaryLabel}
-                        </Link>
-                      </div>
-                    </div>
-                  </header>
-                  <section className="starter-hero">
-                    <div className="starter-wrap starter-hero-grid">
-                      <div>
-                        <p className="starter-kicker">
-                          Private access
-                        </p>
-                        <h1 className="starter-headline">Clear pricing. Simple sign-in. A private member area.</h1>
-                        <p className="starter-lede">
-                          Start with a clear offer, explain what members get, and make it easy to continue into the app.
-                        </p>
-                        <div className="starter-hero-actions">
-                          <Link className="starter-link-button starter-link-primary" href={landing.primaryHref}>
-                            {appState?.entitled ? "Open app" : appState?.authenticated ? landing.primaryLabel : (plan ? "Start subscription flow" : "Enter the app")}
-                          </Link>
-                          <Link className="starter-link-button starter-link-quiet" href={landing.secondaryHref}>
-                            {landing.secondaryLabel}
-                          </Link>
-                        </div>
-                        <p className="starter-hero-meta">
-                          <strong>{planSummary(plan)}</strong> {plan ? "Cancel anytime." : ""}
-                        </p>
-                        {landing.membershipState ? (
-                          <div className="starter-pill-row">
-                            <StarterStatePill label="Membership" state={landing.membershipState} />
-                          </div>
-                        ) : null}
-                      </div>
-                      <aside className="starter-card starter-proof-card" aria-label="What happens next">
-                        <h3>What to expect</h3>
-                        <ul className="starter-proof-list">
-                          {steps.map((step, index) => (
-                            <li key={step}>
-                              <span className="starter-proof-index">{index + 1}</span>
-                              <span>{step}</span>
-                            </li>
-                          ))}
-                        </ul>
-                        <p className="starter-proof-footer">
-                          Sign in, choose a plan, and continue inside your private member area.
-                        </p>
-                      </aside>
-                    </div>
-                  </section>
-
-                  <section className="starter-section" id="how">
-                    <div className="starter-wrap starter-section-grid">
-                      <div>
-                        <p className="starter-kicker">How it works</p>
-                        <h2>See the offer. Join. Get inside.</h2>
-                      </div>
-                      <div className="starter-step-list">
-                        {steps.map((step, index) => (
-                          <div key={step} className="starter-card starter-feature">
-                            <div className="starter-inline-actions">
-                              <span className="starter-step-index">0{index + 1}</span>
-                              <strong>{["See it", "Sign in", "Use it"][index] || `Step ${index + 1}`}</strong>
-                            </div>
-                            <p className="starter-card-copy">{step}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </section>
-
-                  <section className="starter-section" id="what">
-                    <div className="starter-wrap">
-                      <div className="starter-section-grid">
-                        <div>
-                          <p className="starter-kicker">What you get</p>
-                          <h2>Everything in one place.</h2>
-                        </div>
-                        <p className="starter-section-copy">
-                          Use these sections to show what members receive and why it matters.
-                        </p>
-                      </div>
-                      <div className="starter-card-grid">
-                        {sections.map((feature) => (
-                          <article key={feature.title} className="starter-card starter-feature">
-                            <span className="starter-feature-tag">{feature.tag}</span>
-                            <h3>{feature.title}</h3>
-                            <p className="starter-card-copy">{feature.body}</p>
-                          </article>
-                        ))}
-                      </div>
-                    </div>
-                  </section>
-
-                  <section className="starter-section" id="pricing">
-                    <div className="starter-wrap">
-                      <div className="starter-price-card">
-                        <p className="starter-kicker">Pricing</p>
-                        <h2>{plan ? planSummary(plan) : "Membership pricing"}</h2>
-                        <p className="starter-price-copy">
-                          Show the plan clearly up front so people know exactly what they are joining.
-                        </p>
-                        <div className="starter-inline-actions">
-                          <Link className="starter-link-button starter-link-primary" href={landing.primaryHref}>
-                            {appState?.entitled ? "Open app" : landing.primaryLabel}
-                          </Link>
-                          <Link className="starter-link-button starter-link-quiet" href={landing.secondaryHref}>
-                            {landing.secondaryLabel}
-                          </Link>
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-
-                  <section className="starter-section" id="app">
-                    <div className="starter-wrap starter-section-grid">
-                      <div>
-                        <p className="starter-kicker">Inside the app</p>
-                        <h2>Your private member area.</h2>
-                      </div>
-                      <div className="starter-card starter-feature">
-                        <p className="starter-card-copy">
-                          Keep the account area simple, private, and focused on the core member experience.
-                        </p>
-                        <div className="starter-pill-row">
-                          {appTabs().map((tab) => (
-                            <span key={tab} className="starter-pill starter-pill-muted">
-                              {tab}
-                            </span>
-                          ))}
-                        </div>
-                        <div className="starter-inline-actions">
-                          <Link className="starter-link-button starter-link-primary" href={landing.primaryHref}>
-                            {appState?.entitled ? "Open app" : landing.primaryLabel}
-                          </Link>
-                          <Link className="starter-link-button starter-link-quiet" href={appState?.authenticated ? "/app/profile" : landing.secondaryHref}>
-                            {appState?.authenticated ? "Open account" : landing.secondaryLabel}
-                          </Link>
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-
-                  <section className="starter-final">
-                    <div className="starter-wrap">
-                      <div className="starter-final-card">
-                        <p className="starter-kicker">Ready to begin?</p>
-                        <h2>Start with a clear offer and a direct next step.</h2>
-                        <p className="starter-section-copy">
-                          Sign in or subscribe to continue into the app.
-                        </p>
-                        <div className="starter-inline-actions">
-                          <Link className="starter-link-button starter-link-primary" href={landing.primaryHref}>
-                            {appState?.entitled ? "Open app" : landing.primaryLabel}
-                          </Link>
-                          <Link className="starter-link-button starter-link-quiet" href={landing.secondaryHref}>
-                            {landing.secondaryLabel}
-                          </Link>
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-
-                  <footer className="starter-footer">
-                    <div className="starter-wrap">
-                      <span>{starterBusinessName}</span>
-                    </div>
-                  </footer>
-                </main>
-              );
-            }
-
-            export function StarterAppChrome({ children }) {
-              return (
-                <div className="starter-root starter-shell">
-                  <header className="starter-nav">
-                    <div className="starter-wrap starter-app-bar">
-                      <Link className="starter-app-brand" href="/">
-                        <span className="starter-brand-mark" aria-hidden="true" />
-                        {starterBusinessName}
-                      </Link>
-                      <nav className="starter-app-links" aria-label="App">
-                        <Link href="/app">App</Link>
-                        <Link href="/app/profile">Account</Link>
-                        <Link href="/">Landing page</Link>
-                      </nav>
-                    </div>
-                  </header>
-                  <div className="starter-wrap">{children}</div>
-                  <footer className="starter-footer">
-                    <div className="starter-wrap starter-footer-row">
-                      <span className="starter-note">© {starterBusinessName}</span>
-                      <nav className="starter-footer-links" aria-label="Support">
-                        <Link href="/faq">FAQ</Link>
-                        <Link href="/articles">Articles</Link>
-                        <Link href="/privacy">Privacy</Link>
-                        <Link href="/terms">Terms</Link>
-                      </nav>
-                    </div>
-                  </footer>
-                </div>
-              );
-            }
-
-            function StarterGeneratePanel({ appState }) {
-              if (!appState?.canGenerate) {
-                return null;
-              }
-              const [prompt, setPrompt] = useState("");
-              const [responseText, setResponseText] = useState("");
-              const [error, setError] = useState("");
-              const [pending, setPending] = useState(false);
-
-              async function handleGenerate(event) {
-                event.preventDefault();
-                setPending(true);
-                setError("");
-                setResponseText("");
-                try {
-                  const payload = await starterGenerate({ prompt });
-                  setResponseText(JSON.stringify(payload, null, 2));
-                } catch (generateError) {
-                  setError(String(generateError?.message || generateError || "Unable to call generate."));
-                } finally {
-                  setPending(false);
-                }
-              }
-
-              return (
-                <section className="starter-shell-card">
-                  <div className="starter-shell-card-header">
-                    <div>
-                      <h3>Try the first action</h3>
-                      <p className="starter-helper">Use this space for the core action members take inside the app.</p>
-                    </div>
-                    <StarterStatePill label="Access" state={appState.access.state} />
-                  </div>
-                  <form className="starter-form" onSubmit={handleGenerate}>
-                    <div className="starter-field">
-                      <label htmlFor="starter-prompt">Prompt</label>
-                      <textarea
-                        id="starter-prompt"
-                        className="starter-textarea"
-                        value={prompt}
-                        onChange={(event) => setPrompt(event.target.value)}
-                        placeholder="Describe the main action you want this experience to handle."
-                      />
-                    </div>
-                    <div className="starter-inline-actions">
-                      <button className="starter-button starter-button-primary" type="submit" disabled={pending || !prompt.trim()}>
-                        {pending ? "Working..." : "Continue"}
-                      </button>
-                      <Link className="starter-link-button starter-link-quiet" href="/app/profile">
-                        Account
-                      </Link>
-                    </div>
-                    {responseText ? <pre className="starter-response">{responseText}</pre> : null}
-                    {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
-                  </form>
-                </section>
-              );
-            }
-
-            function StarterProductHomeInner() {
-              const { appState } = useStarterAppState();
-              if (!appState) return null;
-              const plan = currentPlan();
-              const tabs = appTabs();
-              const usage = appState.account?.usage_this_period || {};
-              const revenue = appState.account?.revenue || {};
-              return (
-                <div className="starter-shell-stack">
-                  <StarterStatusBanner
-                    title={`Welcome${appState.user?.name ? `, ${appState.user.name}` : ""}.`}
-                    body="Your membership is active."
-                    actions={
-                      <Link className="starter-link-button starter-link-quiet" href="/app/profile">
-                        Account
-                      </Link>
-                    }
-                  />
-                  <div className="starter-shell-grid">
-                    <div className="starter-shell-stack">
-                      <div className="starter-stat-grid">
-                        <article className="starter-card starter-stat-card">
-                          <p className="starter-stat-value">{humanize(appState.subscription?.state || "active")}</p>
-                          <span className="starter-stat-label">membership</span>
-                        </article>
-                        <article className="starter-card starter-stat-card">
-                          <p className="starter-stat-value">{plan ? planSummary(plan) : "No plan"}</p>
-                          <span className="starter-stat-label">current plan</span>
-                        </article>
-                        <article className="starter-card starter-stat-card">
-                          <p className="starter-stat-value">{String(appState.user?.email || "Ready")}</p>
-                          <span className="starter-stat-label">account</span>
-                        </article>
-                      </div>
-                      <StarterGeneratePanel appState={appState} />
-                    </div>
-                    <aside className="starter-shell-stack">
-                      <section className="starter-shell-card">
-                        <div className="starter-shell-card-header">
-                          <div>
-                            <h3>Included right now</h3>
-                            <p className="starter-helper">Use these areas for the core member experience.</p>
-                          </div>
-                        </div>
-                        <div className="starter-pill-row">
-                          <StarterStatePill label="Membership" state={appState.subscription.state} />
-                        </div>
-                        <ul className="starter-bullet-list">
-                          {tabs.map((tab) => (
-                            <li key={tab}>{tab}</li>
-                          ))}
-                        </ul>
-                      </section>
-                      <section className="starter-shell-card">
-                        <h3>Plan details</h3>
-                        <div className="starter-key-value">
-                          <div>
-                            <dt>Plan</dt>
-                            <dd>{plan ? planSummary(plan) : "No plan yet"}</dd>
-                          </div>
-                          <div>
-                            <dt>Activity</dt>
-                            <dd>{Number(usage.events || 0)} events</dd>
-                          </div>
-                          <div>
-                            <dt>Paid so far</dt>
-                            <dd>{formatMoney(revenue.amount_paid_cents || 0, "usd")}</dd>
-                          </div>
-                        </div>
-                      </section>
-                    </aside>
-                  </div>
-                </div>
-              );
-            }
-
-            export function StarterProductHome({ initialAppState }) {
-              return (
-                <StarterAppStateProvider initialAppState={initialAppState}>
-                  <StarterProductHomeInner />
-                </StarterAppStateProvider>
-              );
-            }
-
-            function StarterProfilePageInner() {
-              const { appState, setAppState } = useStarterAppState();
-              const [profile, setProfile] = useState(null);
-              const [displayName, setDisplayName] = useState("");
-              const [headline, setHeadline] = useState("");
-              const [bio, setBio] = useState("");
-              const [message, setMessage] = useState("");
-              const [error, setError] = useState("");
-              const [pending, setPending] = useState(false);
-              const [cancelMessage, setCancelMessage] = useState("");
-              const [cancelError, setCancelError] = useState("");
-              const [cancelPending, setCancelPending] = useState(false);
-
-              useEffect(() => {
-                if (!appState?.canManageProfile) return;
-                let active = true;
-                starterProfile()
-                  .then((payload) => {
-                    if (!active) return;
-                    const nextProfile = payload?.profile || null;
-                    setProfile(nextProfile);
-                    setDisplayName(String(nextProfile?.display_name || nextProfile?.displayName || ""));
-                    setHeadline(String(nextProfile?.headline || ""));
-                    setBio(String(nextProfile?.bio || ""));
-                  })
-                  .catch((loadError) => {
-                    if (!active) return;
-                    setError(String(loadError?.message || loadError || "Unable to load profile."));
-                  });
-                return () => {
-                  active = false;
-                };
-              }, [appState?.canManageProfile]);
-
-              async function handleSave(event) {
-                event.preventDefault();
-                setPending(true);
-                setMessage("");
-                setError("");
-                try {
-                  const payload = await starterUpdateProfile({
-                    display_name: displayName,
-                    headline,
-                    bio,
-                  });
-                  const nextProfile = payload?.profile || null;
-                  setProfile(nextProfile);
-                  setMessage("Profile saved.");
-                } catch (saveError) {
-                  setError(String(saveError?.message || saveError || "Unable to save profile."));
-                } finally {
-                  setPending(false);
-                }
-              }
-
-              if (!appState) return null;
-              if (!appState.authenticated) {
-                return (
-                  <StarterAuthCard
-                    intent="signin"
-                    kicker="Account"
-                    title="Sign in to view your account."
-                    copy="Use your email to manage your subscription and profile."
-                    backHref="/"
-                    backLabel="Back to landing page"
-                  />
-                );
-              }
-
-              const plan = currentPlan();
-              const usage = appState.account?.usage_this_period || {};
-              const revenue = appState.account?.revenue || {};
-              const statusState = appState.subscription?.state || "none";
-              const accessState = appState.access?.state || "unknown";
-              const currentPeriodEnd = appState.subscription?.currentPeriodEnd || "";
-              const cancelScheduled = Boolean(appState.subscription?.cancelAtPeriodEnd);
-              const canCancelSubscription = Boolean(
-                (appState.subscription?.source?.stripe_subscription_id || appState.subscription?.source?.stripeSubscriptionId) &&
-                !cancelScheduled
-              );
-              const paidLabel = formatMoney(revenue.amount_paid_cents || 0, "usd");
-              const profileName =
-                String(
-                  profile?.display_name ||
-                  profile?.displayName ||
-                  appState.user?.name ||
-                  ""
-                ).trim() || "Not set yet";
-              const bannerTitle = cancelScheduled
-                ? "Cancellation pending."
-                : appState.entitled
-                  ? "Membership active."
-                  : "Membership needs attention.";
-              const bannerBody = cancelScheduled
-                ? "Refresh this account for the authoritative cancellation result."
-                : appState.entitled
-                ? "Your account, billing state, and profile live here. Changes should show up here after they save."
-                : statusState === "past_due"
-                  ? "Billing looks interrupted right now. Refresh your membership to restore access."
-                  : "Finish subscription to unlock the private app experience.";
-              const primaryCtaLabel = statusState === "past_due" ? "Refresh membership" : "Subscribe";
-
-              async function handleCancelSubscription() {
-                if (typeof window !== "undefined") {
-                  const confirmed = window.confirm("Cancel this subscription? The server response will confirm when access ends.");
-                  if (!confirmed) return;
-                }
-                setCancelPending(true);
-                setCancelMessage("");
-                setCancelError("");
-                try {
-                  const cancellation = await starterCancelSubscription();
-                  const nextAppState = await starterLoadAppState();
-                  setAppState(nextAppState);
-                  setCancelMessage(
-                    cancellation?.effective_immediately === true && cancellation?.cancel_at_period_end === false
-                      ? "Cancellation confirmed. Access ended immediately."
-                      : cancellation?.cancel_at_period_end === true
-                        ? `Cancellation confirmed. Subscription ends ${formatDate(cancellation?.current_period_end)}.`
-                        : "Cancellation confirmed."
-                  );
-                } catch (cancelRequestError) {
-                  setCancelError(
-                    String(
-                      cancelRequestError?.message ||
-                      cancelRequestError ||
-                      "Unable to cancel the subscription."
-                    )
-                  );
-                } finally {
-                  setCancelPending(false);
-                }
-              }
-
-              return (
-                <div className="starter-shell-stack">
-                  <StarterStatusBanner
-                    title={bannerTitle}
-                    body={bannerBody}
-                    actions={
-                      <Link className="starter-link-button starter-link-quiet" href="/app">
-                        Open app
-                      </Link>
-                    }
-                  />
-                  <div className="starter-profile-grid">
-                    <section className="starter-profile-card">
-                      <p className="starter-kicker">Account</p>
-                      <h2 className="starter-profile-title">Membership overview</h2>
-                      <p className="starter-profile-copy">
-                        Everything tied to your membership should reconcile here: access, billing state, and plan details.
-                      </p>
-                      <div className="starter-pill-row">
-                        <StarterStatePill label="Membership" state={statusState} />
-                        <StarterStatePill label="Access" state={accessState} />
-                      </div>
-                      <dl className="starter-key-value">
-                        <div>
-                          <dt>Email</dt>
-                          <dd>{String(appState.user?.email || "—")}</dd>
-                        </div>
-                        <div>
-                          <dt>Plan</dt>
-                          <dd>{plan ? planSummary(plan) : (appState.subscription.planKey ? humanize(appState.subscription.planKey) : "No paid plan yet")}</dd>
-                        </div>
-                        <div>
-                          <dt>Usage this period</dt>
-                          <dd>{Number(usage.events || 0)} events</dd>
-                        </div>
-                        <div>
-                          <dt>Paid so far</dt>
-                          <dd>{paidLabel}</dd>
-                        </div>
-                        <div>
-                          <dt>Billing cadence</dt>
-                          <dd>{plan ? humanize(plan.billingInterval || "month") : "Monthly"}</dd>
-                        </div>
-                        <div>
-                          <dt>Current period end</dt>
-                          <dd>{formatDate(currentPeriodEnd)}</dd>
-                        </div>
-                      </dl>
-                      <div className="starter-inline-actions">
-                        {!appState.entitled ? (
-                          <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
-                            {primaryCtaLabel}
-                          </Link>
-                        ) : null}
-                        {canCancelSubscription ? (
-                          <button
-                            className="starter-link-button starter-link-quiet"
-                            type="button"
-                            onClick={handleCancelSubscription}
-                            disabled={cancelPending}
-                          >
-                            {cancelPending ? "Cancelling..." : "Cancel subscription"}
-                          </button>
-                        ) : null}
-                        <Link className="starter-link-button starter-link-quiet" href="/app">
-                          Back to app
-                        </Link>
-                      </div>
-                      {cancelScheduled ? (
-                        <div className="starter-alert">
-                          Cancellation is pending. Refresh for the authoritative result.
-                        </div>
-                      ) : null}
-                      {cancelMessage ? <div className="starter-alert">{cancelMessage}</div> : null}
-                      {cancelError ? <div className="starter-alert starter-alert-error">{cancelError}</div> : null}
-                    </section>
-                    <section className="starter-profile-card">
-                      <p className="starter-kicker">Profile</p>
-                      <h2 className="starter-profile-title">Profile details</h2>
-                      <p className="starter-profile-copy">
-                        Keep the identity on your account up to date. This is the information the app can reuse across the private product experience.
-                      </p>
-                      <dl className="starter-key-value">
-                        <div>
-                          <dt>Display name</dt>
-                          <dd>{profileName}</dd>
-                        </div>
-                        <div>
-                          <dt>Headline</dt>
-                          <dd>{String(profile?.headline || headline || "Not set yet") || "Not set yet"}</dd>
-                        </div>
-                      </dl>
-                      {appState.canManageProfile ? (
-                        <form className="starter-form" onSubmit={handleSave}>
-                          <div className="starter-field">
-                            <label htmlFor="starter-display-name">Display name</label>
-                            <input
-                              id="starter-display-name"
-                              className="starter-input"
-                              value={displayName}
-                              onChange={(event) => setDisplayName(event.target.value)}
-                            />
-                          </div>
-                          <div className="starter-field">
-                            <label htmlFor="starter-headline">Headline</label>
-                            <input
-                              id="starter-headline"
-                              className="starter-input"
-                              value={headline}
-                              onChange={(event) => setHeadline(event.target.value)}
-                            />
-                          </div>
-                          <div className="starter-field">
-                            <label htmlFor="starter-bio">Bio</label>
-                            <textarea
-                              id="starter-bio"
-                              className="starter-textarea"
-                              value={bio}
-                              onChange={(event) => setBio(event.target.value)}
-                            />
-                          </div>
-                          <div className="starter-inline-actions">
-                            <button className="starter-button starter-button-primary" type="submit" disabled={pending}>
-                              {pending ? "Saving..." : "Save profile"}
-                            </button>
-                          </div>
-                          {message ? <div className="starter-alert">{message}</div> : null}
-                          {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
-                        </form>
-                      ) : (
-                        <div className="starter-panel">
-                          <p className="starter-card-copy">
-                            Profile editing is not live on this surface yet, but your membership and account state are.
-                          </p>
-                          {profile?.bio || bio ? (
-                            <pre className="starter-response">{String(profile?.bio || bio || "").trim()}</pre>
-                          ) : null}
-                        </div>
-                      )}
-                    </section>
-                  </div>
-                </div>
-              );
-            }
-
-            export function StarterProfilePage({ initialAppState }) {
-              return (
-                <StarterAppStateProvider initialAppState={initialAppState}>
-                  <StarterProfilePageInner />
-                </StarterAppStateProvider>
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
 _SCAFFOLD_SEED_SKIP_PARTS = frozenset({"_takyon", "node_modules", "dist", ".git"})
 _SCAFFOLD_SEED_TOKEN_SUFFIXES = frozenset({".html", ".ts", ".tsx", ".css", ".md", ".json", ".txt", ".xml"})
 
@@ -7573,6 +4006,7 @@ _STARTER_OWNED_REFRESH_FILES = (
     "src/components/subscription-cancellation.tsx",
     "src/screens/app-layout.tsx",
     "src/screens/support.tsx",
+    "actions/_example-generate.ts",
 )
 
 
@@ -7781,8 +4215,8 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Prefer the scaffold access helpers in `src/lib/hooks.ts` such as `useViewerAccess()` and `resolveViewerCta()` when deciding whether the primary path is sign in, complete subscription, or continue.",
         "- The shared account rail returns canonical account truth as `user` plus `entitlements[]`; if a screen needs subscription/access state, derive it from those helpers instead of reviving legacy `has_active_subscription`, nested `subscription.status`, or custom `client.account()` field guesses.",
         "- Self-service subscription cancellation is a non-removable AppKit invariant. Starter-owned `src/main.tsx` renders `SubscriptionCancellation` on `/app/profile` for every nonterminal Stripe subscription. Cancellation timing and refund policy belong exclusively to the machine-readable backend contract and exact action result; never infer them from a renewal/current-period date, never hand-write continuation/end-date/refund copy, never add a refund action or control, and never replace cancellation with a billing-portal or support workflow.",
-        "- Current backend subscription cancellation policy (source-of-truth generated, not prose guessed by this prompt): `"
-        + json.dumps(subscription_cancellation_policy(), sort_keys=True)
+        "- Current product runtime contract (source-of-truth generated, not prose guessed by this prompt): `"
+        + json.dumps(product_runtime_contract(), sort_keys=True)
         + "`. Consume it through the canonical AppKit component; do not duplicate it in worker-owned UI.",
         "- Do not hand-roll subscription gates inside `src/screens/app-home.tsx` or `src/screens/profile.tsx` when the shared hooks already answer whether the viewer should subscribe, continue, update billing, or open the app.",
         "- Never return `null` for anonymous or unentitled viewers on `/app` or `/app/profile`; render a visible sign-in/subscribe/account gate wired to `useProductAuth()` and `resolveViewerCta()`.",
@@ -8173,6 +4607,21 @@ def _active_worker_claim_guard():
     return worker_jobs.current_job_claim()
 
 
+def _active_product_writer_lease_guard():
+    """The same-connection transaction lease bound around product work, if any."""
+    try:
+        from . import jobs as worker_jobs
+    except ImportError:  # pragma: no cover - alternate top-level package load
+        from plugins.takyon import jobs as worker_jobs
+    return worker_jobs.current_execution_lease_guard()
+
+
+def _assert_active_product_writer_lease(operation: str) -> None:
+    guard = _active_product_writer_lease_guard()
+    if guard is not None:
+        guard.assert_owned(operation)
+
+
 def _assert_active_worker_claim(store: "TakyonStore", operation: str) -> None:
     """Fence durable side effects to the current ``(job, worker, attempt)`` generation.
 
@@ -8180,6 +4629,7 @@ def _assert_active_worker_claim(store: "TakyonStore", operation: str) -> None:
     workspace commit/publish must also match ``attempts``.  Unknown DB state fails closed: generation
     work may be retried, but two writers may never advance one business concurrently.
     """
+    _assert_active_product_writer_lease(operation)
     guard = _active_worker_claim_guard()
     if guard is None:
         return
@@ -8519,7 +4969,7 @@ def _terminate_claude_worker_process(
     run_cmd: list[str],
     cidfile: Path | None,
 ) -> None:
-    """Stop the full worker process group, stop its container, and reap the wrapper."""
+    """Hard-stop the full worker process group/container and reap the wrapper."""
     already_exited = proc.poll() is not None
     if already_exited:
         try:
@@ -8528,15 +4978,15 @@ def _terminate_claude_worker_process(
             pass
     elif os.name == "posix":
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            os.killpg(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError, AttributeError):
             try:
-                proc.terminate()
+                proc.kill()
             except Exception:
                 pass
     else:  # pragma: no cover - production is Linux; keep local Windows fallback correct
         try:
-            proc.terminate()
+            proc.kill()
         except Exception:
             pass
 
@@ -8559,33 +5009,118 @@ def _terminate_claude_worker_process(
         except Exception:
             pass
 
+    # Reap unconditionally; after SIGKILL this blocks only until the kernel reports exit.
     try:
-        if not already_exited:
-            proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        if os.name == "posix":
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError, AttributeError):
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        else:  # pragma: no cover
-            try:
-                proc.kill()
-            except Exception:
-                pass
-    finally:
-        # Reap unconditionally; after SIGKILL this blocks only until the kernel reports exit.
-        try:
-            proc.wait()
-        except Exception:
-            pass
+        proc.wait()
+    except Exception:
+        pass
 
     # ``--rm`` normally removes the stopped container.  If the client died before handling the
     # daemon event, force-remove it so no bind-mounted editor can survive this function.
     if container_id and run_cmd:
+        try:
+            subprocess.run(
+                [str(run_cmd[0]), "rm", "-f", container_id],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            pass
+
+
+def _claude_worker_container_id(cidfile: Path | None) -> str:
+    if cidfile is None:
+        return ""
+    try:
+        return cidfile.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _request_claude_worker_abort(
+    proc: subprocess.Popen[str],
+    *,
+    run_cmd: list[str],
+    cidfile: Path | None,
+) -> str:
+    """Request cooperative SDK cancellation without killing the supervising wrapper."""
+    container_id = _claude_worker_container_id(cidfile)
+    if container_id and run_cmd:
+        try:
+            subprocess.run(
+                [str(run_cmd[0]), "kill", "--signal=TERM", container_id],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            pass
+        return container_id
+    if proc.poll() is not None:
+        return ""
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            return ""
+        except (ProcessLookupError, PermissionError, OSError, AttributeError):
+            pass
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    return ""
+
+
+def _cancel_claude_worker_process(
+    proc: subprocess.Popen[str],
+    *,
+    run_cmd: list[str],
+    cidfile: Path | None,
+    grace_seconds: float,
+) -> None:
+    """One cancellation authority: soft abort, bounded drain, then hard kill and reap."""
+    grace = max(0.1, float(grace_seconds))
+    container_id = _request_claude_worker_abort(
+        proc,
+        run_cmd=run_cmd,
+        cidfile=cidfile,
+    )
+    deadline = time.monotonic() + grace
+    if container_id and run_cmd:
+        try:
+            subprocess.run(
+                [str(run_cmd[0]), "wait", container_id],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=max(0.1, deadline - time.monotonic()),
+                check=False,
+            )
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        _terminate_claude_worker_process(proc, run_cmd=run_cmd, cidfile=cidfile)
+        return
+    # The wrapper can exit before an attached container processes TERM. Confirm the container is
+    # gone; otherwise the hard cleanup below prevents an orphaned bind-mounted editor.
+    if container_id and run_cmd:
+        try:
+            running = subprocess.run(
+                [str(run_cmd[0]), "inspect", "--format", "{{.State.Running}}", container_id],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except Exception:
+            running = None
+        if running is not None and running.returncode == 0 and str(running.stdout).strip() == "true":
+            _terminate_claude_worker_process(proc, run_cmd=run_cmd, cidfile=cidfile)
+            return
         try:
             subprocess.run(
                 [str(run_cmd[0]), "rm", "-f", container_id],
@@ -8740,8 +5275,8 @@ def _run_claude_agent_task_process(
     # runs. The wake watchdog false-kills a turn after 600s without activity, and a long docker
     # build (10-20min) emits sparse stderr — the earlier attempt to tick on every stderr event
     # still starved when the reader itself ended/crashed (the 600s false-kills of walkloop/test-2).
-    # This is decoupled from the reader ON PURPOSE. The subprocess has its own hard timeout on
-    # proc.wait below, so a genuine hang is still bounded — this only prevents the FALSE idle-kill.
+    # This is decoupled from the reader ON PURPOSE. The Python parent owns the sole hard deadline
+    # around proc.wait below, so a genuine hang is bounded without a competing child-side clock.
     _heartbeat_stop = threading.Event()
     _heartbeat_ctx = contextvars.copy_context()
 
@@ -8762,13 +5297,23 @@ def _run_claude_agent_task_process(
     )
     heartbeat_thread.start()
     try:
+        configured_abort_grace = float(
+            os.getenv("TAKYON_CLAUDE_AGENT_ABORT_GRACE_SECONDS") or 15.0
+        )
+    except (TypeError, ValueError):
+        configured_abort_grace = 15.0
+    abort_grace_seconds = max(1.0, min(60.0, configured_abort_grace))
+    try:
         if proc.stdin is not None:
             proc.stdin.write(json.dumps(payload))
             proc.stdin.close()
         deadline = time.monotonic() + max(0.001, float(timeout_ms) / 1000.0)
         claim_guard = _active_worker_claim_guard()
+        writer_lease_guard = _active_product_writer_lease_guard()
         next_durable_claim_check = 0.0
         while True:
+            if writer_lease_guard is not None:
+                writer_lease_guard.assert_owned("Claude worker execution")
             if claim_guard is not None:
                 now = time.monotonic()
                 if claim_store is not None and now >= next_durable_claim_check:
@@ -8781,7 +5326,11 @@ def _run_claude_agent_task_process(
                 raise subprocess.TimeoutExpired(original_run_cmd, float(timeout_ms) / 1000.0)
             try:
                 returncode = proc.wait(
-                    timeout=min(1.0, remaining) if claim_guard is not None else remaining
+                    timeout=(
+                        min(1.0, remaining)
+                        if claim_guard is not None or writer_lease_guard is not None
+                        else remaining
+                    )
                 )
                 break
             except subprocess.TimeoutExpired:
@@ -8792,17 +5341,19 @@ def _run_claude_agent_task_process(
                     )
                 continue
     except subprocess.TimeoutExpired:
-        _terminate_claude_worker_process(
+        _cancel_claude_worker_process(
             proc,
             run_cmd=original_run_cmd,
             cidfile=docker_cidfile,
+            grace_seconds=abort_grace_seconds,
         )
         raise
     except Exception:
-        _terminate_claude_worker_process(
+        _cancel_claude_worker_process(
             proc,
             run_cmd=original_run_cmd,
             cidfile=docker_cidfile,
+            grace_seconds=abort_grace_seconds,
         )
         raise
     finally:
@@ -11845,7 +8396,7 @@ def _appkit_subscription_cancellation_markers(root: Path) -> list[dict[str, Any]
         or "<AccountRoute" not in main_source
         or "client.cancelSubscription()" not in component_source
         or "Cancel subscription now" not in component_source
-        or "subscription_cancellation_policy" not in component_source
+        or "product_runtime_contract" not in component_source
         or 'policy?.refund_policy === "none"' not in component_source
         or "cancellationResultCopy(outcome)" not in component_source
     ):
@@ -11897,7 +8448,7 @@ def _mobile_appkit_subscription_cancellation_markers(root: Path) -> list[dict[st
         "hasNonterminalStripeSubscription(auth.account)" not in component_source
         or "client.cancelSubscription()" not in component_source
         or "Cancel subscription now" not in component_source
-        or "subscription_cancellation_policy" not in component_source
+        or "product_runtime_contract" not in component_source
         or 'policy?.refund_policy === "none"' not in component_source
         or "cancellationResultCopy(outcome)" not in component_source
         or "account?.entitlements" not in auth_source
@@ -13018,120 +9569,6 @@ def _node_modules_present(root: Path) -> bool:
     return (root / "node_modules").exists() and any((root / "node_modules").iterdir())
 
 
-def _check_node_syntax(path: Path) -> tuple[bool, str]:
-    node = _resolve_runtime_executable("node")
-    if not node:
-        return False, "node runtime unavailable for syntax check"
-    proc = subprocess.run(
-        [node, "--check", str(path)],
-        text=True,
-        capture_output=True,
-        cwd=str(path.parent),
-        env=_runtime_env(),
-    )
-    if proc.returncode == 0:
-        return True, ""
-    message = _truncate_text((proc.stderr or proc.stdout or "").strip(), 4000)
-    return False, message or f"node --check exited {proc.returncode}"
-
-
-def _candidate_disabled_path(path: Path) -> Path:
-    candidate = path.with_name(f"{path.name}.disabled")
-    if not candidate.exists():
-        return candidate
-    return path.with_name(f"{path.name}.disabled.{uuid.uuid4().hex[:8]}")
-
-
-def _rewrite_next_config_typescript_to_supported_module(source: str) -> tuple[str, str]:
-    uses_esm = bool(re.search(r"^\s*(?:import\b|export\s+default\b)", source, flags=re.MULTILINE))
-    target_name = "next.config.mjs" if uses_esm else "next.config.js"
-    converted = source.replace("\r\n", "\n")
-    converted = re.sub(r"^\s*import\s+type\s+[^;]+;\s*\n?", "", converted, flags=re.MULTILINE)
-    converted = re.sub(
-        r"^\s*import\s*\{\s*type\s+NextConfig\s*\}\s*from\s*([\"']next[\"']);?\s*\n?",
-        "",
-        converted,
-        flags=re.MULTILINE,
-    )
-    converted = re.sub(
-        r"\b(const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$<>,\s\[\]\.|&?]+)\s*=",
-        r"\1 \2 =",
-        converted,
-    )
-    converted = re.sub(r"\s+satisfies\s+NextConfig\b", "", converted)
-    converted = re.sub(r"\s+as\s+NextConfig\b", "", converted)
-    converted = re.sub(r"\s+as\s+const\b", "", converted)
-    return target_name, converted
-
-
-def _normalize_next_config_typescript(root: Path) -> dict[str, Any]:
-    source_path = root / "next.config.ts"
-    if not source_path.exists():
-        return {"repairs": [], "warnings": []}
-
-    js_path = root / "next.config.js"
-    mjs_path = root / "next.config.mjs"
-    if js_path.exists() or mjs_path.exists():
-        disabled_path = _candidate_disabled_path(source_path)
-        shutil.move(str(source_path), str(disabled_path))
-        chosen = js_path.name if js_path.exists() else mjs_path.name
-        return {
-            "repairs": [
-                {
-                    "kind": "next_config_disable",
-                    "from": source_path.name,
-                    "to": disabled_path.name,
-                    "message": f"Disabled unsupported next.config.ts because {chosen} is the supported Next config entrypoint.",
-                }
-            ],
-            "warnings": [],
-        }
-
-    try:
-        source_text = source_path.read_text(encoding="utf-8")
-    except Exception as exc:
-        return {
-            "repairs": [],
-            "warnings": [],
-            "blocked": True,
-            "error": f"Next app detected, but next.config.ts could not be read for normalization: {exc}",
-        }
-
-    target_name, converted = _rewrite_next_config_typescript_to_supported_module(source_text)
-    target_path = root / target_name
-    temp_path = root / f".{target_name}.tmp"
-    temp_path.write_text(converted, encoding="utf-8")
-    ok, syntax_error = _check_node_syntax(temp_path)
-    if not ok:
-        try:
-            temp_path.unlink()
-        except OSError:
-            pass
-        return {
-            "repairs": [],
-            "warnings": [],
-            "blocked": True,
-            "error": (
-                "Next app detected, but next.config.ts is unsupported and could not be safely normalized "
-                f"to {target_name}: {syntax_error}"
-            ),
-        }
-
-    temp_path.replace(target_path)
-    source_path.unlink()
-    return {
-        "repairs": [
-            {
-                "kind": "next_config_normalize",
-                "from": source_path.name,
-                "to": target_path.name,
-                "message": f"Normalized unsupported next.config.ts into supported {target_path.name}.",
-            }
-        ],
-        "warnings": [],
-    }
-
-
 _SCAFFOLD_BUILD_CONFIG_FILES = (
     "package-lock.json",
     "tsconfig.json",
@@ -13825,6 +10262,66 @@ def _blocked_message(text: Any) -> str:
     return f"BLOCKED: {message}"
 
 
+_PRODUCT_SOURCE_SNAPSHOT_EXCLUDED_PARTS = frozenset(
+    {".cache", ".git", ".next", "__pycache__", "dist", "node_modules"}
+)
+
+
+def _strict_tree_snapshot(
+    root: Path,
+    *,
+    excluded_parts: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Hash every regular file and fail on symlinks, special files, or unreadable entries."""
+    resolved = Path(root).resolve()
+    if not resolved.is_dir():
+        raise TakyonError(f"snapshot root is not a directory: {resolved}")
+    files: dict[str, str] = {}
+    for current, dirnames, filenames in os.walk(resolved, followlinks=False):
+        current_path = Path(current)
+        kept_dirs: list[str] = []
+        for name in sorted(dirnames):
+            candidate = current_path / name
+            if name in excluded_parts:
+                continue
+            if candidate.is_symlink():
+                raise TakyonError(
+                    f"snapshot refuses symlinked directory: {candidate.relative_to(resolved)}"
+                )
+            kept_dirs.append(name)
+        dirnames[:] = kept_dirs
+        for name in sorted(filenames):
+            candidate = current_path / name
+            rel = candidate.relative_to(resolved)
+            if any(part in excluded_parts for part in rel.parts):
+                continue
+            try:
+                metadata = candidate.lstat()
+            except OSError as exc:
+                raise TakyonError(f"snapshot could not stat {rel}: {exc}") from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise TakyonError(f"snapshot refuses symlinked file: {rel}")
+            if not stat.S_ISREG(metadata.st_mode):
+                raise TakyonError(f"snapshot refuses non-regular file: {rel}")
+            try:
+                digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise TakyonError(f"snapshot could not read {rel}: {exc}") from exc
+            files[rel.as_posix()] = digest
+    return {
+        "sha256": hashlib.sha256(_json_dumps(files).encode("utf-8")).hexdigest(),
+        "files": files,
+        "file_count": len(files),
+    }
+
+
+def _strict_product_source_snapshot(root: Path) -> dict[str, Any]:
+    return _strict_tree_snapshot(
+        root,
+        excluded_parts=_PRODUCT_SOURCE_SNAPSHOT_EXCLUDED_PARTS,
+    )
+
+
 def _refresh_product_surface_path(
     business_root: Path,
     source_path: str,
@@ -13844,7 +10341,7 @@ def _refresh_product_surface_path(
         "checks": [],
         "repairs": [],
         "warnings": [],
-        "inventory": _product_inventory(business_root, source_rel, surface=surface),
+        "inventory": {},
         "capabilities": _runtime_capabilities(("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv")),
     }
     if business_root.resolve() not in (root, *root.parents):
@@ -13853,6 +10350,61 @@ def _refresh_product_surface_path(
     if not root.exists() or not root.is_dir():
         result.update({"status": "missing", "error": "source path does not exist"})
         return result
+
+    # Refuse unsupported legacy trees before AppKit writes a byte into them.
+    preflight_package_json = root / "package.json"
+    if not preflight_package_json.exists():
+        result.update({
+            "status": "blocked",
+            "error": (
+                "product app must use the pinned Vite scaffold with a package.json, a build script, "
+                "and publishable dist/index.html output"
+            ),
+        })
+        return result
+    try:
+        preflight_package = json.loads(preflight_package_json.read_text(encoding="utf-8"))
+    except Exception as exc:
+        result.update({"status": "failed", "error": f"package.json is not valid JSON: {exc}"})
+        return result
+    preflight_dependencies = (
+        preflight_package.get("dependencies")
+        if isinstance(preflight_package.get("dependencies"), dict)
+        else {}
+    )
+    preflight_dev_dependencies = (
+        preflight_package.get("devDependencies")
+        if isinstance(preflight_package.get("devDependencies"), dict)
+        else {}
+    )
+    preflight_deps = {**preflight_dependencies, **preflight_dev_dependencies}
+    if (
+        "next" in preflight_deps
+        or any((root / name).exists() for name in ("next.config.js", "next.config.mjs", "next.config.ts"))
+        or (root / ".next").is_dir()
+    ):
+        result.update({
+            "status": "blocked",
+            "error": (
+                "Next/AppKit product trees are unsupported. Rebuild this workspace on the pinned "
+                "Vite scaffold and publish dist/index.html."
+            ),
+        })
+        return result
+
+    if _workspace_needs_runtime_ui_contract(source_rel):
+        try:
+            # Materialization is part of the build input, so it must precede normalization,
+            # inventory, typecheck, and the immutable source snapshot.
+            _materialize_subuser_app_kit(
+                root,
+                slug=business_root.name,
+                surface=surface,
+                plans=plans,
+            )
+        except Exception as exc:
+            result.update({"status": "failed", "error": f"failed to materialize runtime kit: {exc}"})
+            return result
 
     files = _product_source_files(root)
     result["source_file_count"] = len(files)
@@ -13976,19 +10528,6 @@ def _refresh_product_surface_path(
             }
         )
         return result
-    if _workspace_needs_runtime_ui_contract(source_rel):
-        try:
-            # The kit is statically imported into the pinned Vite bundle, so refresh must
-            # rewrite it from the current surface truth before the build runs.
-            _materialize_subuser_app_kit(
-                root,
-                slug=business_root.name,
-                surface=surface,
-                plans=plans,
-            )
-        except Exception as exc:
-            result.update({"status": "failed", "error": f"failed to materialize runtime kit: {exc}"})
-            return result
     # A freshly-materialized readback/cache workspace is deps-free by design (node_modules is
     # never synced into canonical storage), so install MUST run there even when a caller passes
     # install=False — otherwise the build false-fails later with a misleading "vite: not found".
@@ -14080,6 +10619,17 @@ def _refresh_product_surface_path(
     if publish_blocker:
         result.update({"status": "blocked", "error": publish_blocker})
         return result
+    try:
+        source_snapshot = _strict_product_source_snapshot(root)
+        publish_source, _publish_label = _product_static_publish_source(root)
+        if publish_source is None:
+            raise TakyonError(_product_publish_readiness_blocker(root))
+        publish_snapshot = _strict_tree_snapshot(publish_source)
+    except Exception as exc:
+        result.update({"status": "blocked", "error": f"could not seal product build snapshot: {exc}"})
+        return result
+    result["source_tree_sha256"] = source_snapshot["sha256"]
+    result["publish_tree_sha256"] = publish_snapshot["sha256"]
     result.update({"status": "passed", "kind": "node_build"})
     return result
 
@@ -15456,7 +12006,13 @@ def _reddit_stage_launch_args(
 
 
 def _product_static_publish_source(source_root: Path) -> tuple[Path | None, str]:
-    candidate = (source_root / "dist").resolve()
+    resolved_source = source_root.resolve()
+    raw_candidate = source_root / "dist"
+    if raw_candidate.is_symlink():
+        return None, ""
+    candidate = raw_candidate.resolve()
+    if resolved_source not in (candidate, *candidate.parents):
+        return None, ""
     if candidate.is_dir() and (candidate / "index.html").is_file():
         return candidate, "dist"
     return None, ""
@@ -16078,6 +12634,8 @@ def _publish_product_surface_path(
     source_path: str,
     publish_target: str,
     source_revision: int = 0,
+    expected_source_tree_sha256: str = "",
+    expected_publish_tree_sha256: str = "",
     surface: Mapping[str, Any] | None = None,
     stage_build: Callable[[dict[str, Any]], None] | None = None,
     activate_build: Callable[[dict[str, Any]], Mapping[str, Any] | None] | None = None,
@@ -16085,6 +12643,7 @@ def _publish_product_surface_path(
     mark_activation_ambiguous: Callable[[dict[str, Any]], None] | None = None,
     rollback_build: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     pointer_guard: Callable[[], Any] | None = None,
+    _sealed_snapshot: bool = False,
 ) -> dict[str, Any]:
     from . import storage
 
@@ -16106,23 +12665,93 @@ def _publish_product_surface_path(
     if publish_source is None:
         result["blocker"] = _product_publish_readiness_blocker(source_root)
         return result
-    if _surface_meta_pixel_enabled(surface):
-        pixel = _meta_pixel_config()
-        pixel_id = str(pixel.get("pixel_id") or "").strip() if isinstance(pixel, Mapping) else ""
-        if pixel_id:
-            result["meta_pixel_injected"] = _inject_meta_pixel_snippet(
-                publish_source,
-                pixel_id=pixel_id,
-                script_src=str(pixel.get("script_src") or "").strip(),
-            )
-    # Shared Umami analytics is baked into EVERY published build (not per-business): the R2 edge
-    # serves bytes raw, so the legacy serve-time inject in web_server._serve_product_site_file no
-    # longer reaches the edge. Self-gates on analytics.umami.enabled+website_id+script_src; "" => no-op.
-    if _inject_umami_snippet(publish_source):
-        result["umami_injected"] = True
+    expected_source_digest = str(expected_source_tree_sha256 or "").strip().lower()
+    expected_publish_digest = str(expected_publish_tree_sha256 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_source_digest) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_publish_digest
+    ):
+        result["blocker"] = "publish requires the exact validated source and dist snapshot digests"
+        return result
+
+    def _snapshot_blocker() -> str:
+        try:
+            current_source = _strict_product_source_snapshot(source_root)
+            current_publish = _strict_tree_snapshot(publish_source)
+        except Exception as exc:
+            return f"product snapshot became unreadable before publish: {exc}"
+        if current_source["sha256"] != expected_source_digest:
+            return "product source changed after validation; refusing to publish a different tree"
+        if current_publish["sha256"] != expected_publish_digest:
+            return "product dist changed after validation; refusing to publish a different tree"
+        return ""
+
+    snapshot_blocker = _snapshot_blocker()
+    if snapshot_blocker:
+        result["blocker"] = snapshot_blocker
+        return result
+    if not _sealed_snapshot:
+        try:
+            with tempfile.TemporaryDirectory(prefix=f"takyon-publish-{_slugify(slug)}-") as raw_tmp:
+                snapshot_business_root = Path(raw_tmp) / "business"
+                snapshot_source_root = snapshot_business_root / rel
+
+                def _snapshot_ignore(_directory: str, names: list[str]) -> set[str]:
+                    return {
+                        name
+                        for name in names
+                        if name in {"node_modules", ".git", ".next", ".cache", "__pycache__"}
+                        or name.endswith(".pyc")
+                    }
+
+                snapshot_source_root.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(
+                    source_root,
+                    snapshot_source_root,
+                    symlinks=True,
+                    ignore=_snapshot_ignore,
+                )
+                sealed_publish_source, _sealed_label = _product_static_publish_source(
+                    snapshot_source_root
+                )
+                if sealed_publish_source is None:
+                    result["blocker"] = "sealed publish snapshot lost dist/index.html"
+                    return result
+                sealed_source = _strict_product_source_snapshot(snapshot_source_root)
+                sealed_publish = _strict_tree_snapshot(sealed_publish_source)
+                if sealed_source["sha256"] != expected_source_digest:
+                    result["blocker"] = (
+                        "source changed while sealing the publish snapshot; refusing mixed input"
+                    )
+                    return result
+                if sealed_publish["sha256"] != expected_publish_digest:
+                    result["blocker"] = (
+                        "dist changed while sealing the publish snapshot; refusing mixed output"
+                    )
+                    return result
+                # Every consumer below receives only this verified, symlink-free copy. The live
+                # workspace can change after this point without affecting bundle/cache/static bytes.
+                return _publish_product_surface_path(
+                    business_root=snapshot_business_root,
+                    slug=slug,
+                    source_path=rel,
+                    publish_target=publish_target,
+                    source_revision=source_revision,
+                    expected_source_tree_sha256=expected_source_digest,
+                    expected_publish_tree_sha256=expected_publish_digest,
+                    surface=surface,
+                    stage_build=stage_build,
+                    activate_build=activate_build,
+                    finalize_build=finalize_build,
+                    mark_activation_ambiguous=mark_activation_ambiguous,
+                    rollback_build=rollback_build,
+                    pointer_guard=pointer_guard,
+                    _sealed_snapshot=True,
+                )
+        except Exception as exc:
+            result["blocker"] = f"could not seal immutable product snapshot: {exc}"
+            return result
     publish_root = _product_publish_root()
     backend = storage.get_storage_backend()
-    build_digests = storage.workspace_file_digests(publish_source)
     try:
         from . import app_actions as takyon_app_actions
     except Exception:
@@ -16138,6 +12767,30 @@ def _publish_product_surface_path(
             else {}
         ),
     )
+    # Action bundling reads server action source. Recheck both trees immediately afterward so the
+    # bundle and the validated browser build cannot come from different filesystem moments.
+    snapshot_blocker = _snapshot_blocker()
+    if snapshot_blocker:
+        result["blocker"] = snapshot_blocker
+        return result
+    if _surface_meta_pixel_enabled(surface):
+        pixel = _meta_pixel_config()
+        pixel_id = str(pixel.get("pixel_id") or "").strip() if isinstance(pixel, Mapping) else ""
+        if pixel_id:
+            result["meta_pixel_injected"] = _inject_meta_pixel_snippet(
+                publish_source,
+                pixel_id=pixel_id,
+                script_src=str(pixel.get("script_src") or "").strip(),
+            )
+    # Runtime-owned analytics injection is the only allowed post-validation mutation. It occurs
+    # after the second source/dist fence and before the final immutable output digest.
+    if _inject_umami_snippet(publish_source):
+        result["umami_injected"] = True
+    try:
+        build_digests = _strict_tree_snapshot(publish_source)["files"]
+    except Exception as exc:
+        result["blocker"] = f"publish output is not an immutable regular-file tree: {exc}"
+        return result
     build_id = hashlib.sha256(
         _json_dumps(
             {
@@ -16155,15 +12808,10 @@ def _publish_product_surface_path(
     # Product publish truth is the committed workspace + build artifact + public R2 pointer. The
     # SSH-mirrored product source cache is a best-effort operator convenience cache and is not read
     # by the live product edge or the app-action runtime. A missing deploy key on the worker plane
-    # therefore must not hard-stop a successful publish on the VPS fallback, whose firewall cannot
-    # reach the sub-user SSH plane. The approved Mac production rail can reach every host and is the
-    # primary publisher, so it fails closed on any replica drift automatically. An operator may also
-    # opt into that gate explicitly elsewhere.
+    # therefore never hard-stops a publish by default, including on the approved Mac rail. Set
+    # TAKYON_REQUIRE_PRODUCT_SOURCE_CACHE_SYNC=1 explicitly only when a cache audit must be a gate.
     required_cache_planes: list[str] = []
-    require_cache_sync = _env_truthy("TAKYON_REQUIRE_PRODUCT_SOURCE_CACHE_SYNC") or (
-        str(os.getenv("TAKYON_ENV") or "prod").strip().lower() == "prod"
-        and _env_truthy("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS")
-    )
+    require_cache_sync = _env_truthy("TAKYON_REQUIRE_PRODUCT_SOURCE_CACHE_SYNC")
     if require_cache_sync:
         required_cache_planes.extend(
             plane for plane in source_cache_sync if plane.startswith("subuser")
@@ -16212,6 +12860,14 @@ def _publish_product_surface_path(
         build_root,
         ignore=ignore,
     )
+    try:
+        copied_digests = _strict_tree_snapshot(build_root)["files"]
+    except Exception as exc:
+        result["blocker"] = f"copied publish tree could not be verified: {exc}"
+        return result
+    if copied_digests != build_digests:
+        result["blocker"] = "copied publish tree digest differs from the sealed build output"
+        return result
     result["build_identity_html_files"] = _inject_live_build_identity(
         build_root,
         build_id,
@@ -27146,6 +23802,8 @@ def _finalize_product_surface_refresh(
                 source_path=str(refresh.get("source_path") or source_path),
                 publish_target=publish_target,
                 source_revision=getattr(store, "_canonical_workspace_revision", lambda _slug: 0)(business),
+                expected_source_tree_sha256=str(refresh.get("source_tree_sha256") or ""),
+                expected_publish_tree_sha256=str(refresh.get("publish_tree_sha256") or ""),
                 surface=surface,
                 stage_build=_stage_immutable_build,
                 activate_build=_activate_immutable_build,
@@ -27713,6 +24371,7 @@ def _app_record_runtime_payload(record: Any) -> dict[str, Any] | None:
             metadata_value = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
         return {
             "id": str(record.get("id") or ""),
+            "ref": str(record.get("ref") or record.get("record_ref") or ""),
             "business_slug": str(record.get("business_slug") or ""),
             "app_user_id": str(record.get("app_user_id") or ""),
             "type": str(record.get("record_type") or record.get("type") or ""),
@@ -27724,6 +24383,7 @@ def _app_record_runtime_payload(record: Any) -> dict[str, Any] | None:
         }
     return {
         "id": str(getattr(record, "id")),
+        "ref": str(getattr(record, "ref")),
         "business_slug": str(getattr(record, "business_slug")),
         "app_user_id": str(getattr(record, "app_user_id")),
         "type": str(getattr(record, "record_type")),
@@ -28522,7 +25182,7 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                     entitlement["cancel_at_period_end"] = bool(metadata.get("cancel_at_period_end"))
                 if "stripe_subscription_status" not in entitlement and "stripe_subscription_status" in metadata:
                     entitlement["stripe_subscription_status"] = metadata.get("stripe_subscription_status")
-        return tool_result({"success": True, "business": business, "user": user, "entitlements": entitlements, "subscription_cancellation_policy": subscription_cancellation_policy(), "usage_this_period": {"events": int(usage["count"] or 0), "estimated_cost_microusd": int(usage["estimated"] or 0), "actual_cost_microusd": int(usage["actual"] or 0)}, "usage_allocation": usage_allocation, "revenue": {"events": int(revenue["count"] or 0), "amount_paid_cents": int(revenue["cents"] or 0)}})
+        return tool_result({"success": True, "business": business, "user": user, "entitlements": entitlements, "product_runtime_contract": product_runtime_contract(), "subscription_cancellation_policy": subscription_cancellation_policy(), "usage_this_period": {"events": int(usage["count"] or 0), "estimated_cost_microusd": int(usage["estimated"] or 0), "actual_cost_microusd": int(usage["actual"] or 0)}, "usage_allocation": usage_allocation, "revenue": {"events": int(revenue["count"] or 0), "amount_paid_cents": int(revenue["cents"] or 0)}})
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -29549,12 +26209,16 @@ def handle_business_read_app_record(args: dict, **_: Any) -> str:
     store = _store()
     try:
         business = _resolved_business_slug(args, required=True)
-        record_type = _normalize_app_record_type(
-            args.get("record_type") if args.get("record_type") is not None else args.get("type")
-        )
-        record_id = _require_app_record_id(
-            args.get("record_id") if args.get("record_id") is not None else args.get("id")
-        )
+        record_ref = str(args.get("record_ref") or args.get("ref") or "").strip()
+        record_type = ""
+        record_id = ""
+        if not record_ref:
+            record_type = _normalize_app_record_type(
+                args.get("record_type") if args.get("record_type") is not None else args.get("type")
+            )
+            record_id = _require_app_record_id(
+                args.get("record_id") if args.get("record_id") is not None else args.get("id")
+            )
         with store._connect() as conn:
             store._ensure_business(conn, business)
             if isinstance(conn, _PGConn):
@@ -29574,14 +26238,23 @@ def handle_business_read_app_record(args: dict, **_: Any) -> str:
                     )
                     with scope:
                         with store._leaf_conn(conn) as leaf:
-                            resolved = leaves["records"].get_record(
-                                leaf,
-                                business,
-                                record_type=record_type,
-                                record_id=record_id,
-                                app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
-                                email=(str(args.get("email")) if args.get("email") else None),
-                                session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                            identity = {
+                                "app_user_id": (str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                                "email": (str(args.get("email")) if args.get("email") else None),
+                                "session_token": (str(args.get("session_token")) if args.get("session_token") else None),
+                            }
+                            resolved = (
+                                leaves["records"].get_record_by_ref(
+                                    leaf, business, record_ref=record_ref, **identity
+                                )
+                                if record_ref
+                                else leaves["records"].get_record(
+                                    leaf,
+                                    business,
+                                    record_type=record_type,
+                                    record_id=record_id,
+                                    **identity,
+                                )
                             )
                 except (leaves["records"].AppRecordError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
@@ -29591,6 +26264,8 @@ def handle_business_read_app_record(args: dict, **_: Any) -> str:
                 user_payload = _app_user_runtime_payload(user)
                 record_payload = _app_record_runtime_payload(record)
             else:
+                if record_ref:
+                    raise TakyonError("record_ref reads require Postgres")
                 user = None
                 if args.get("session_token"):
                     user = store._row_to_dict(conn.execute(
@@ -29641,6 +26316,7 @@ def handle_business_upsert_app_record(args: dict, **_: Any) -> str:
         "app_user_id": args.get("app_user_id"),
         "email": args.get("email"),
         "session_token": args.get("session_token"),
+        "record_ref": args.get("record_ref") if args.get("record_ref") is not None else args.get("ref"),
         "record_type": args.get("record_type") if args.get("record_type") is not None else args.get("type"),
         "record_id": args.get("record_id") if args.get("record_id") is not None else args.get("id"),
         "title": args.get("title"),
@@ -29651,8 +26327,13 @@ def handle_business_upsert_app_record(args: dict, **_: Any) -> str:
         if store._database_plane == "app":
             business = _resolved_business_slug(args, required=True)
             session_token = _require_app_plane_session_token(args)
-            record_type = _normalize_app_record_type(
-                args.get("record_type") if args.get("record_type") is not None else args.get("type")
+            record_ref = str(args.get("record_ref") or args.get("ref") or "").strip()
+            record_type = (
+                ""
+                if record_ref
+                else _normalize_app_record_type(
+                    args.get("record_type") if args.get("record_type") is not None else args.get("type")
+                )
             )
             metadata_value = _normalize_app_record_json_value(
                 args.get("metadata"),
@@ -29676,20 +26357,38 @@ def handle_business_upsert_app_record(args: dict, **_: Any) -> str:
                 try:
                     with store._pg_app_scope(conn, business, session_token=session_token):
                         with store._leaf_conn(conn) as raw:
-                            user, record = leaves["records"].save_record(
-                                raw,
-                                business,
-                                record_type=record_type,
-                                data=data_value,
-                                record_id=(
-                                    str(raw_record_id).strip()
-                                    if raw_record_id not in {None, ""}
-                                    else None
-                                ),
-                                title=title_value,
-                                metadata=metadata_value,
-                                session_token=session_token,
-                            )
+                            common = {
+                                "data": data_value,
+                                "title": title_value,
+                                "metadata": metadata_value,
+                                "session_token": session_token,
+                            }
+                            if record_ref:
+                                if raw_record_id not in {None, ""}:
+                                    raise ValueError("record_ref cannot be combined with record_id")
+                                user, record = leaves["records"].update_record_by_ref(
+                                    raw,
+                                    business,
+                                    record_ref=record_ref,
+                                    **common,
+                                )
+                            elif raw_record_id not in {None, ""}:
+                                # Compatibility only for already-published clients using the old
+                                # type/id route. New SDKs never send a raw record id.
+                                user, record = leaves["records"].save_record(
+                                    raw,
+                                    business,
+                                    record_type=record_type,
+                                    record_id=str(raw_record_id).strip(),
+                                    **common,
+                                )
+                            else:
+                                user, record = leaves["records"].create_record(
+                                    raw,
+                                    business,
+                                    record_type=record_type,
+                                    **common,
+                                )
                 except (leaves["records"].AppRecordError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 record_payload = _app_record_runtime_payload(record)
@@ -29700,8 +26399,9 @@ def handle_business_upsert_app_record(args: dict, **_: Any) -> str:
                     event_type="app.record.upsert",
                     payload={
                         "app_user_id": user.id,
-                        "record_type": record_type,
+                        "record_type": record_payload["type"],
                         "record_id": record_payload["id"],
+                        "record_ref": record_payload["ref"],
                     },
                 )
             return tool_result(
@@ -29994,6 +26694,7 @@ def handle_business_delete_app_record(args: dict, **_: Any) -> str:
         "app_user_id": args.get("app_user_id"),
         "email": args.get("email"),
         "session_token": args.get("session_token"),
+        "record_ref": args.get("record_ref") if args.get("record_ref") is not None else args.get("ref"),
         "record_type": args.get("record_type") if args.get("record_type") is not None else args.get("type"),
         "record_id": args.get("record_id") if args.get("record_id") is not None else args.get("id"),
     }
@@ -30001,12 +26702,16 @@ def handle_business_delete_app_record(args: dict, **_: Any) -> str:
         if store._database_plane == "app":
             business = _resolved_business_slug(args, required=True)
             session_token = _require_app_plane_session_token(args)
-            record_type = _normalize_app_record_type(
-                args.get("record_type") if args.get("record_type") is not None else args.get("type")
-            )
-            record_id = _require_app_record_id(
-                args.get("record_id") if args.get("record_id") is not None else args.get("id")
-            )
+            record_ref = str(args.get("record_ref") or args.get("ref") or "").strip()
+            record_type = ""
+            record_id = ""
+            if not record_ref:
+                record_type = _normalize_app_record_type(
+                    args.get("record_type") if args.get("record_type") is not None else args.get("type")
+                )
+                record_id = _require_app_record_id(
+                    args.get("record_id") if args.get("record_id") is not None else args.get("id")
+                )
             with store._connect() as conn:
                 if not isinstance(conn, _PGConn):
                     raise TakyonError("app-plane record writes require Postgres")
@@ -30015,12 +26720,21 @@ def handle_business_delete_app_record(args: dict, **_: Any) -> str:
                 try:
                     with store._pg_app_scope(conn, business, session_token=session_token):
                         with store._leaf_conn(conn) as raw:
-                            user, record = leaves["records"].delete_record(
-                                raw,
-                                business,
-                                record_type=record_type,
-                                record_id=record_id,
-                                session_token=session_token,
+                            user, record = (
+                                leaves["records"].delete_record_by_ref(
+                                    raw,
+                                    business,
+                                    record_ref=record_ref,
+                                    session_token=session_token,
+                                )
+                                if record_ref
+                                else leaves["records"].delete_record(
+                                    raw,
+                                    business,
+                                    record_type=record_type,
+                                    record_id=record_id,
+                                    session_token=session_token,
+                                )
                             )
                 except (leaves["records"].AppRecordError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
@@ -30032,8 +26746,9 @@ def handle_business_delete_app_record(args: dict, **_: Any) -> str:
                     event_type="app.record.delete",
                     payload={
                         "app_user_id": user.id,
-                        "record_type": record_type,
-                        "record_id": record_id,
+                        "record_type": record_payload["type"],
+                        "record_id": record_payload["id"],
+                        "record_ref": record_payload["ref"],
                     },
                 )
             return tool_result(
@@ -38887,7 +35602,7 @@ def _defer_claude_agent_task_to_worker(args: dict) -> str | None:
     customer_facing = _workspace_needs_customer_ai_copy_contract(workspace_rel)
     timeout_ms = _clamp_int(
         args.get("timeout_ms"),
-        default=1_200_000 if customer_facing else 300_000,
+        default=900_000 if customer_facing else 300_000,
         minimum=30_000,
         maximum=1_800_000,
     )
@@ -39139,7 +35854,77 @@ def _workspace_durability_mismatch_summary(verification: Mapping[str, Any]) -> s
     return "; ".join(issues)
 
 
+@contextmanager
+def _hold_business_product_writer_lease(
+    store: "TakyonStore",
+    *,
+    business: str,
+):
+    """Cross-process single writer for one business's product lane.
+
+    Worker-plane executions already hold this lease in ``jobs.run_one``; inline authority calls
+    acquire the identical transaction-scoped advisory key here. The key contains the business slug,
+    so different businesses remain fully parallel. A process crash releases the DB transaction.
+    """
+    try:
+        from . import jobs as worker_jobs
+    except ImportError:  # pragma: no cover - alternate top-level package load
+        from plugins.takyon import jobs as worker_jobs
+
+    key = worker_jobs.product_writer_lease_key(business)
+    if worker_jobs.current_execution_lease_key() == key:
+        existing_guard = worker_jobs.current_execution_lease_guard()
+        if existing_guard is None:
+            raise worker_jobs.JobClaimLost(
+                f"product-writer lease key is bound without ownership proof: {key}"
+            )
+        existing_guard.assert_owned("inline product handler entry")
+        yield
+        existing_guard.assert_owned("inline product handler completion")
+        return
+    lease_guard = None
+    try:
+        with store._connect() as conn:
+            # Explicitly scope the xact lock to the whole inline handler.  _PGConn.__enter__ owns
+            # commit/rollback but does not itself issue BEGIN; this transaction context makes the
+            # lifetime unambiguous and gives the same-connection watchdog one stable xid.
+            with conn.transaction():
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                    (key,),
+                )
+                with worker_jobs._monitor_product_writer_lease(
+                    conn,
+                    key=key,
+                ) as lease_guard:
+                    yield
+    except Exception as exc:
+        if lease_guard is not None and lease_guard.lost:
+            raise worker_jobs.JobClaimLost(
+                f"product-writer lease lost for {business}: {lease_guard.reason}"
+            ) from exc
+        raise
+
+
 def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
+    """Attach/defer first, then execute under the business product-writer transaction."""
+    # Wake turns are never allowed to reach the worker dispatcher, database authorization, or
+    # writer lease. Keep the existing product-mutation ban at the public entrypoint now that the
+    # owned implementation sits behind those seams.
+    _refuse_on_autonomous_wake("product edits")
+    deferred = _defer_claude_agent_task_to_worker(args)
+    if deferred is not None:
+        return deferred
+    store = _store()
+    business = _resolved_business_slug(args, required=True)
+    # Authorization precedes lock acquisition so an unauthorized caller cannot hold another
+    # tenant's writer lane as a denial-of-service primitive.
+    store.enforce_operator_business_access(business)
+    with _hold_business_product_writer_lease(store, business=business):
+        return _handle_business_claude_agent_task_owned(args)
+
+
+def _handle_business_claude_agent_task_owned(args: dict) -> str:
     """Run a general Claude Agent SDK worker inside one business filesystem."""
     _refuse_on_autonomous_wake("product edits")
     store = _store()
@@ -39186,9 +35971,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             return None
 
     try:
-        deferred = _defer_claude_agent_task_to_worker(args)
-        if deferred is not None:
-            return deferred
         business = _resolved_business_slug(args, required=True)
         worker_session_bound = bool(_session_business_slug())
         instruction = str(args.get("instruction") or "").strip()
@@ -39295,7 +36077,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         )
         timeout_ms = _clamp_int(
             args.get("timeout_ms"),
-            default=1_200_000 if customer_facing_product_workspace else 300_000,
+            default=900_000 if customer_facing_product_workspace else 300_000,
             minimum=30_000,
             maximum=1_800_000,
         )
@@ -39442,8 +36224,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 if mobile_app_workspace:
                     worker_instruction_parts.append(MOBILE_APP_WORKER_CONTRACT)
                     worker_instruction_parts.append(
-                        "Current backend subscription cancellation policy (machine source of truth): `"
-                        + json.dumps(subscription_cancellation_policy(), sort_keys=True)
+                        "Current product runtime contract (machine source of truth): `"
+                        + json.dumps(product_runtime_contract(), sort_keys=True)
                         + "`. The platform-owned cancellation component consumes it; worker-owned UI must not duplicate cancellation timing or refund copy."
                     )
                 if _workspace_needs_runtime_ui_contract(workspace_rel):
@@ -39628,8 +36410,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             claim_store=active_store,
                         )
                 except subprocess.TimeoutExpired:
-                    # Wall-clock wedge: the worker subprocess ran past timeoutMs+30s and
-                    # _run_claude_agent_task_process killed it and re-raised. Do NOT let this escape the
+                    # Wall-clock wedge: the worker subprocess exhausted the one parent-owned deadline;
+                    # _run_claude_agent_task_process cancelled/reaped it and re-raised. Do NOT let this escape the
                     # loop and discard the scratch — the SDK runs in permissionMode "acceptEdits", so any
                     # files the worker already wrote are durably on disk in the mounted scratch workspace.
                     # Preserve them: sync scratch->canonical (best-effort, fail-soft), mark the result
@@ -41463,7 +38245,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_read_app_record",
-        "description": "Read one durable saved product record for a business-scoped product customer.",
+        "description": "Read one durable saved product record by its exact runtime-owned ref.",
         "handler": handle_business_read_app_record,
         "schema": _schema(
             "business_read_app_record",
@@ -41473,10 +38255,9 @@ TAKYON_TOOL_DEFINITIONS = [
                 "session_token": {"type": "string"},
                 "app_user_id": {"type": "string"},
                 "email": {"type": "string"},
-                "record_type": {"type": "string"},
-                "record_id": {"type": "string"},
+                "record_ref": {"type": "string", "description": "Opaque ref returned by the records rail."},
             },
-            ["business", "record_type", "record_id"],
+            ["business", "record_ref"],
         ),
     },
     {
@@ -41492,7 +38273,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "app_user_id": {"type": "string"},
                 "email": {"type": "string"},
                 "record_type": {"type": "string"},
-                "record_id": {"type": "string"},
+                "record_ref": {"type": "string", "description": "For update only: exact opaque ref returned by the records rail."},
                 "title": {"type": "string"},
                 "data": {"description": "JSON-serializable durable record payload."},
                 "metadata": {"type": "object"},
@@ -41500,7 +38281,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,
             },
-            ["business", "record_type", "data", "idempotency_key"],
+            ["business", "data", "idempotency_key"],
         ),
     },
     {
@@ -41557,7 +38338,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_delete_app_record",
-        "description": "Delete one durable business-scoped product record for a product customer.",
+        "description": "Delete one durable business-scoped product record by its exact runtime-owned ref.",
         "handler": handle_business_delete_app_record,
         "schema": _schema(
             "business_delete_app_record",
@@ -41567,13 +38348,12 @@ TAKYON_TOOL_DEFINITIONS = [
                 "session_token": {"type": "string"},
                 "app_user_id": {"type": "string"},
                 "email": {"type": "string"},
-                "record_type": {"type": "string"},
-                "record_id": {"type": "string"},
+                "record_ref": {"type": "string", "description": "Opaque ref returned by the records rail."},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,
             },
-            ["business", "record_type", "record_id", "idempotency_key"],
+            ["business", "record_ref", "idempotency_key"],
         ),
     },
     {
@@ -42208,7 +38988,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 60 for product/site work and 12 otherwise"},
-                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 1200000 for product/site work and 300000 otherwise"},
+                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 900000 for product/site work and 300000 otherwise"},
                 "wait_ms": {"type": "integer", "description": "Worker-plane wait budget in milliseconds. 0 = fire-and-continue: enqueue the build on the worker plane and return immediately with detached:true so the caller can do other work while it runs; re-call later with the SAME arguments and idempotency_key plus a positive wait_ms to re-attach and collect the result. Omit for the default blocking behavior."},
                 "refresh_surface": {"type": "boolean", "description": "Refresh product/website source after edits and write a receipt plus coarse surface snapshot; product/* workspaces default to this source refresh"},
                 "install": {"type": "boolean", "description": "Run package install before build during source check; default true"},

@@ -301,6 +301,16 @@ class TestGetRoutingContract:
         assert args[0]["record_type"] == "note"
         assert args[0]["record_id"] == "r_1"
 
+    def test_get_record_by_ref_routes_without_exposing_type_or_id(self, app_client):
+        client, calls = app_client
+        ref = "tkr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        resp = client.get(f"{BASE}/records/by-ref/{ref}", headers=_with_session())
+        assert resp.status_code == 200
+        args = _only_called(calls, "handle_business_read_app_record")
+        assert args[0]["record_ref"] == ref
+        assert "record_type" not in args[0]
+        assert "record_id" not in args[0]
+
     def test_get_records_two_parts_is_not_found(self, app_client):
         client, calls = app_client
         resp = client.get(f"{BASE}/records/note", headers=_with_session())
@@ -442,6 +452,31 @@ class TestPostRoutingContract:
         assert args[0]["record_type"] == "note"
         assert args[0]["record_id"] == "r_1"
 
+    def test_post_record_by_ref_routes_only_opaque_ref(self, app_client):
+        client, calls = app_client
+        ref = "tkr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        resp = client.post(
+            f"{BASE}/records/by-ref/{ref}",
+            json={"title": "t", "data": {"v": 2}},
+            headers=_with_session(),
+        )
+        assert resp.status_code == 200
+        args = _only_called(calls, "handle_business_upsert_app_record")
+        assert args[0]["record_ref"] == ref
+        assert args[0]["record_id"] is None
+
+    def test_post_record_by_ref_rejects_raw_identifier_overrides(self, app_client):
+        client, calls = app_client
+        ref = "tkr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        resp = client.post(
+            f"{BASE}/records/by-ref/{ref}",
+            json={"data": {}, "id": "forged"},
+            headers=_with_session(),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "unsupported_record_ref_update_fields"
+        assert all(not values for values in calls.values())
+
     def test_post_connections_session_required(self, app_client):
         client, calls = app_client
         resp = client.post(f"{BASE}/connections", json={"action": "like"}, headers=_phost())
@@ -570,6 +605,16 @@ class TestDeleteRoutingContract:
         args = _only_called(calls, "handle_business_delete_app_record")
         assert args[0]["record_type"] == "note"
         assert args[0]["record_id"] == "r_1"
+
+    def test_delete_record_by_ref_routes_only_opaque_ref(self, app_client):
+        client, calls = app_client
+        ref = "tkr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        resp = client.delete(f"{BASE}/records/by-ref/{ref}", headers=_with_session())
+        assert resp.status_code == 200
+        args = _only_called(calls, "handle_business_delete_app_record")
+        assert args[0]["record_ref"] == ref
+        assert "record_type" not in args[0]
+        assert "record_id" not in args[0]
 
     def test_delete_media_session_required(self, app_client):
         client, calls = app_client

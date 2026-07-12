@@ -21,6 +21,7 @@ that requeues never touch ``reserved_billing_entry_id`` (test below).
 
 from __future__ import annotations
 
+import os
 import uuid
 
 import pytest
@@ -86,6 +87,13 @@ _B = "pool-b-host-222"
 _AFTER = ClaimScope(pool_id=_A, fallback="after_lease", lease_seconds=120)
 
 
+@pytest.fixture(autouse=True)
+def _register_claiming_pools(pg_conn):
+    """Every actual claimant is a registered release-advertising pool after migration 0086."""
+    cs.register_pool(pg_conn, pool_id=_A, lease_seconds=600)
+    cs.register_pool(pg_conn, pool_id=_B, lease_seconds=600)
+
+
 # ── re-pins of the five Stage-0 invariants, on the new mechanism ─────────────────────────
 
 
@@ -114,6 +122,7 @@ def test_after_lease_spills_to_anyone_after_window(pg_conn):
 def test_unreserved_job_claimable_by_any_pool(pg_conn):
     slug = _provision_direct(pg_conn)
     j = _enq(pg_conn, slug, None)
+    cs.register_pool(pg_conn, pool_id="whatever", lease_seconds=600)
     got = jobs.claim_one(
         pg_conn, worker_id="any-worker-at-all", kinds=["ceo_wake"], claim_pool_id="whatever"
     )
@@ -344,3 +353,303 @@ def test_claim_one_param_alignment_with_all_gates_active(pg_conn, monkeypatch):
         )
         is None
     )
+
+
+def test_release_fence_allows_same_release_pool_and_rejects_mismatch(pg_conn):
+    owner = _mk_owner(pg_conn)
+    slug = _provision_direct(pg_conn, owner)
+    release_a = pg_conn.execute("select takyon_get_worker_active_release()").fetchone()[0]
+    release_b = "b" * 40
+    cs.register_pool(
+        pg_conn,
+        pool_id=_A,
+        owner_user_id=owner,
+        release_sha=release_a,
+        lease_seconds=600,
+    )
+    job = jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_wake",
+        idempotency_key=f"release-{uuid.uuid4().hex}",
+        required_release_sha=release_a,
+    )
+
+    with pytest.raises(RuntimeError, match="does not match this process release"):
+        jobs.claim_one(
+            pg_conn,
+            worker_id="wrong-release",
+            claim_pool_id=_A,
+            worker_release_sha=release_b,
+        )
+    claimed = jobs.claim_one(
+        pg_conn,
+        worker_id="right-release",
+        claim_pool_id=_A,
+        worker_release_sha=release_a,
+    )
+    assert claimed is not None and claimed.id == job.id
+    assert claimed.required_release_sha == release_a
+    assert claimed.claimed_release_sha == release_a
+    assert claimed.claimed_pool_id == _A
+
+
+def test_release_fence_keeps_different_business_claims_parallel(pg_conn):
+    slug_a = _provision_direct(pg_conn)
+    slug_b = _provision_direct(pg_conn)
+    job_a = _enq(pg_conn, slug_a, ClaimScope(pool_id=_A, fallback="strict"))
+    job_b = _enq(pg_conn, slug_b, ClaimScope(pool_id=_B, fallback="strict"))
+    dsn = psycopg.conninfo.make_conninfo(
+        os.environ["TAKYON_TEST_PG_DSN"],
+        dbname=pg_conn.info.dbname,
+    )
+
+    with (
+        psycopg.connect(dsn, autocommit=False) as first,
+        psycopg.connect(dsn, autocommit=False) as second,
+    ):
+        first.execute("set local statement_timeout = '2s'")
+        second.execute("set local statement_timeout = '2s'")
+        claimed_a = jobs.claim_one(
+            first,
+            worker_id=f"{_A}-parallel",
+            claim_pool_id=_A,
+            exclusive_pool=True,
+        )
+        # first retains its transaction-level release-fence share lock while this claim proceeds.
+        claimed_b = jobs.claim_one(
+            second,
+            worker_id=f"{_B}-parallel",
+            claim_pool_id=_B,
+            exclusive_pool=True,
+        )
+        assert claimed_a is not None and claimed_a.id == job_a.id
+        assert claimed_b is not None and claimed_b.id == job_b.id
+
+
+def test_database_trigger_rejects_pre_fence_worker_claim(pg_conn):
+    slug = _provision_direct(pg_conn)
+    release = pg_conn.execute("select takyon_get_worker_active_release()").fetchone()[0]
+    job = jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_wake",
+        idempotency_key=f"old-worker-{uuid.uuid4().hex}",
+        required_release_sha=release,
+    )
+
+    with pytest.raises(psycopg.errors.CheckViolation, match="release claim mismatch"):
+        # Exact queued->running UPDATE used by code predating migration 0086: it cannot supply the
+        # required release evidence, so the database—not cooperative filtering—refuses the claim.
+        pg_conn.execute(
+            "update jobs set status='running', locked_by='stale-worker', locked_at=now() "
+            "where id=%s",
+            (job.id,),
+        )
+    assert jobs.get_job(pg_conn, job.id).status == "queued"
+
+
+def test_active_release_fence_rejects_mismatched_enqueue(pg_conn):
+    slug = _provision_direct(pg_conn)
+    active = pg_conn.execute("select takyon_get_worker_active_release()").fetchone()[0]
+    mismatch = "d" * 40 if active != "d" * 40 else "c" * 40
+
+    with pytest.raises(RuntimeError, match="does not match this process release"):
+        jobs.enqueue(
+            pg_conn,
+            slug,
+            "ceo_wake",
+            idempotency_key=f"mismatch-{uuid.uuid4().hex}",
+            required_release_sha=mismatch,
+        )
+    with pytest.raises(psycopg.errors.CheckViolation, match="is not the active release"):
+        pg_conn.execute(
+            "insert into jobs (business_slug, kind, idempotency_key, payload, required_release_sha) "
+            "values (%s, 'ceo_wake', %s, '{}'::jsonb, %s)",
+            (slug, f"raw-mismatch-{uuid.uuid4().hex}", mismatch),
+        )
+
+
+def test_release_triggers_ignore_temp_table_shadows(pg_conn):
+    slug = _provision_direct(pg_conn)
+    active = pg_conn.execute("select takyon_get_worker_active_release()").fetchone()[0]
+    mismatch = "d" * 40 if active != "d" * 40 else "c" * 40
+    job = jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_wake",
+        idempotency_key=f"shadow-claim-{uuid.uuid4().hex}",
+        required_release_sha=active,
+    )
+
+    pg_conn.execute(
+        "create temporary table worker_release_fence "
+        "(singleton boolean, active_release_sha text)"
+    )
+    pg_conn.execute(
+        "insert into pg_temp.worker_release_fence values (true, %s)",
+        (mismatch,),
+    )
+    pg_conn.execute(
+        "create temporary table worker_pools "
+        "(pool_id text, release_sha text, status text, lease_expires_at timestamptz)"
+    )
+    pg_conn.execute(
+        "insert into pg_temp.worker_pools values "
+        "('shadow-pool', %s, 'active', now() + interval '1 hour')",
+        (active,),
+    )
+    pg_conn.execute("set search_path = pg_temp, public")
+
+    with pytest.raises(psycopg.errors.CheckViolation, match="is not the active release"):
+        pg_conn.execute(
+            "insert into public.jobs "
+            "(business_slug, kind, idempotency_key, payload, required_release_sha) "
+            "values (%s, 'ceo_wake', %s, '{}'::jsonb, %s)",
+            (slug, f"shadow-insert-{uuid.uuid4().hex}", mismatch),
+        )
+    with pytest.raises(psycopg.errors.CheckViolation, match="is not live on required release"):
+        pg_conn.execute(
+            "update public.jobs set status='running', locked_by='shadow-worker', locked_at=now(), "
+            "claimed_release_sha=%s, claimed_pool_id='shadow-pool' where id=%s",
+            (active, job.id),
+        )
+
+    configs = pg_conn.execute(
+        "select p.proname, p.prosecdef, p.proconfig "
+        "from pg_catalog.pg_proc p "
+        "join pg_catalog.pg_namespace n on n.oid = p.pronamespace "
+        "where n.nspname = 'public' and p.proname = any(%s)",
+        (
+            [
+                "takyon_enforce_job_release_insert",
+                "takyon_enforce_job_release_claim",
+                "takyon_enforce_worker_pool_release",
+            ],
+        ),
+    ).fetchall()
+    assert len(configs) == 3
+    assert all(
+        security_definer and "search_path=pg_catalog, public, pg_temp" in (settings or [])
+        for _name, security_definer, settings in configs
+    )
+
+
+def test_first_cutover_activation_and_restore_repin_only_untouched_jobs(pg_conn):
+    slug = _provision_direct(pg_conn)
+    current = pg_conn.execute("select takyon_get_worker_active_release()").fetchone()[0]
+    restored = pg_conn.execute(
+        "select takyon_restore_worker_legacy_release(%s)",
+        (current,),
+    ).fetchone()[0]
+    assert restored["active_release_sha"] == cs.UNPINNED_RELEASE_SHA
+    legacy_job_id = pg_conn.execute(
+        "insert into jobs (business_slug, kind, idempotency_key, payload) "
+        "values (%s, 'ceo_wake', %s, '{}'::jsonb) returning id",
+        (slug, f"legacy-{uuid.uuid4().hex}"),
+    ).fetchone()[0]
+    target = "a" * 40
+    activated = pg_conn.execute(
+        "select takyon_activate_worker_release(%s)",
+        (target,),
+    ).fetchone()[0]
+    assert activated["previous_release_sha"] == cs.UNPINNED_RELEASE_SHA
+    assert activated["active_release_sha"] == target
+    assert activated["repinned_jobs"] == 1
+    assert activated["drained_pools"] >= 0
+    assert pg_conn.execute(
+        "select required_release_sha from jobs where id=%s",
+        (legacy_job_id,),
+    ).fetchone()[0] == target
+
+    rolled_back = pg_conn.execute(
+        "select takyon_restore_worker_legacy_release(%s)",
+        (target,),
+    ).fetchone()[0]
+    assert rolled_back["repinned_jobs"] == 1
+    assert pg_conn.execute(
+        "select required_release_sha from jobs where id=%s",
+        (legacy_job_id,),
+    ).fetchone()[0] == cs.UNPINNED_RELEASE_SHA
+
+
+def test_release_activation_repins_untouched_work_and_drains_old_pools(pg_conn):
+    slug = _provision_direct(pg_conn)
+    previous = pg_conn.execute("select takyon_get_worker_active_release()").fetchone()[0]
+    cs.register_pool(pg_conn, pool_id=_A, release_sha=previous, lease_seconds=600)
+    cs.register_pool(pg_conn, pool_id=_B, release_sha=previous, lease_seconds=600)
+    manual_pool = "pool-manual-drain"
+    target_pool = "pool-target-release"
+    cs.register_pool(pg_conn, pool_id=manual_pool, release_sha=previous, lease_seconds=600)
+    cs.begin_drain(pg_conn, manual_pool)
+    _lapse_pool_lease(pg_conn, _B)
+    job = jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_wake",
+        idempotency_key=f"upgrade-{uuid.uuid4().hex}",
+    )
+    target = "a" * 40 if previous != "a" * 40 else "b" * 40
+
+    receipt = pg_conn.execute(
+        "select takyon_activate_worker_release(%s)",
+        (target,),
+    ).fetchone()[0]
+
+    assert receipt["previous_release_sha"] == previous
+    assert receipt["repinned_jobs"] >= 1
+    assert pg_conn.execute(
+        "select required_release_sha from jobs where id=%s",
+        (job.id,),
+    ).fetchone()[0] == target
+    assert pg_conn.execute(
+        "select status from public.worker_pools where pool_id=%s",
+        (_A,),
+    ).fetchone()[0] == "draining"
+    assert pg_conn.execute(
+        "select release_fence_drained_by_sha from public.worker_pools where pool_id=%s",
+        (_A,),
+    ).fetchone()[0] == target
+    assert pg_conn.execute(
+        "select release_fence_drained_by_sha from public.worker_pools where pool_id=%s",
+        (manual_pool,),
+    ).fetchone()[0] is None
+    with pytest.raises(psycopg.errors.CheckViolation, match="is not the active release"):
+        cs.register_pool(pg_conn, pool_id=_A, release_sha=previous, lease_seconds=600)
+    pg_conn.execute(
+        "insert into public.worker_pools "
+        "(pool_id, hostname, status, release_sha, lease_expires_at) "
+        "values (%s, 'target-host', 'active', %s, now() + interval '10 minutes')",
+        (target_pool, target),
+    )
+
+    restored = pg_conn.execute(
+        "select takyon_restore_worker_release(%s, %s)",
+        (target, previous),
+    ).fetchone()[0]
+    assert restored["active_release_sha"] == previous
+    assert restored["drained_pools"] == 1
+    assert restored["reactivated_pools"] == 1
+    assert pg_conn.execute(
+        "select required_release_sha from jobs where id=%s",
+        (job.id,),
+    ).fetchone()[0] == previous
+    pool_states = {
+        pool_id: (status, marker)
+        for pool_id, status, marker in pg_conn.execute(
+            "select pool_id, status, release_fence_drained_by_sha "
+            "from public.worker_pools where pool_id = any(%s)",
+            ([_A, _B, manual_pool, target_pool],),
+        ).fetchall()
+    }
+    assert pool_states[_A] == ("active", None)
+    assert pool_states[_B] == ("draining", None)
+    assert pool_states[manual_pool] == ("draining", None)
+    assert pool_states[target_pool] == ("draining", previous)
+    claimed = jobs.claim_one(
+        pg_conn,
+        worker_id=f"{_A}-restored",
+        claim_pool_id=_A,
+        worker_release_sha=previous,
+    )
+    assert claimed is not None and claimed.id == job.id

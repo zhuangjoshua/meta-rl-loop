@@ -6,7 +6,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import * as WebBrowser from "expo-web-browser";
 import * as Linking from "expo-linking";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { surface, client } from "./takyon";
+import { surface, client, type AccountPayload, type AppEntitlement } from "./takyon";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -15,7 +15,7 @@ interface AuthState {
   authenticated: boolean;
   configured: boolean;
   user: any | null;
-  account: any | null;
+  account: AccountPayload | null;
   tier: string;
   signInWithGoogle: () => Promise<void>;
   logoutLocal: () => Promise<void>;
@@ -24,16 +24,16 @@ interface AuthState {
 
 const Ctx = createContext<AuthState | null>(null);
 
-function normalizedEntitlementStatus(entitlement: any): string {
+function normalizedEntitlementStatus(entitlement: AppEntitlement): string {
   const status = String(entitlement?.status ?? "").trim().toLowerCase();
   if (status === "paid") return "active";
   if (status === "cancelled") return "canceled";
   return status;
 }
 
-export function hasNonterminalStripeSubscription(account: any): boolean {
+export function hasNonterminalStripeSubscription(account: AccountPayload | null): boolean {
   const entitlements = Array.isArray(account?.entitlements) ? account.entitlements : [];
-  return entitlements.some((entitlement: any) => {
+  return entitlements.some((entitlement: AppEntitlement) => {
     const source = String(entitlement?.source ?? "").trim().toLowerCase();
     const subscriptionId = String(
       entitlement?.stripe_subscription_id ?? entitlement?.stripeSubscriptionId ?? "",
@@ -63,7 +63,7 @@ export function ProductAuthProvider({ children }: { children: React.ReactNode })
   const [ready, setReady] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [user, setUser] = useState<any | null>(null);
-  const [account, setAccount] = useState<any | null>(null);
+  const [account, setAccount] = useState<AccountPayload | null>(null);
   const [tier, setTier] = useState("unentitled");
 
   const refresh = useCallback(async () => {

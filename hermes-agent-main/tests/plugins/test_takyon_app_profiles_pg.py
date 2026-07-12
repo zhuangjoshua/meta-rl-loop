@@ -146,6 +146,58 @@ def test_record_save_rejects_session_token_with_app_user_override(pg_conn):
         )
 
 
+def test_record_refs_are_server_owned_stable_and_never_cross_user_authority(
+    pg_conn, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path / "safebox"))
+    slug = _business(pg_conn, _owner(pg_conn))
+    alice = app_identity.upsert_app_user(pg_conn, slug, "alice-ref@example.com")
+    bob = app_identity.upsert_app_user(pg_conn, slug, "bob-ref@example.com")
+    _, alice_session = app_identity.start_session(pg_conn, slug, alice.id)
+    _, bob_session = app_identity.start_session(pg_conn, slug, bob.id)
+
+    _, created = app_records.create_record(
+        pg_conn,
+        slug,
+        record_type="note",
+        data={"text": "private"},
+        session_token=alice_session,
+    )
+
+    assert created.ref.startswith("tkr_")
+    assert len(created.ref) == 36
+    assert app_records.get_record_by_ref(
+        pg_conn, slug, record_ref=created.ref, session_token=bob_session
+    ) is None
+    with pytest.raises(app_records.AppRecordNotFound):
+        app_records.update_record_by_ref(
+            pg_conn,
+            slug,
+            record_ref=created.ref,
+            data={"text": "stolen"},
+            session_token=bob_session,
+        )
+
+    _, updated = app_records.update_record_by_ref(
+        pg_conn,
+        slug,
+        record_ref=created.ref,
+        data={"text": "revised"},
+        session_token=alice_session,
+    )
+    assert updated.ref == created.ref
+    assert updated.data == {"text": "revised"}
+
+    _, deleted = app_records.delete_record_by_ref(
+        pg_conn, slug, record_ref=created.ref, session_token=alice_session
+    )
+    assert deleted.ref == created.ref
+    assert app_records.get_record_by_ref(
+        pg_conn, slug, record_ref=created.ref, session_token=alice_session
+    ) is None
+
+
 def test_directory_write_rejects_session_token_with_app_user_override(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     alice = app_identity.upsert_app_user(pg_conn, slug, "alice-directory@example.com")

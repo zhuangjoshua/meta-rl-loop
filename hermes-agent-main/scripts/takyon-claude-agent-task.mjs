@@ -423,7 +423,6 @@ async function main() {
 
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
   const abortController = new AbortController();
-  const timeoutMs = Number.parseInt(String(input.timeoutMs || ""), 10) || 300000;
   const maxTurns = Number.parseInt(String(input.maxTurns || ""), 10) || 12;
   const maxBudgetUsd = Number.parseFloat(String(input.maxBudgetUsd || "")) || 2;
   const effort = String(input.effort || process.env.TAKYON_CLAUDE_AGENT_EFFORT || "high").trim().toLowerCase();
@@ -431,15 +430,19 @@ async function main() {
   const pathToClaudeCodeExecutable = String(process.env.TAKYON_CLAUDE_CODE_EXECUTABLE || "").trim();
   const inDockerWorker = String(process.env.TAKYON_CLAUDE_AGENT_IN_DOCKER || "").trim() === "1";
 
-  let timeout = null;
   let text = "";
   let totalCostUsd = null;
   let finalUsage = null;
   workerStderr = "";
+  let parentAbortRequested = false;
+  const requestParentAbort = () => {
+    parentAbortRequested = true;
+    abortController.abort();
+  };
+  process.once("SIGTERM", requestParentAbort);
+  process.once("SIGINT", requestParentAbort);
   try {
-    await Promise.race([
-      (async () => {
-        for await (const message of query({
+    for await (const message of query({
           prompt: buildPrompt(input),
           options: {
             abortController,
@@ -504,29 +507,25 @@ async function main() {
               return { behavior: "allow", updatedInput, toolUseID: options.toolUseID };
             }
           }
-        })) {
-          emitProgress(progressEventFromSdkMessage(message));
-          const chunk = textFromSdkMessage(message);
-          if (chunk) text += `${chunk}\n`;
-          if (message && typeof message === "object" && message.type === "result") {
-            if (typeof message.total_cost_usd === "number" && Number.isFinite(message.total_cost_usd)) {
-              totalCostUsd = message.total_cost_usd;
-            }
-            if (message.usage && typeof message.usage === "object") {
-              finalUsage = message.usage;
-            }
-          }
+    })) {
+      emitProgress(progressEventFromSdkMessage(message));
+      const chunk = textFromSdkMessage(message);
+      if (chunk) text += `${chunk}\n`;
+      if (message && typeof message === "object" && message.type === "result") {
+        if (typeof message.total_cost_usd === "number" && Number.isFinite(message.total_cost_usd)) {
+          totalCostUsd = message.total_cost_usd;
         }
-      })(),
-      new Promise((_, reject) => {
-        timeout = setTimeout(() => {
-          abortController.abort();
-          reject(new Error(`Claude Agent SDK task timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
-      })
-    ]);
+        if (message.usage && typeof message.usage === "object") {
+          finalUsage = message.usage;
+        }
+      }
+    }
+    if (parentAbortRequested) {
+      throw new Error("Claude Agent SDK task cancelled by parent supervisor");
+    }
   } finally {
-    if (timeout) clearTimeout(timeout);
+    process.removeListener("SIGTERM", requestParentAbort);
+    process.removeListener("SIGINT", requestParentAbort);
   }
 
   process.stdout.write(JSON.stringify({

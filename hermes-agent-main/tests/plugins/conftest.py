@@ -45,6 +45,19 @@ _DB_DIR = Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "db"
 TOPOLOGY_SQL = _DB_DIR / "topology.sql"
 # Manual, gated polsia2 teardown — lives OUTSIDE migrations/ so it is never swept.
 RETIRE_POLSIA2_SQL = _DB_DIR / "retire_polsia2_public.sql"
+TEST_RUNTIME_RELEASE_SHA = "e" * 40
+
+
+@pytest.fixture(autouse=True)
+def _sealed_test_runtime_release(monkeypatch):
+    """PG/plugin tests use an explicit sealed synthetic release, never a dirty-worktree bypass."""
+    from plugins.takyon import claim_scope
+
+    monkeypatch.setattr(
+        claim_scope,
+        "runtime_release_sha",
+        lambda **_kwargs: TEST_RUNTIME_RELEASE_SHA,
+    )
 
 
 def _apply_migrations(conn) -> None:
@@ -55,6 +68,7 @@ def _apply_migrations(conn) -> None:
     from plugins.takyon.db.runner import run_migrations
 
     run_migrations(conn)
+    conn.execute("select takyon_activate_worker_release(%s)", (TEST_RUNTIME_RELEASE_SHA,))
 
 
 @contextmanager

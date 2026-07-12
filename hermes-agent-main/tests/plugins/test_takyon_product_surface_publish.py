@@ -22,6 +22,18 @@ def _stage_immutable_builds(monkeypatch):
     publish = takyon_core._publish_product_surface_path
 
     def wrapped(**kwargs):
+        business_root = Path(kwargs["business_root"])
+        source_root = business_root / str(kwargs.get("source_path") or "product/site")
+        publish_source, _label = takyon_core._product_static_publish_source(source_root)
+        if publish_source is not None:
+            kwargs.setdefault(
+                "expected_source_tree_sha256",
+                takyon_core._strict_product_source_snapshot(source_root)["sha256"],
+            )
+            kwargs.setdefault(
+                "expected_publish_tree_sha256",
+                takyon_core._strict_tree_snapshot(publish_source)["sha256"],
+            )
         kwargs.setdefault("stage_build", lambda _build: None)
         kwargs.setdefault("activate_build", lambda _build: None)
         kwargs.setdefault("rollback_build", lambda _build: {"rolled_back": True})
@@ -80,7 +92,12 @@ def test_publish_product_surface_writes_immutable_build_and_flips_current_pointe
 
     def _recording_copytree(src, dst, *args, **kwargs):
         src_path = Path(src).resolve()
-        if src_path == dist.resolve() and "publish_copy_target" not in observed:
+        dst_path = Path(dst)
+        if (
+            src_path.name == "dist"
+            and dst_path.parent.name.startswith(".takyon-stage-")
+            and "publish_copy_target" not in observed
+        ):
             observed["publish_copy_target"] = Path(dst)
         return real_copytree(src, dst, *args, **kwargs)
 
@@ -105,6 +122,85 @@ def test_publish_product_surface_writes_immutable_build_and_flips_current_pointe
     assert "<body>new site</body>" in served_html
     assert f'content="{result["live_build_id"]}"' in served_html
     assert (current_root / "assets" / "app.css").read_text(encoding="utf-8") == "body{color:#123456}\n"
+
+
+def test_publish_refuses_tree_changed_after_validation(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "snapshot"
+    site = business_root / "product" / "site"
+    dist = site / "dist"
+    dist.mkdir(parents=True)
+    (site / "actions").mkdir()
+    (site / "actions" / "generate.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    (dist / "index.html").write_text("<h1>validated</h1>\n", encoding="utf-8")
+    source_digest = takyon_core._strict_product_source_snapshot(site)["sha256"]
+    publish_digest = takyon_core._strict_tree_snapshot(dist)["sha256"]
+    (site / "actions" / "generate.ts").write_text("export const value = 2;\n", encoding="utf-8")
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published"))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
+
+    result = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="snapshot",
+        source_path="product/site",
+        publish_target="https://snapshot.coscale.app/",
+        expected_source_tree_sha256=source_digest,
+        expected_publish_tree_sha256=publish_digest,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocker"] == (
+        "product source changed after validation; refusing to publish a different tree"
+    )
+
+
+def test_strict_snapshot_rejects_symlinked_build_input(tmp_path):
+    root = tmp_path / "dist"
+    root.mkdir()
+    target = tmp_path / "outside.html"
+    target.write_text("outside\n", encoding="utf-8")
+    (root / "index.html").symlink_to(target)
+
+    with pytest.raises(takyon_core.TakyonError, match="symlinked file"):
+        takyon_core._strict_tree_snapshot(root)
+
+
+def test_publish_source_rejects_symlinked_dist_outside_business(tmp_path):
+    site = tmp_path / "business" / "product" / "site"
+    outside = tmp_path / "outside-dist"
+    site.mkdir(parents=True)
+    outside.mkdir()
+    (outside / "index.html").write_text("external", encoding="utf-8")
+    (site / "dist").symlink_to(outside, target_is_directory=True)
+
+    assert takyon_core._product_static_publish_source(site) == (None, "")
+
+
+def test_refresh_refuses_next_tree_before_appkit_materialization(tmp_path, monkeypatch):
+    business_root = tmp_path / "business"
+    site = business_root / "product" / "site"
+    site.mkdir(parents=True)
+    package = '{"dependencies":{"next":"15.0.0"},"scripts":{"build":"next build"}}\n'
+    (site / "package.json").write_text(package, encoding="utf-8")
+    called = False
+
+    def materialize(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("AppKit mutation ran before the Next preflight")
+
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", materialize)
+
+    result = takyon_core._refresh_product_surface_path(
+        business_root,
+        "product/site",
+        install=False,
+    )
+
+    assert result["status"] == "blocked"
+    assert "Next/AppKit product trees are unsupported" in result["error"]
+    assert called is False
+    assert (site / "package.json").read_text(encoding="utf-8") == package
 
 
 def test_publish_product_surface_bakes_meta_pixel_into_served_build_when_enabled(tmp_path, monkeypatch):
@@ -525,7 +621,7 @@ def test_publish_product_surface_can_explicitly_require_source_cache_sync(tmp_pa
     assert result["blocker"] == "product source cache sync failed: subuser: ssh key not found"
 
 
-def test_mac_prod_publish_automatically_requires_every_source_cache_replica(tmp_path, monkeypatch):
+def test_mac_prod_publish_warns_on_non_authoritative_source_cache_drift(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "plannerly"
     dist = business_root / "product" / "site" / "dist"
     dist.mkdir(parents=True)
@@ -558,8 +654,8 @@ def test_mac_prod_publish_automatically_requires_every_source_cache_replica(tmp_
         publish_target="https://plannerly.fourmanifold.com/",
     )
 
-    assert result["status"] == "blocked"
-    assert result["blocker"] == (
+    assert result["status"] == "published"
+    assert result["source_cache_sync_warning"] == (
         "product source cache sync failed: subuser_replica_2: source digest drift"
     )
 

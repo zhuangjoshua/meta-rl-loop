@@ -47,10 +47,11 @@ const client = createSubuserRuntimeClient({
   location: { href: "https://proposalforge.example/app", origin: "https://proposalforge.example" },
 });
 
-const serverRef = "takyon-record-v1.%5b1%2c%20%22proposal%22%2c%20%22runtime-owned-42%22%5d";
+const serverRef = "tkr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const canonical = {
   id: "runtime-owned-42",
   type: "proposal",
+  ref: serverRef,
   title: "Acme SOW",
   data: { route_slug: "ui-invented-slug" },
 };
@@ -58,7 +59,6 @@ const canonical = {
 responses.push({
   success: true,
   id: "envelope-operation-id",
-  ref: "envelope-not-a-record-ref",
   record: canonical,
 });
 const saved = await client.saveRecord({
@@ -98,15 +98,15 @@ try {
   mismatchedIdError = String(error && error.message);
 }
 
-let conflictingRefAliasesError = "";
+let rawRefAliasError = "";
 try {
   await client.saveRecord({
     ref: saved.ref,
-    record_ref: "takyon-record-v1.%5B1%2C%22proposal%22%2C%22other%22%5D",
+    record_ref: "tkr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     data: canonical.data,
   });
 } catch (error) {
-  conflictingRefAliasesError = String(error && error.message);
+  rawRefAliasError = String(error && error.message);
 }
 
 let conflictingTypeAliasesError = "";
@@ -132,15 +132,10 @@ responses.push({ success: true, records: [canonical] });
 const listed = await client.listRecords({ type: "proposal" });
 
 responses.push({ success: true, record: canonical });
-const legacy = await client.getRecord("proposal", canonical.id);
-
-responses.push({ success: true, record: canonical });
-const legacyDeleted = await client.deleteRecord("proposal", canonical.id);
-
-responses.push({ success: true, record: canonical });
 const deleted = await client.deleteRecord(saved.record.ref);
 
-responses.push({ success: true, records: [{ ...canonical, ref: serverRef }] });
+const secondRef = "tkr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+responses.push({ success: true, records: [{ ...canonical, ref: secondRef }] });
 const serverReferenced = await client.listRecords({ type: "proposal" });
 
 let rawIdError = "";
@@ -160,7 +155,7 @@ try {
 console.log(JSON.stringify({
   ref: saved.record.ref,
   flatRef: saved.ref,
-  flatId: saved.id,
+  hasRawId: "id" in saved || "id" in saved.record || "record_id" in saved.record,
   refType: typeof saved.record.ref,
   refStableOnRead: read.record.ref === saved.record.ref,
   flatReadRefStable: read.ref === saved.record.ref,
@@ -169,11 +164,7 @@ console.log(JSON.stringify({
   updateBody: calls[2].body,
   refStableOnList: listed.records[0].ref === saved.record.ref,
   readUrl: calls[1].url,
-  legacyUrl: calls[4].url,
-  legacyRef: legacy.record.ref,
-  legacyDeleteUrl: calls[5].url,
-  legacyDeletedRef: legacyDeleted.record.ref,
-  deleteUrl: calls[6].url,
+  deleteUrl: calls[4].url,
   deletedRef: deleted.record.ref,
   serverRefPreserved: serverReferenced.records[0].ref,
   rawIdError,
@@ -181,7 +172,7 @@ console.log(JSON.stringify({
   missingDataError,
   mismatchedTypeError,
   mismatchedIdError,
-  conflictingRefAliasesError,
+  rawRefAliasError,
   conflictingTypeAliasesError,
   conflictingIdAliasesError,
   callCount: calls.length,
@@ -210,41 +201,33 @@ def test_save_returns_ref_that_roundtrips_without_an_ad_hoc_identifier(tmp_path)
     out = json.loads(proc.stdout.strip().splitlines()[-1])
 
     assert out["refType"] == "string"
-    assert out["ref"].startswith("takyon-record-v1.")
+    assert out["ref"].startswith("tkr_")
     assert out["ref"] != "runtime-owned-42"
     assert out["flatRef"] == out["ref"]
-    assert out["flatId"] == "runtime-owned-42"
+    assert out["hasRawId"] is False
     assert out["refStableOnRead"] is True
     assert out["flatReadRefStable"] is True
     assert out["updateRefStable"] is True
     assert out["refStableOnList"] is True
-    assert out["readUrl"].endswith("/records/proposal/runtime-owned-42")
-    assert out["updateUrl"].endswith("/records/proposal/runtime-owned-42")
-    assert '"record_id":"runtime-owned-42"' in out["updateBody"]
-    assert "takyon-record-v1" not in out["updateBody"]
+    assert out["readUrl"].endswith(f"/records/by-ref/{out['ref']}")
+    assert out["updateUrl"].endswith(f"/records/by-ref/{out['ref']}")
+    assert "record_id" not in out["updateBody"]
+    assert "record_type" not in out["updateBody"]
     assert "ui-invented-slug" not in out["readUrl"]
-
-    # Existing products using positional getRecord(type, id) remain operational.
-    assert out["legacyUrl"].endswith("/records/proposal/runtime-owned-42")
-    assert out["legacyRef"] == out["ref"]
-    assert out["legacyDeleteUrl"].endswith("/records/proposal/runtime-owned-42")
-    assert out["legacyDeletedRef"] == out["ref"]
 
     # A raw id or lookalike object cannot enter the new ref-only path and causes no request.
     assert "pass the ref returned by saveRecord" in out["rawIdError"]
     assert "pass the ref returned by saveRecord" in out["adHocObjectError"]
     assert out["missingDataError"] == "data is required"
-    assert out["mismatchedTypeError"] == "record_type does not match the supplied record ref"
-    assert out["mismatchedIdError"] == "record_id does not match the supplied record ref"
-    assert out["conflictingRefAliasesError"] == "ref does not match the supplied record_ref"
+    assert out["mismatchedTypeError"] == "record_type cannot accompany a ref update"
+    assert out["mismatchedIdError"] == "raw record identifiers are not accepted; use the runtime-owned ref"
+    assert out["rawRefAliasError"] == "raw record identifiers are not accepted; use the runtime-owned ref"
     assert out["conflictingTypeAliasesError"] == "record_type does not match the supplied type"
-    assert out["conflictingIdAliasesError"] == "record_id does not match the supplied id"
-    assert out["deleteUrl"].endswith("/records/proposal/runtime-owned-42")
+    assert out["conflictingIdAliasesError"] == "raw record identifiers are not accepted; use the runtime-owned ref"
+    assert out["deleteUrl"].endswith(f"/records/by-ref/{out['ref']}")
     assert out["deletedRef"] == out["ref"]
-    assert out["serverRefPreserved"] == (
-        "takyon-record-v1.%5b1%2c%20%22proposal%22%2c%20%22runtime-owned-42%22%5d"
-    )
-    assert out["callCount"] == 8
+    assert out["serverRefPreserved"] == "tkr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    assert out["callCount"] == 6
 
 
 @pytest.mark.skipif(not _TSC.is_file(), reason="scaffold TypeScript compiler not installed")

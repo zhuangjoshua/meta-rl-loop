@@ -91,6 +91,7 @@ class TestRegistryEquivalenceInvariants:
             "connections": r"\b(?:listConnections|actOnConnection)\s*\(",
             "generate": r"\b(?:ctx|client|runtime|rt)\.generate\s*\(",
             "search": r"\b(?:ctx|client|runtime|rt)\.search\s*\(",
+            "egress": r"\b(?:ctx|client|runtime|rt)\.egress\s*\(",
         }
         derived = {name: pat.pattern for name, pat in core.runtime_rail_usage_patterns()}
         assert derived == expected
@@ -106,6 +107,14 @@ class TestRegistryEquivalenceInvariants:
         assert idx[id(q)] < idx[id(wild)]
 
     def test_match_returns_bound_params(self):
+        by_ref = core.match_app_plane_route(
+            "GET", ["records", "by-ref", "tkr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        )
+        assert by_ref is not None
+        by_ref_route, by_ref_bound = by_ref
+        assert by_ref_route.handler_key == "record_by_ref_get"
+        assert by_ref_bound == {"record_ref": "tkr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+
         matched = core.match_app_plane_route("GET", ["records", "note", "r1"])
         assert matched is not None
         route, bound = matched

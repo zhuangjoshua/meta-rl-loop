@@ -8,7 +8,12 @@ import {
   CardTitle,
 } from "./ui/card";
 import { hasNonterminalStripeSubscription, useViewerAccess } from "../lib/hooks";
-import { client } from "../lib/takyon";
+import {
+  client,
+  type AccountPayload,
+  type SubscriptionCancellationPolicy,
+  type SubscriptionCancellationResult,
+} from "../lib/takyon";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || "Cancellation failed");
@@ -18,16 +23,21 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function cancellationPolicy(account: unknown): Record<string, unknown> | null {
-  if (!isObject(account) || !isObject(account.subscription_cancellation_policy)) return null;
-  return account.subscription_cancellation_policy;
+function cancellationPolicy(account: AccountPayload | null): SubscriptionCancellationPolicy | null {
+  if (!isObject(account) || !isObject(account.product_runtime_contract)) return null;
+  const policy = account.product_runtime_contract.subscription.cancellation;
+  return policy.version === 1 &&
+    policy.effective_timing === "immediate" &&
+    policy.refund_policy === "none"
+    ? policy
+    : null;
 }
 
-function noRefundSuffix(policy: Record<string, unknown> | null): string {
+function noRefundSuffix(policy: SubscriptionCancellationPolicy | null): string {
   return policy?.refund_policy === "none" ? " Cancellation does not issue a refund." : "";
 }
 
-function preCancellationCopy(account: unknown): { description: string; confirmation: string } {
+function preCancellationCopy(account: AccountPayload | null): { description: string; confirmation: string } {
   const policy = cancellationPolicy(account);
   const refund = noRefundSuffix(policy);
   if (policy?.effective_timing === "immediate") {
@@ -36,37 +46,16 @@ function preCancellationCopy(account: unknown): { description: string; confirmat
       confirmation: `Cancel your subscription now? Your access will end immediately.${refund}`,
     };
   }
-  if (policy?.effective_timing === "period_end") {
-    return {
-      description: `Cancellation takes effect at the end of the current billing period.${refund}`,
-      confirmation: `Cancel your subscription? Access will remain available until the end of the current billing period.${refund}`,
-    };
-  }
   return {
     description: "The server will confirm when cancellation takes effect.",
     confirmation: "Cancel your subscription? The server response will confirm when access ends.",
   };
 }
 
-function cancellationResultCopy(outcome: unknown): string {
-  if (!isObject(outcome)) return "Cancellation confirmed.";
-  const policy = isObject(outcome.subscription_cancellation_policy)
-    ? outcome.subscription_cancellation_policy
-    : null;
+function cancellationResultCopy(outcome: SubscriptionCancellationResult): string {
+  const policy = outcome.subscription_cancellation_policy;
   const refund = policy?.refund_policy === "none" ? " No refund was issued." : "";
-  if (outcome.effective_immediately === true && outcome.cancel_at_period_end === false) {
-    return `Your access ended immediately.${refund}`;
-  }
-  if (outcome.cancel_at_period_end === true && outcome.effective_immediately !== true) {
-    const rawEnd = String(outcome.current_period_end ?? "").trim();
-    const parsedEnd = rawEnd ? new Date(rawEnd) : null;
-    const endLabel =
-      parsedEnd && !Number.isNaN(parsedEnd.getTime())
-        ? new Intl.DateTimeFormat(undefined, { dateStyle: "long" }).format(parsedEnd)
-        : "the end of the current billing period";
-    return `Your subscription will end on ${endLabel}.${refund}`;
-  }
-  return "Cancellation confirmed. Refresh your account to see the current access state.";
+  return `Your access ended immediately.${refund}`;
 }
 
 /** Canonical backend-truthful self-service billing control.

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import contextvars
 import signal
 import subprocess
+import threading
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +12,9 @@ from types import SimpleNamespace
 import pytest
 
 from plugins.takyon import core, jobs
+from plugins.takyon import claim_scope
+
+_REAL_RUNTIME_RELEASE_SHA = claim_scope.runtime_release_sha
 
 
 def test_all_canonical_product_writers_share_one_lane_separate_from_ceo():
@@ -75,6 +81,111 @@ def test_durable_write_fence_reaps_cancelled_child_before_side_effect():
     assert guard.lost is True
 
 
+class _LeaseTransaction:
+    def __init__(self, exited: threading.Event):
+        self.exited = exited
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.exited.set()
+        return False
+
+
+class _MonitoredLeaseConn:
+    def __init__(self):
+        self.fail_probe = threading.Event()
+        self.transaction_exited = threading.Event()
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def transaction(self):
+        return _LeaseTransaction(self.transaction_exited)
+
+    def execute(self, sql, _params=()):
+        normalized = str(sql).lower()
+        if "pg_try_advisory_xact_lock" in normalized:
+            row = (True,)
+        elif "pg_advisory_xact_lock" in normalized:
+            row = None
+        elif "pg_backend_pid" in normalized:
+            if self.fail_probe.is_set():
+                raise RuntimeError("lease socket closed")
+            row = (4312, "991", True)
+        else:
+            raise AssertionError(f"unexpected lease SQL: {sql}")
+        return SimpleNamespace(fetchone=lambda: row)
+
+    def close(self):
+        self.closed = True
+
+
+def test_product_writer_same_connection_loss_cancels_bound_claim_before_unwind(monkeypatch):
+    monkeypatch.setattr(jobs, "_PRODUCT_WRITER_LEASE_PROBE_SECONDS", 0.01)
+    conn = _MonitoredLeaseConn()
+    claim = jobs.JobClaimGuard(job_id="writer-job", worker_id="worker-a", attempt=1)
+    job = SimpleNamespace(kind="claude.agent_task", business_slug="alpha")
+    child_entered = threading.Event()
+    child_aborted = threading.Event()
+
+    with pytest.raises(jobs.JobClaimLost, match="product-writer lease lost"):
+        with jobs._hold_product_writer_lease(
+            job,
+            fallback_conn=conn,
+            conn_factory=None,
+            claim_guard=claim,
+        ):
+            child_context = contextvars.copy_context()
+
+            def _child() -> None:
+                child_entered.set()
+                guard = jobs.current_execution_lease_guard()
+                assert guard is not None
+                while True:
+                    try:
+                        guard.assert_owned("test child")
+                    except jobs.JobClaimLost:
+                        assert not conn.transaction_exited.is_set()
+                        child_aborted.set()
+                        return
+                    time.sleep(0.005)
+
+            child = threading.Thread(target=lambda: child_context.run(_child))
+            child.start()
+            assert child_entered.wait(1)
+            conn.fail_probe.set()
+            assert child_aborted.wait(2)
+            child.join(1)
+            assert not child.is_alive()
+
+    assert claim.lost is True
+    assert conn.transaction_exited.is_set()
+
+
+def test_inline_product_writer_same_connection_loss_fails_closed(monkeypatch):
+    monkeypatch.setattr(jobs, "_PRODUCT_WRITER_LEASE_PROBE_SECONDS", 0.01)
+    conn = _MonitoredLeaseConn()
+    store = SimpleNamespace(_connect=lambda: conn)
+
+    with pytest.raises(jobs.JobClaimLost, match="product-writer lease lost"):
+        with core._hold_business_product_writer_lease(store, business="alpha"):
+            guard = jobs.current_execution_lease_guard()
+            assert guard is not None
+            conn.fail_probe.set()
+            deadline = time.monotonic() + 2
+            while not guard.lost and time.monotonic() < deadline:
+                time.sleep(0.005)
+            core._assert_active_product_writer_lease("inline source write")
+
+    assert conn.transaction_exited.is_set()
+
+
 class _CaptureConn:
     def __init__(self):
         self.calls: list[tuple[str, tuple]] = []
@@ -130,7 +241,7 @@ class _HungProcess:
 
 
 def test_worker_termination_kills_group_container_and_reaps(tmp_path, monkeypatch):
-    """Timeout cancellation must not leave Docker or a grandchild editor alive."""
+    """Hard fallback must not leave Docker or a grandchild editor alive."""
     proc = _HungProcess()
     cidfile = tmp_path / "worker.cid"
     cidfile.write_text("container-123\n", encoding="utf-8")
@@ -155,16 +266,125 @@ def test_worker_termination_kills_group_container_and_reaps(tmp_path, monkeypatc
         cidfile=cidfile,
     )
 
-    assert group_signals == [
-        (proc.pid, signal.SIGTERM),
-        (proc.pid, signal.SIGKILL),
-    ]
+    assert group_signals == [(proc.pid, signal.SIGKILL)]
     assert docker_calls == [
         ["/usr/bin/docker", "kill", "container-123"],
         ["/usr/bin/docker", "rm", "-f", "container-123"],
     ]
     assert proc.reaped is True
     assert proc.wait_calls[-1] is None
+
+
+class _GracefulProcess:
+    pid = 515151
+
+    def __init__(self):
+        self.exited = False
+        self.wait_calls: list[float | None] = []
+
+    def poll(self):
+        return 0 if self.exited else None
+
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        self.exited = True
+        return 143
+
+    def terminate(self):
+        raise AssertionError("Docker cancellation must signal the container, not only its client")
+
+
+def test_worker_cancellation_soft_aborts_and_drains_before_hard_fallback(tmp_path, monkeypatch):
+    proc = _GracefulProcess()
+    cidfile = tmp_path / "worker.cid"
+    cidfile.write_text("container-456\n", encoding="utf-8")
+    docker_calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        docker_calls.append(list(command))
+        if "inspect" in command:
+            return SimpleNamespace(returncode=0, stdout="false\n")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(core.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        core,
+        "_terminate_claude_worker_process",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("graceful drain must not use hard fallback")
+        ),
+    )
+
+    core._cancel_claude_worker_process(
+        proc,
+        run_cmd=["/usr/bin/docker", "run", "--rm", "image"],
+        cidfile=cidfile,
+        grace_seconds=2,
+    )
+
+    assert docker_calls == [
+        ["/usr/bin/docker", "kill", "--signal=TERM", "container-456"],
+        ["/usr/bin/docker", "wait", "container-456"],
+        ["/usr/bin/docker", "inspect", "--format", "{{.State.Running}}", "container-456"],
+        ["/usr/bin/docker", "rm", "-f", "container-456"],
+    ]
+    assert proc.exited is True
+
+
+def test_node_worker_has_no_independent_timeout_clock():
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "takyon-claude-agent-task.mjs"
+    ).read_text(encoding="utf-8")
+
+    assert "setTimeout(() =>" not in script
+    assert 'process.once("SIGTERM", requestParentAbort)' in script
+    assert "abortController.abort()" in script
+
+
+def _clean_git_runtime(tmp_path: Path) -> tuple[Path, str]:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+    (root / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "runtime.py"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "runtime"], check=True)
+    sha = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return root, sha
+
+
+def test_runtime_release_sha_accepts_only_matching_clean_head(tmp_path, monkeypatch):
+    root, sha = _clean_git_runtime(tmp_path)
+    monkeypatch.setenv(claim_scope.RUNTIME_RELEASE_SHA_ENV, sha)
+    assert _REAL_RUNTIME_RELEASE_SHA(runtime_root=root) == sha
+
+    monkeypatch.setenv(claim_scope.RUNTIME_RELEASE_SHA_ENV, "f" * 40)
+    with pytest.raises(RuntimeError, match="does not match clean runtime HEAD"):
+        _REAL_RUNTIME_RELEASE_SHA(runtime_root=root)
+
+
+@pytest.mark.parametrize("dirty_kind", ["tracked", "staged", "untracked"])
+def test_runtime_release_sha_rejects_modified_worktree(tmp_path, monkeypatch, dirty_kind):
+    root, sha = _clean_git_runtime(tmp_path)
+    monkeypatch.setenv(claim_scope.RUNTIME_RELEASE_SHA_ENV, sha)
+    if dirty_kind == "tracked":
+        (root / "runtime.py").write_text("VALUE = 2\n", encoding="utf-8")
+    elif dirty_kind == "staged":
+        (root / "runtime.py").write_text("VALUE = 2\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "runtime.py"], check=True)
+    else:
+        (root / "new-runtime.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="modified runtime worktree"):
+        _REAL_RUNTIME_RELEASE_SHA(runtime_root=root)
 
 
 def test_pinned_upstream_taste_body_is_injected_once_without_excerpt_truncation():

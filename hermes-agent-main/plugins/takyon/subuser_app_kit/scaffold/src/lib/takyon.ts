@@ -2,6 +2,14 @@
 // from here; nothing else may import from _takyon/ directly except this file
 // (the platform overwrites _takyon/ wholesale in real products).
 import { createSubuserRuntimeClient } from "@takyon/runtime-client.js";
+export type {
+  AccountPayload,
+  AppEntitlement,
+  ProductRuntimeContract,
+  SubscriptionCancellationPolicy,
+  SubscriptionCancellationResult,
+  SubscriptionState,
+} from "@takyon/runtime-client.js";
 import { surfaceContext } from "@takyon/surface-context.js";
 
 export const client = createSubuserRuntimeClient(surfaceContext);

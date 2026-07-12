@@ -663,6 +663,7 @@ fetch_operator_env_exports() {
   ssh_base "python3 - <<'PY'
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -756,9 +757,44 @@ wrong = [
 if wrong:
     raise SystemExit('operator model pins do not match production contract: ' + ', '.join(wrong))
 
+manifest_path = '/opt/takyon/hermes-agent-main/.takyon-deploy-artifact.json'
+try:
+    manifest = json.loads(open(manifest_path, encoding='utf-8').read())
+except (OSError, ValueError, TypeError) as exc:
+    raise SystemExit(f'invalid operator deploy manifest: {exc}') from None
+release_sha = str(manifest.get('source_revision') or '').strip().lower() if isinstance(manifest, dict) else ''
+if len(release_sha) != 40 or any(ch not in '0123456789abcdef' for ch in release_sha):
+    raise SystemExit('operator deploy manifest has no valid source_revision')
+env['TAKYON_RUNTIME_RELEASE_SHA'] = release_sha
+
 for key in sorted(env):
     print(f'export {key}={shlex.quote(env[key])}')
 PY"
+}
+
+verify_local_runtime_release() {
+  [[ "$TARGET" == "prod" ]] || return 0
+  local dirty=""
+  local head=""
+  local published=""
+  local deployed="${TAKYON_RUNTIME_RELEASE_SHA:-}"
+
+  # Only executable operator/runtime paths participate in the seal; unrelated notes do not make
+  # parallel CLI use harder. Any tracked or untracked runtime mutation fails closed.
+  dirty="$(git -C "$ROOT" status --porcelain --untracked-files=all -- \
+    hermes-agent-main takyon scripts/takyon-operator-prod.sh scripts/operator-users.sh \
+    scripts/operator-users.conf)"
+  [[ -z "$dirty" ]] || die "refusing production compute from modified runtime source"
+  git -C "$ROOT" fetch --quiet origin main \
+    || die "could not verify the published production release"
+  head="$(git -C "$ROOT" rev-parse HEAD)"
+  published="$(git -C "$ROOT" rev-parse refs/remotes/origin/main)"
+  [[ "$head" =~ ^[0-9a-f]{40}$ ]] || die "local runtime release is invalid"
+  [[ "$head" == "$published" ]] \
+    || die "local runtime $head is not the published origin/main release $published"
+  [[ "$head" == "$deployed" ]] \
+    || die "local runtime $head does not match the live operator release $deployed"
+  export TAKYON_RUNTIME_RELEASE_SHA="$head"
 }
 
 load_operator_env() {
@@ -773,6 +809,7 @@ load_operator_env() {
   ensure_home
   # shellcheck disable=SC1090
   eval "$(fetch_operator_env_exports)"
+  verify_local_runtime_release
 
   export TAKYON_ENV=prod
   export TAKYON_STRIPE_MODE=live
@@ -1160,6 +1197,23 @@ terminate_pid() {
   kill -KILL "$pid" >/dev/null 2>&1 || true
 }
 
+gracefully_drain_worker_pid() {
+  local pid="${1:-}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    wait "$pid" >/dev/null 2>&1 || true
+    return 0
+  fi
+  # WorkerPool handles TERM by refusing new claims and joining every in-flight handler.  A worker
+  # process is never eligible for the generic five-second SIGKILL helper: doing so can leave its
+  # Docker child editing a mounted business workspace after the durable claim is requeued.
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    sleep 1
+  done
+  wait "$pid" >/dev/null 2>&1 || true
+}
+
 local_worker_stop_grace_seconds() {
   local seconds="${TAKYON_LOCAL_WORKER_STOP_GRACE_SECONDS:-900}"
   if ! [[ "$seconds" =~ ^[0-9]+$ ]] || [[ "$seconds" -lt 5 ]]; then
@@ -1332,7 +1386,7 @@ WORKER_TUNNEL_GUARD_CONSUMER_PID=""
 
 cleanup_worker_tunnel_guard() {
   if [[ -n "${WORKER_TUNNEL_GUARD_CHILD_PID:-}" ]] && kill -0 "$WORKER_TUNNEL_GUARD_CHILD_PID" >/dev/null 2>&1; then
-    terminate_pid "$WORKER_TUNNEL_GUARD_CHILD_PID"
+    gracefully_drain_worker_pid "$WORKER_TUNNEL_GUARD_CHILD_PID"
   fi
   if [[ -n "${WORKER_TUNNEL_GUARD_MONITOR_PID:-}" ]] && kill -0 "$WORKER_TUNNEL_GUARD_MONITOR_PID" >/dev/null 2>&1; then
     terminate_pid "$WORKER_TUNNEL_GUARD_MONITOR_PID"
@@ -1824,21 +1878,84 @@ cmd_product_edge_deploy() {
   PYTHONPATH="$RUNTIME_DIR" exec "$RUNTIME_DIR/.venv/bin/python" - \
     "$edge_dir" "$SAFEBOX_SSH_HOST" "$SAFEBOX_SSH_KEY" "$head" <<'PY'
 import json
+import io
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
+import tarfile
+import tempfile
 
 edge_dir = Path(sys.argv[1]).resolve()
 repo_root = edge_dir.parents[2]
 safebox_host = str(sys.argv[2]).strip()
 safebox_key = str(sys.argv[3]).strip()
 source_revision = str(sys.argv[4]).strip()
+if len(source_revision) != 40 or any(ch not in "0123456789abcdef" for ch in source_revision):
+    raise SystemExit("takyon-prod: product-edge source revision is invalid")
 safe_names = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")
 base_env = {name: os.environ[name] for name in safe_names if os.environ.get(name)}
+
+
+class DeployTerminated(SystemExit):
+    pass
+
+
+def _handle_term(signum, _frame):
+    raise DeployTerminated(128 + signum)
+
+
+signal.signal(signal.SIGTERM, _handle_term)
+
+
+def _terminate_process_group(process):
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.communicate()
+
+
+def run_bounded(
+    argv,
+    *,
+    child_env,
+    timeout,
+    capture_output=False,
+    input_data=None,
+    text=False,
+):
+    process = subprocess.Popen(
+        argv,
+        env=child_env,
+        start_new_session=True,
+        text=text,
+        stdin=subprocess.PIPE if input_data is not None else None,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+    )
+    try:
+        stdout, stderr = process.communicate(input=input_data, timeout=timeout)
+    except BaseException:
+        _terminate_process_group(process)
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 try:
-    remote = subprocess.run(
+    remote = run_bounded(
         [
             "ssh",
             "-i",
@@ -1855,7 +1972,7 @@ try:
             "env PYTHONPATH=/opt/takyon/hermes-agent-main "
             "/opt/takyon/venvs/safebox-current/bin/python -",
         ],
-        input=(
+        input_data=(
             "import json\n"
             "import os\n"
             "from dotenv import load_dotenv\n"
@@ -1870,11 +1987,10 @@ try:
             "if not value: raise SystemExit('cloudflare token unavailable')\n"
             "print(json.dumps({'token': value}), end='')\n"
         ),
-        text=True,
         capture_output=True,
-        check=False,
         timeout=30,
-        env=base_env,
+        child_env=base_env,
+        text=True,
     )
 except (OSError, subprocess.TimeoutExpired):
     raise SystemExit("takyon-prod: could not read the Cloudflare credential from Safebox") from None
@@ -1889,98 +2005,162 @@ if not token:
     raise SystemExit("takyon-prod: CLOUDFLARE_API_TOKEN is unavailable on Safebox")
 env = dict(base_env)
 env["CLOUDFLARE_API_TOKEN"] = token
-os.chdir(edge_dir)
 message = f"Takyon source {source_revision}"
 
-
-def run_bounded(argv, *, child_env, timeout, capture_output=False):
-    process = subprocess.Popen(
-        argv,
-        env=child_env,
-        start_new_session=True,
-        text=capture_output,
-        stdout=subprocess.PIPE if capture_output else None,
-        stderr=subprocess.PIPE if capture_output else None,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.communicate()
-        raise
-    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
-
-
+# Wrangler must never read ignored/untracked project state. Build its complete input from the exact
+# clean origin/main Git object that passed the shell fence, into an isolated temporary directory.
+archive_paths = {
+    "deploy/cloudflare/product-worker/worker.js": "worker.js",
+    "deploy/cloudflare/product-worker/wrangler.toml": "wrangler.toml",
+}
+archive_dirs = {
+    "deploy",
+    "deploy/cloudflare",
+    "deploy/cloudflare/product-worker",
+}
 try:
-    upload = run_bounded(
+    archive = run_bounded(
         [
-            "npx",
-            "--yes",
-            "wrangler@4.110.0",
-            "versions",
-            "upload",
-            "--tag",
+            "git",
+            "-C",
+            str(repo_root),
+            "archive",
+            "--format=tar",
             source_revision,
-            "--message",
-            message,
+            "--",
+            *archive_paths,
         ],
-        child_env=env,
-        timeout=180,
-    )
-except (OSError, subprocess.TimeoutExpired):
-    raise SystemExit("takyon-prod: product-edge version upload failed or timed out") from None
-if upload.returncode != 0:
-    raise SystemExit(upload.returncode)
-
-# A concurrent push after the initial clean/published gate may not receive this older version.
-# Recheck origin/main after the inactive upload and immediately before changing live traffic.
-try:
-    refreshed = run_bounded(
-        ["git", "-C", str(repo_root), "fetch", "--quiet", "origin", "main"],
         child_env=base_env,
-        timeout=30,
-    )
-    current_main = run_bounded(
-        ["git", "-C", str(repo_root), "rev-parse", "refs/remotes/origin/main"],
-        child_env=base_env,
-        timeout=10,
+        timeout=15,
         capture_output=True,
     )
 except (OSError, subprocess.TimeoutExpired):
-    raise SystemExit("takyon-prod: could not revalidate origin/main before edge activation") from None
-if refreshed.returncode != 0 or current_main.returncode != 0:
-    raise SystemExit("takyon-prod: could not revalidate origin/main before edge activation")
-if str(current_main.stdout or "").strip() != source_revision:
-    raise SystemExit(
-        "takyon-prod: origin/main moved during edge upload; inactive version was not deployed"
-    )
+    raise SystemExit("takyon-prod: could not snapshot the product-edge revision") from None
+if archive.returncode != 0 or not archive.stdout:
+    raise SystemExit("takyon-prod: could not snapshot the product-edge revision")
 
-try:
-    deployment = run_bounded(
-        [
-            "npx",
-            "--yes",
-            "wrangler@4.110.0",
-            "versions",
-            "deploy",
-            "--version-tag",
-            source_revision,
-            "--percentage",
-            "100",
-            "--message",
-            message,
-            "--yes",
-        ],
-        child_env=env,
-        timeout=120,
-    )
-except (OSError, subprocess.TimeoutExpired):
-    raise SystemExit("takyon-prod: product-edge activation failed or timed out") from None
-raise SystemExit(deployment.returncode)
+with tempfile.TemporaryDirectory(prefix="takyon-product-edge-") as temp_dir:
+    snapshot_edge = Path(temp_dir) / "product-worker"
+    snapshot_edge.mkdir(mode=0o700)
+    seen = set()
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as source:
+            for member in source.getmembers():
+                normalized = member.name.rstrip("/")
+                if normalized in archive_dirs and member.isdir():
+                    continue
+                destination = archive_paths.get(normalized)
+                if destination is None or not member.isfile() or normalized in seen:
+                    raise ValueError("unexpected product-edge archive member")
+                extracted = source.extractfile(member)
+                if extracted is None:
+                    raise ValueError("unreadable product-edge archive member")
+                (snapshot_edge / destination).write_bytes(extracted.read())
+                seen.add(normalized)
+    except (OSError, tarfile.TarError, ValueError):
+        raise SystemExit("takyon-prod: product-edge revision snapshot is invalid") from None
+    if seen != set(archive_paths):
+        raise SystemExit("takyon-prod: product-edge revision snapshot is incomplete")
+    for name in archive_paths.values():
+        path = snapshot_edge / name
+        if not path.is_file() or path.is_symlink() or path.stat().st_size == 0:
+            raise SystemExit("takyon-prod: product-edge revision snapshot is invalid")
+
+    config_path = str(snapshot_edge / "wrangler.toml")
+    os.chdir(snapshot_edge)
+    try:
+        try:
+            upload = run_bounded(
+                [
+                    "npx",
+                    "--yes",
+                    "wrangler@4.110.0",
+                    "versions",
+                    "upload",
+                    "--config",
+                    config_path,
+                    "--tag",
+                    source_revision,
+                    "--message",
+                    message,
+                ],
+                child_env=env,
+                timeout=180,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise SystemExit(
+                "takyon-prod: product-edge version upload failed or timed out"
+            ) from None
+        if upload.returncode != 0:
+            raise SystemExit(upload.returncode)
+
+        # A concurrent push or checkout after the first gate may not activate this older upload.
+        # Re-fetch and compare both refs immediately before the version-only traffic activation.
+        try:
+            refreshed = run_bounded(
+                ["git", "-C", str(repo_root), "fetch", "--quiet", "origin", "main"],
+                child_env=base_env,
+                timeout=30,
+            )
+            current_main = run_bounded(
+                ["git", "-C", str(repo_root), "rev-parse", "refs/remotes/origin/main"],
+                child_env=base_env,
+                timeout=10,
+                capture_output=True,
+                text=True,
+            )
+            current_head = run_bounded(
+                ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+                child_env=base_env,
+                timeout=10,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise SystemExit(
+                "takyon-prod: could not revalidate origin/main before edge activation"
+            ) from None
+        if any(item.returncode != 0 for item in (refreshed, current_main, current_head)):
+            raise SystemExit(
+                "takyon-prod: could not revalidate origin/main before edge activation"
+            )
+        if {
+            str(current_main.stdout or "").strip(),
+            str(current_head.stdout or "").strip(),
+        } != {source_revision}:
+            raise SystemExit(
+                "takyon-prod: origin/main or HEAD moved during edge upload; "
+                "inactive version was not deployed"
+            )
+
+        try:
+            deployment = run_bounded(
+                [
+                    "npx",
+                    "--yes",
+                    "wrangler@4.110.0",
+                    "versions",
+                    "deploy",
+                    "--config",
+                    config_path,
+                    "--version-tag",
+                    source_revision,
+                    "--percentage",
+                    "100",
+                    "--message",
+                    message,
+                    "--yes",
+                ],
+                child_env=env,
+                timeout=120,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise SystemExit(
+                "takyon-prod: product-edge activation failed or timed out"
+            ) from None
+        raise SystemExit(deployment.returncode)
+    finally:
+        os.chdir(repo_root)
 PY
 }
 
@@ -2070,7 +2250,10 @@ cmd_worker() {
   require_tunnel
   cmd_preflight
   require_docker_for_worker
-  stop_local_workers_background
+  # A worker wrapper owns only the pool it starts.  Never stop every local pool here: another
+  # operator shell may be building a DIFFERENT business, and cross-business parallelism is a
+  # supported production posture.  Durable release fencing rejects incompatible pools, while the
+  # per-business/workspace writer lease serializes only conflicting work.
   local worker_id=""
   worker_id="${TAKYON_WORKER_POOL_ID:-$(local_worker_pool_id_for_pid "$$")}"
   record_active_local_worker_pool "$$" "$worker_id" >/dev/null || true
@@ -2177,15 +2360,17 @@ spawn_console_shell_windows() {
   local root_quoted=""
   local tail_command=""
   local command_text=""
+  local session_pool_id="${TAKYON_WORKER_POOL_ID:-}"
+  local session_pool_exclusive="${TAKYON_WORKER_POOL_EXCLUSIVE:-1}"
   [[ "$shell_mode" == "quiet" ]] && subcommand="quiet"
   if [[ "$extra_shells" -le 0 ]]; then
     return 0
   fi
   printf -v root_quoted '%q' "$ROOT"
   if [[ -n "$business" ]]; then
-    tail_command="$(shell_join env TAKYON_OPERATOR_TARGET="$TARGET" TAKYON_SESSION_USER_ID="$operator_user_id" ./scripts/takyon-operator-prod.sh "$subcommand" "$business")"
+    tail_command="$(shell_join env TAKYON_OPERATOR_TARGET="$TARGET" TAKYON_SESSION_USER_ID="$operator_user_id" TAKYON_WORKER_POOL_ID="$session_pool_id" TAKYON_WORKER_POOL_EXCLUSIVE="$session_pool_exclusive" ./scripts/takyon-operator-prod.sh "$subcommand" "$business")"
   else
-    tail_command="$(shell_join env TAKYON_OPERATOR_TARGET="$TARGET" TAKYON_SESSION_USER_ID="$operator_user_id" ./scripts/takyon-operator-prod.sh "$subcommand")"
+    tail_command="$(shell_join env TAKYON_OPERATOR_TARGET="$TARGET" TAKYON_SESSION_USER_ID="$operator_user_id" TAKYON_WORKER_POOL_ID="$session_pool_id" TAKYON_WORKER_POOL_EXCLUSIVE="$session_pool_exclusive" ./scripts/takyon-operator-prod.sh "$subcommand")"
   fi
   command_text="cd $root_quoted && $tail_command"
   local index=0
@@ -2289,7 +2474,6 @@ cmd_console() {
 
   local tunnel_monitor_pid=""
   local worker_pid=""
-  local local_worker_started="0"
   local worker_ready_file=""
   local tunnel_consumer_pid=""
   local timestamp
@@ -2307,10 +2491,11 @@ cmd_console() {
     if [[ -n "${tunnel_monitor_pid:-}" ]] && kill -0 "$tunnel_monitor_pid" >/dev/null 2>&1; then
       terminate_pid "$tunnel_monitor_pid"
     fi
-    if [[ "$local_worker_started" == "1" ]]; then
-      stop_local_workers
-    elif [[ -n "${worker_pid:-}" ]] && kill -0 "$worker_pid" >/dev/null 2>&1; then
-      terminate_pid "$worker_pid"
+    # This console owns exactly worker_pid.  A global stop would interrupt unrelated businesses
+    # being served by other same-release consoles.  TERM drains this pool and waits for its current
+    # handler; the tunnel stays owned until that drain completes, and no bootstrap is SIGKILLed.
+    if [[ -n "${worker_pid:-}" ]] && kill -0 "$worker_pid" >/dev/null 2>&1; then
+      gracefully_drain_worker_pid "$worker_pid"
     fi
     if [[ -n "${tunnel_consumer_pid:-}" ]]; then
       release_managed_tunnel_consumer "$LOCAL_SAFEBOX_PORT" "$tunnel_consumer_pid" "$tunnel_pid_file" || true
@@ -2351,7 +2536,6 @@ cmd_console() {
   fi
   rm -f "$worker_ready_file"
   record_active_local_worker_pool "$worker_pid" "$session_pool_id" >/dev/null || true
-  local_worker_started="1"
 
   cmd_overview
   echo

@@ -2899,6 +2899,15 @@ async def _app_get_record(request, business, parts, bound, token):
     return _takyon_app_json(status, payload)
 
 
+async def _app_get_record_by_ref(request, business, parts, bound, token):
+    status, payload = await _takyon_app_tool_off_loop(handle_business_read_app_record, {
+        "business": business,
+        "session_token": token,
+        "record_ref": bound["record_ref"],
+    })
+    return _takyon_app_json(status, payload)
+
+
 async def _app_get_connections_list(request, business, parts, bound, token):
     status, payload = await _takyon_app_tool_off_loop(handle_business_list_app_connections, {
         "business": business,
@@ -2939,6 +2948,7 @@ _APP_GET_HANDLERS = {
     "directory_entry_get": _app_get_directory_entry,
     "media_get": _app_get_media,
     "records_list_get": _app_get_records_list,
+    "record_by_ref_get": _app_get_record_by_ref,
     "record_get": _app_get_record,
     "connections_list_get": _app_get_connections_list,
     "checkout_get": _app_get_checkout,
@@ -3066,11 +3076,28 @@ async def _app_post_records_query(request, business, parts, bound, token, body):
 
 
 async def _app_post_records_upsert(request, business, parts, bound, token, body):
+    record_ref = str(bound.get("record_ref") or "").strip()
+    if record_ref:
+        if set(body) - {"title", "data", "metadata"}:
+            return _takyon_app_json(
+                HTTPStatus.BAD_REQUEST,
+                {"success": False, "error": "unsupported_record_ref_update_fields"},
+            )
+    elif len(parts) == 1 and set(body) & {"id", "record_id", "record_ref", "ref"}:
+        return _takyon_app_json(
+            HTTPStatus.BAD_REQUEST,
+            {"success": False, "error": "raw_record_identifiers_not_allowed"},
+        )
     status, payload = await _takyon_app_tool_off_loop(handle_business_upsert_app_record, {
         "business": business,
         "session_token": token,
+        "record_ref": record_ref or None,
         "record_type": parts[1] if len(parts) >= 2 else body.get("record_type") or body.get("type"),
-        "record_id": parts[2] if len(parts) >= 3 else body.get("record_id") or body.get("id"),
+        "record_id": (
+            parts[2]
+            if len(parts) >= 3 and parts[1] != "by-ref"
+            else body.get("record_id") or body.get("id")
+        ),
         "title": body.get("title"),
         "data": body.get("data"),
         "metadata": body.get("metadata"),
@@ -3282,6 +3309,7 @@ _APP_POST_HANDLERS = {
     "directory_me_post": _app_post_directory_me,
     "records_query_post": _app_post_records_query,
     "records_upsert_post": _app_post_records_upsert,
+    "record_by_ref_post": _app_post_records_upsert,
     "connections_post": _app_post_connections,
     "usage_post": _app_post_usage,
     "generate_post": _app_post_generate,
@@ -3412,6 +3440,16 @@ async def _app_delete_record(request, business, parts, bound, token):
     return _takyon_app_json(status, payload)
 
 
+async def _app_delete_record_by_ref(request, business, parts, bound, token):
+    status, payload = await _takyon_app_tool_off_loop(handle_business_delete_app_record, {
+        "business": business,
+        "session_token": token,
+        "record_ref": bound["record_ref"],
+        "idempotency_key": f"record-delete:{business}:{uuid.uuid4().hex}",
+    })
+    return _takyon_app_json(status, payload)
+
+
 async def _app_delete_media(request, business, parts, bound, token):
     status, payload = await _takyon_app_tool_off_loop(handle_business_delete_app_media, {
         "business": business,
@@ -3426,6 +3464,7 @@ _APP_DELETE_HANDLERS = {
     "session_delete": _app_delete_session,
     "account_delete": _app_delete_account,
     "directory_me_delete": _app_delete_directory_me,
+    "record_by_ref_delete": _app_delete_record_by_ref,
     "record_delete": _app_delete_record,
     "media_delete": _app_delete_media,
 }

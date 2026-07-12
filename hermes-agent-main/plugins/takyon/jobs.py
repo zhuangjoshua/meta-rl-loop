@@ -3,8 +3,8 @@ the one budget-gated execution contract every job runs under.
 
 This is a pure leaf — the caller owns the connection (one per-request autocommit psycopg connection,
 exactly as ``runtime_app`` opens it) and each mutating operation opens its own ``with
-conn.transaction():``. There is no global state, no pool, no thread; a worker is just a process that
-calls :func:`run_one` in a loop.
+conn.transaction():``. There is no internal worker pool: a worker is a process that calls
+:func:`run_one` in a loop; one run owns its bounded handler and lease-watchdog threads.
 
 The contract (mediationplan.md > Worker Plane):
   * ONE job, ONE worker — :func:`claim_one` uses ``SELECT … FOR UPDATE SKIP LOCKED`` so two workers
@@ -144,7 +144,7 @@ _RENEW_AFTER_LEASE_SQL = (
 _COLS = (
     "id, business_slug, kind, status, idempotency_key, payload, result, error, "
     "reserved_billing_entry_id, attempts, max_attempts, locked_by, locked_at, created_at, updated_at, "
-    "reserved_pool_id"
+    "reserved_pool_id, required_release_sha, claimed_release_sha, claimed_pool_id"
 )
 
 
@@ -195,6 +195,10 @@ class Job:
     locked_at: Any
     created_at: Any
     updated_at: Any
+    reserved_pool_id: str | None = None
+    required_release_sha: str = ""
+    claimed_release_sha: str | None = None
+    claimed_pool_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -238,16 +242,262 @@ class JobClaimGuard:
             )
 
 
+@dataclass
+class ProductWriterLeaseGuard:
+    """Live proof that one exact DB transaction still owns a business writer lease.
+
+    Transaction advisory locks disappear as soon as their connection/backend disappears.  A plain
+    context manager cannot notice that while a long child handler is running, so the replacement
+    writer could acquire the key while the old child kept editing.  This guard fingerprints the
+    SAME backend transaction that acquired the lock and is probed on that same connection.  Any
+    connection error or backend/xid change fails closed and wakes the existing job/child abort rail.
+    """
+
+    key: str
+    backend_pid: int
+    transaction_id: str
+    _conn: Any = field(repr=False)
+    _on_lost: Callable[[str], None] | None = field(default=None, repr=False)
+    _lost: threading.Event = field(default_factory=threading.Event, repr=False)
+    _reason: str = field(default="", repr=False)
+    _reason_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    @classmethod
+    def capture(
+        cls,
+        conn: Any,
+        *,
+        key: str,
+        on_lost: Callable[[str], None] | None = None,
+    ) -> "ProductWriterLeaseGuard":
+        backend_pid, transaction_id = _product_writer_lease_identity(conn, key=key)
+        return cls(
+            key=str(key),
+            backend_pid=backend_pid,
+            transaction_id=transaction_id,
+            _conn=conn,
+            _on_lost=on_lost,
+        )
+
+    @property
+    def lost(self) -> bool:
+        return self._lost.is_set()
+
+    @property
+    def reason(self) -> str:
+        return self._reason or "product-writer lease is no longer owned"
+
+    def mark_lost(self, reason: str) -> None:
+        normalized = str(reason or "product-writer lease is no longer owned")
+        first = False
+        with self._reason_lock:
+            if not self._lost.is_set():
+                self._reason = normalized
+                self._lost.set()
+                first = True
+        if first and self._on_lost is not None:
+            try:
+                self._on_lost(normalized)
+            except Exception:
+                pass
+
+    def assert_owned(self, operation: str = "continue") -> None:
+        if self.lost:
+            raise JobClaimLost(
+                f"product-writer lease lost before {operation}: key={self.key}: {self.reason}"
+            )
+
+    def probe_same_transaction(self) -> None:
+        """Prove that the connection still represents the acquiring backend transaction."""
+        self.assert_owned("lease probe")
+        try:
+            backend_pid, transaction_id = _product_writer_lease_identity(
+                self._conn,
+                key=self.key,
+            )
+        except Exception as exc:
+            self.mark_lost(f"same-connection lease probe failed: {exc}")
+            self.assert_owned("lease probe")
+            return
+        if backend_pid != self.backend_pid or transaction_id != self.transaction_id:
+            self.mark_lost(
+                "same-connection transaction identity changed "
+                f"from {self.backend_pid}/{self.transaction_id} "
+                f"to {backend_pid}/{transaction_id}"
+            )
+        self.assert_owned("lease probe")
+
+
 _ACTIVE_JOB_CLAIM: contextvars.ContextVar[JobClaimGuard | None] = contextvars.ContextVar(
     "takyon_active_job_claim", default=None
 )
+_ACTIVE_EXECUTION_LEASE_KEY: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "takyon_active_execution_lease_key", default=""
+)
+_ACTIVE_EXECUTION_LEASE_GUARD: contextvars.ContextVar[ProductWriterLeaseGuard | None] = (
+    contextvars.ContextVar("takyon_active_execution_lease_guard", default=None)
+)
 _LIVE_LOCAL_HANDLER_CLAIMS: set[tuple[str, int]] = set()
 _LIVE_LOCAL_HANDLER_CLAIMS_LOCK = threading.Lock()
+
+_PRODUCT_WRITER_LEASE_PROBE_SECONDS = 1.0
 
 
 def current_job_claim() -> JobClaimGuard | None:
     """Return the exact claim guard bound to the current handler context, if any."""
     return _ACTIVE_JOB_CLAIM.get()
+
+
+def product_writer_lease_key(business_slug: str) -> str:
+    """Cross-process single-writer key; business-scoped, never process/global scoped."""
+    return f"takyon-product-writer:{str(business_slug or '').strip().lower()}:product"
+
+
+def current_execution_lease_key() -> str:
+    return str(_ACTIVE_EXECUTION_LEASE_KEY.get() or "")
+
+
+def current_execution_lease_guard() -> ProductWriterLeaseGuard | None:
+    return _ACTIVE_EXECUTION_LEASE_GUARD.get()
+
+
+def _product_writer_lease_identity(conn: Any, *, key: str) -> tuple[int, str]:
+    """Fingerprint the backend transaction and prove it still owns this exact bigint lock."""
+    row = conn.execute(
+        "with lease_key as (select hashtextextended(%s, 0) as value) "
+        "select pg_backend_pid() as backend_pid, "
+        "pg_current_xact_id()::text as transaction_id, "
+        "exists ("
+        " select 1 from pg_locks held cross join lease_key "
+        " where held.locktype = 'advisory' and held.pid = pg_backend_pid() "
+        " and held.granted and held.mode = 'ExclusiveLock' and held.objsubid = 1 "
+        " and held.classid::bigint = ((lease_key.value >> 32) & 4294967295) "
+        " and held.objid::bigint = (lease_key.value & 4294967295)"
+        ") as owns_lock",
+        (key,),
+    ).fetchone()
+    if row is None:
+        raise JobClaimLost("product-writer lease identity query returned no row")
+    if isinstance(row, Mapping):
+        backend_pid = row.get("backend_pid")
+        transaction_id = row.get("transaction_id")
+        owns_lock = row.get("owns_lock")
+    else:
+        backend_pid, transaction_id, owns_lock = row[0], row[1], row[2]
+    if backend_pid is None or not str(transaction_id or "").strip():
+        raise JobClaimLost("product-writer lease identity query returned incomplete state")
+    if not bool(owns_lock):
+        raise JobClaimLost("same backend transaction no longer owns the advisory key")
+    return int(backend_pid), str(transaction_id)
+
+
+@contextmanager
+def _monitor_product_writer_lease(
+    conn: Any,
+    *,
+    key: str,
+    on_lost: Callable[[str], None] | None = None,
+):
+    """Bind and continuously verify one already-acquired transaction advisory lock."""
+    guard = ProductWriterLeaseGuard.capture(conn, key=key, on_lost=on_lost)
+    key_token = _ACTIVE_EXECUTION_LEASE_KEY.set(key)
+    guard_token = _ACTIVE_EXECUTION_LEASE_GUARD.set(guard)
+    stop = threading.Event()
+
+    def _watch() -> None:
+        while not stop.wait(_PRODUCT_WRITER_LEASE_PROBE_SECONDS):
+            try:
+                guard.probe_same_transaction()
+            except JobClaimLost:
+                return
+
+    watcher = threading.Thread(
+        target=_watch,
+        name="takyon-product-writer-lease",
+        daemon=True,
+    )
+    watcher.start()
+    try:
+        yield guard
+    finally:
+        stop.set()
+        watcher.join(timeout=max(2.0, _PRODUCT_WRITER_LEASE_PROBE_SECONDS * 2.0))
+        if watcher.is_alive():
+            guard.mark_lost("same-connection lease watchdog did not stop")
+        _ACTIVE_EXECUTION_LEASE_GUARD.reset(guard_token)
+        _ACTIVE_EXECUTION_LEASE_KEY.reset(key_token)
+    # A final same-transaction proof closes the interval between the last periodic probe and the
+    # handler return.  A broken connection may make the surrounding transaction exit raise too;
+    # callers normalize that to this fail-closed lease-loss error.
+    guard.probe_same_transaction()
+
+
+@contextmanager
+def _hold_product_writer_lease(
+    job: Job,
+    *,
+    fallback_conn: Any,
+    conn_factory: Callable[[], Any] | None,
+    waiting_heartbeat: Callable[[], None] | None = None,
+    claim_guard: JobClaimGuard | None = None,
+):
+    """Hold one DB-backed writer lease until the handler and every child have joined.
+
+    A stale reaper may supersede the job row while its old handler is still alive. The replacement
+    claim cannot enter the same business's product lane until the old handler unwinds and releases
+    this transaction-scoped advisory lock. Different business keys remain fully parallel.
+    """
+    if job_lane(job.kind) != "product":
+        yield
+        return
+    key = product_writer_lease_key(job.business_slug)
+    lease_conn = conn_factory() if conn_factory is not None else fallback_conn
+    close_lease_conn = conn_factory is not None
+    lease_guard: ProductWriterLeaseGuard | None = None
+    try:
+        try:
+            with lease_conn.transaction():
+                next_heartbeat = 0.0
+                while True:
+                    row = lease_conn.execute(
+                        "select pg_try_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (key,),
+                    ).fetchone()
+                    acquired = bool(
+                        row
+                        and (
+                            row[0]
+                            if not isinstance(row, Mapping)
+                            else next(iter(row.values()))
+                        )
+                    )
+                    if acquired:
+                        break
+                    now = time.monotonic()
+                    if waiting_heartbeat is not None and now >= next_heartbeat:
+                        waiting_heartbeat()
+                        next_heartbeat = now + 5.0
+                    time.sleep(0.25)
+                if waiting_heartbeat is not None:
+                    waiting_heartbeat()
+                with _monitor_product_writer_lease(
+                    lease_conn,
+                    key=key,
+                    on_lost=claim_guard.mark_lost if claim_guard is not None else None,
+                ) as lease_guard:
+                    yield lease_guard
+        except Exception as exc:
+            if lease_guard is not None and lease_guard.lost:
+                raise JobClaimLost(
+                    f"product-writer lease lost for {job.business_slug}: {lease_guard.reason}"
+                ) from exc
+            raise
+    finally:
+        if close_lease_conn:
+            try:
+                lease_conn.close()
+            except Exception:
+                pass
 
 
 @contextmanager
@@ -298,6 +548,10 @@ def _row_to_job(row: tuple) -> Job:
         locked_at=row[12],
         created_at=row[13],
         updated_at=row[14],
+        reserved_pool_id=row[15],
+        required_release_sha=str(row[16] or ""),
+        claimed_release_sha=str(row[17]) if row[17] else None,
+        claimed_pool_id=str(row[18]) if row[18] else None,
     )
 
 
@@ -329,6 +583,7 @@ def enqueue(
     payload: dict[str, Any] | None = None,
     max_attempts: int = 5,
     claim_scope: "ClaimScope | None" = None,
+    required_release_sha: str | None = None,
 ) -> Job:
     """Place a job on the queue. Idempotent on ``idempotency_key``: a replay returns the EXISTING job
     unchanged (one effect — a replay never re-stamps the reservation), never a second row. ``payload``
@@ -336,6 +591,12 @@ def enqueue(
     ``claim_scope`` reserves the job for a worker pool (see claim_scope.py for the policies)."""
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
+    from .claim_scope import require_local_release_sha
+
+    exact_release = require_local_release_sha(
+        required_release_sha,
+        field="required_release_sha",
+    )
     reserved_pool_id = None
     reservation_policy = "any"
     lease_seconds = None
@@ -349,9 +610,9 @@ def enqueue(
     body = json.dumps(payload or {})
     with conn.transaction():
         row = conn.execute(
-            "insert into jobs (business_slug, kind, idempotency_key, payload, max_attempts, "
+            "insert into jobs (business_slug, kind, idempotency_key, payload, max_attempts, required_release_sha, "
             " reserved_pool_id, reservation_policy, reservation_lease_seconds, reservation_expires_at) "
-            "values (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, "
+            "values (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, "
             " case when %s::double precision is not null "
             "  then now() + (%s::double precision * interval '1 second') else null end) "
             "on conflict (idempotency_key) do nothing "
@@ -362,6 +623,7 @@ def enqueue(
                 idempotency_key,
                 body,
                 max_attempts,
+                exact_release,
                 reserved_pool_id,
                 reservation_policy,
                 lease_seconds,
@@ -403,6 +665,7 @@ def claim_one(
     claim_pool_id: str | None = None,
     exclusive_pool: bool = False,
     min_queue_age_seconds: float | None = None,
+    worker_release_sha: str | None = None,
 ) -> Job | None:
     """Atomically claim the next queued job (optionally restricted to ``kinds``): prefer
     ``ceo_bootstrap`` over ordinary queued work, then fall back to FIFO within that priority class.
@@ -418,6 +681,9 @@ def claim_one(
     spills — see claim_scope.py). ``exclusive_pool=True`` claims ONLY jobs reserved for this pool
     (UC1: a session-owned pool does nobody else's work)."""
     _refresh_job_lifecycle_session(conn)
+    from .claim_scope import require_local_release_sha
+
+    exact_release = require_local_release_sha(worker_release_sha, field="worker_release_sha")
     lane_gate = (
         "and not exists ("
         "  select 1 from jobs r "
@@ -457,6 +723,7 @@ def claim_one(
         if kinds:
             kind_gate = "and j.kind = any(%s) "
             params.append(list(kinds))
+        params.append(exact_release)
         if min_queue_age_seconds > 0:
             params.append(min_queue_age_seconds)
         if owner_filter:
@@ -469,6 +736,7 @@ def claim_one(
             "select j.id from jobs j "
             "where j.status = 'queued' "
             + kind_gate
+            + "and j.required_release_sha = %s "
             + age_gate
             + owner_gate
             + reservation_gate
@@ -484,9 +752,10 @@ def claim_one(
             return None
         row = conn.execute(
             "update jobs set status = 'running', locked_by = %s, locked_at = now(), "
-            "attempts = attempts + 1, updated_at = now() "
+            "attempts = attempts + 1, updated_at = now(), claimed_release_sha = %s, "
+            "claimed_pool_id = nullif(%s, '') "
             f"where id = %s returning {_COLS}",
-            (worker_id, picked[0]),
+            (worker_id, exact_release, pool_filter, picked[0]),
         ).fetchone()
     return _row_to_job(row)
 
@@ -555,7 +824,8 @@ def complete(
     with conn.transaction():
         updated = conn.execute(
             "update jobs set status = 'completed', result = %s::jsonb, error = null, "
-            "locked_by = null, locked_at = null, updated_at = now() "
+            "locked_by = null, locked_at = null, claimed_release_sha = null, "
+            "claimed_pool_id = null, updated_at = now() "
             "where id = %s and status = 'running'" + claim_gate,
             tuple(params),
         ).rowcount
@@ -589,7 +859,8 @@ def block(
     with conn.transaction():
         updated = conn.execute(
             "update jobs set status = 'blocked', error = %s::jsonb, "
-            "locked_by = null, locked_at = null, updated_at = now() "
+            "locked_by = null, locked_at = null, claimed_release_sha = null, "
+            "claimed_pool_id = null, updated_at = now() "
             "where id = %s and status = 'running'" + claim_gate,
             tuple(params),
         ).rowcount
@@ -633,14 +904,16 @@ def fail(
         if retryable and attempts < max_attempts:
             conn.execute(
                 "update jobs set status = 'queued', error = %s::jsonb, "
-                "locked_by = null, locked_at = null, updated_at = now(), "
+                "locked_by = null, locked_at = null, claimed_release_sha = null, "
+                "claimed_pool_id = null, updated_at = now(), "
                 f"{_RENEW_AFTER_LEASE_SQL} where id = %s",
                 (err, job_id),
             )
             return "requeued"
         conn.execute(
             "update jobs set status = 'failed', error = %s::jsonb, "
-            "locked_by = null, locked_at = null, updated_at = now() where id = %s",
+            "locked_by = null, locked_at = null, claimed_release_sha = null, "
+            "claimed_pool_id = null, updated_at = now() where id = %s",
             (err, job_id),
         )
     return "failed"
@@ -680,14 +953,16 @@ def fail_if_still_owned(
         if retryable and attempts < max_attempts:
             conn.execute(
                 "update jobs set status = 'queued', error = %s::jsonb, "
-                "locked_by = null, locked_at = null, updated_at = now(), "
+                "locked_by = null, locked_at = null, claimed_release_sha = null, "
+                "claimed_pool_id = null, updated_at = now(), "
                 f"{_RENEW_AFTER_LEASE_SQL} where id = %s",
                 (err, job_id),
             )
             return "queued"
         conn.execute(
             "update jobs set status = 'failed', error = %s::jsonb, "
-            "locked_by = null, locked_at = null, updated_at = now() where id = %s",
+            "locked_by = null, locked_at = null, claimed_release_sha = null, "
+            "claimed_pool_id = null, updated_at = now() where id = %s",
             (err, job_id),
         )
     return "failed"
@@ -720,7 +995,8 @@ def requeue_stale(conn, *, older_than_seconds: int = 900, worker_id: str = "reap
     )
     with conn.transaction():
         requeued = conn.execute(
-            "update jobs set status = 'queued', locked_by = null, locked_at = null, updated_at = now(), "
+            "update jobs set status = 'queued', locked_by = null, locked_at = null, "
+            "claimed_release_sha = null, claimed_pool_id = null, updated_at = now(), "
             f"{_RENEW_AFTER_LEASE_SQL} "
             "where status = 'running' and locked_at < now() - make_interval(secs => %s) "
             "and attempts < max_attempts"
@@ -730,7 +1006,8 @@ def requeue_stale(conn, *, older_than_seconds: int = 900, worker_id: str = "reap
         ).rowcount
         blocked = conn.execute(
             "update jobs set status = 'blocked', "
-            "error = %s::jsonb, locked_by = null, locked_at = null, updated_at = now() "
+            "error = %s::jsonb, locked_by = null, locked_at = null, "
+            "claimed_release_sha = null, claimed_pool_id = null, updated_at = now() "
             "where status = 'running' and locked_at < now() - make_interval(secs => %s) "
             "and attempts >= max_attempts"
             + local_guard
@@ -755,17 +1032,20 @@ def run_one(
     heartbeat_interval_seconds: float = 15.0,
     heartbeat_conn_factory: Callable[[], Any] | None = None,
     min_queue_age_seconds: float | None = None,
+    worker_release_sha: str | None = None,
 ) -> JobOutcome | None:
     """Claim one job and run it under the full contract; returns its outcome, or None if the queue is
     empty. The pipeline, each step its own transaction on the autocommit conn:
 
       1. claim          — FOR UPDATE SKIP LOCKED → 'running' (attempts++).
       2. handler lookup — no handler for the kind ⇒ blocked('no_handler'); nothing reserved.
-      3. reserve        — release any stale hold from a crashed prior attempt (idempotent refund),
+      3. writer lease   — product jobs take only their business's DB advisory lane; other businesses
+                          and non-product jobs remain parallel.
+      4. reserve        — release any stale hold from a crashed prior attempt (idempotent refund),
                           then reserve estimate_cents on the OWNER's flow-A account under a per-attempt
                           key. InsufficientBalance ⇒ blocked('budget_exhausted'); nothing runs.
-      4. run            — handler(job). Raises ⇒ refund the hold, then fail/requeue.
-      5. settle         — clamp actual ≤ reserved, settle (releases the remainder), complete.
+      5. run            — handler(job). Raises ⇒ refund the hold, then fail/requeue.
+      6. settle         — clamp actual ≤ reserved, settle (releases the remainder), complete.
     """
     job = claim_one(
         conn,
@@ -775,6 +1055,7 @@ def run_one(
         claim_pool_id=claim_pool_id,
         exclusive_pool=exclusive_pool,
         min_queue_age_seconds=min_queue_age_seconds,
+        worker_release_sha=worker_release_sha,
     )
     if job is None:
         return None
@@ -833,39 +1114,6 @@ def run_one(
 
     reserved = 0
 
-    if estimate_cents > 0:
-        owner_user_id = _resolve_owner_user_id(conn, job.business_slug)
-        # Reconcile a crashed prior attempt: release whatever it held (idempotent — a no-op if it was
-        # already settled/refunded) so a held-but-never-settled reservation never leaks across retries.
-        if job.reserved_billing_entry_id and job.reserved_billing_entry_id != reservation_key:
-            billing.refund(conn, job.reserved_billing_entry_id)
-        _set_reserved_key(conn, job.id, reservation_key)
-        try:
-            res = billing.reserve(
-                conn,
-                owner_user_id,
-                estimate_cents,
-                reservation_key,
-                business_slug=job.business_slug,
-                job_id=str(job.id),
-            )
-            reserved = res.allowance_cents
-        except billing.InsufficientBalance as exc:
-            block(
-                conn,
-                job.id,
-                reason="budget_exhausted",
-                detail={"estimate_cents": estimate_cents, "error": str(exc)},
-                worker_id=worker_id,
-                attempt=job.attempts,
-            )
-            _emit_job_event(
-                "blocked",
-                error=f"budget_exhausted: {exc}",
-                extra={"estimate_cents": estimate_cents},
-            )
-            return JobOutcome(job.id, job.kind, "blocked", reason="budget_exhausted")
-
     job_lifecycle_conn = None
 
     def _lifecycle_conn():
@@ -901,6 +1149,16 @@ def run_one(
         attempt=int(job.attempts),
     )
 
+    def _heartbeat_while_waiting_for_writer_lease() -> None:
+        claim_guard.assert_owned("product-writer lease acquisition")
+        hb_conn, _close_hb = _lifecycle_conn()
+        heartbeat(
+            hb_conn,
+            job.id,
+            worker_id=worker_id,
+            attempt=job.attempts,
+        )
+
     def _claim_is_recent(lifecycle_conn) -> bool:
         stale_seconds = max(60.0, float(os.getenv("TAKYON_WORKER_STALE_SECONDS") or 14_400))
         warning_window_seconds = max(300.0, float(heartbeat_interval_seconds or 0) * 20.0)
@@ -928,72 +1186,122 @@ def run_one(
             else None
         )
         run_result: JobRunResult | None = None
-        ctx = contextvars.copy_context()
-
         def _run_claimed_handler() -> JobRunResult:
             with _bound_job_claim(claim_guard):
                 return handler(job)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(ctx.run, _run_claimed_handler)
-            while True:
-                if wait_timeout is None:
-                    run_result = future.result()
-                    break
-                done, _ = concurrent.futures.wait({future}, timeout=wait_timeout)
-                if done:
-                    run_result = future.result()
-                    break
-                # The heartbeat is a LIVENESS signal, never a correctness gate. A long build
-                # (bootstrap Docker→R2 + claude-agent-task) can run past the stale threshold and lose
-                # its claim to requeue_stale + a sibling re-claim; a transient DB blip can likewise
-                # make one refresh fail. NEITHER means the work failed — the handler thread is still
-                # running and its durable side effects (published site, receipts) are landing. If we
-                # let a heartbeat exception escape here it is caught below as a "handler error" and the
-                # ENTIRE 5-minute build is requeued and re-run from scratch, starving the single build
-                # lane (observed on businesses "simple"/"simple-meal-planning": JobNotRunning at
-                # jobs.py heartbeat → fail() → requeue → attempt 2 rebuilds everything). So swallow a
-                # heartbeat failure: keep waiting for the handler, and let the TERMINAL transition be
-                # the single authority on the outcome.
+        with _hold_product_writer_lease(
+            job,
+            fallback_conn=conn,
+            conn_factory=heartbeat_conn_factory,
+            waiting_heartbeat=_heartbeat_while_waiting_for_writer_lease,
+            claim_guard=claim_guard,
+        ):
+            # The business-scoped writer lease precedes money reservation. A replacement attempt
+            # waiting behind a still-draining predecessor therefore cannot hold budget or begin any
+            # side effect. Non-product jobs pass through this context without serialization.
+            if estimate_cents > 0:
+                owner_user_id = _resolve_owner_user_id(conn, job.business_slug)
+                if (
+                    job.reserved_billing_entry_id
+                    and job.reserved_billing_entry_id != reservation_key
+                ):
+                    billing.refund(conn, job.reserved_billing_entry_id)
+                _set_reserved_key(conn, job.id, reservation_key)
                 try:
-                    hb_conn, _close_hb = _lifecycle_conn()
-                    heartbeat(
-                        hb_conn,
+                    res = billing.reserve(
+                        conn,
+                        owner_user_id,
+                        estimate_cents,
+                        reservation_key,
+                        business_slug=job.business_slug,
+                        job_id=str(job.id),
+                    )
+                    reserved = res.allowance_cents
+                except billing.InsufficientBalance as exc:
+                    block(
+                        conn,
                         job.id,
+                        reason="budget_exhausted",
+                        detail={"estimate_cents": estimate_cents, "error": str(exc)},
                         worker_id=worker_id,
                         attempt=job.attempts,
                     )
-                except Exception as hb_exc:  # noqa: BLE001 — lost claim / DB blip must not requeue live work
-                    if heartbeat_conn_factory is not None:
-                        _reset_lifecycle_conn()
-                        try:
-                            hb_conn, _close_hb = _lifecycle_conn()
-                            heartbeat(
-                                hb_conn,
-                                job.id,
-                                worker_id=worker_id,
-                                attempt=job.attempts,
-                            )
-                            continue
-                        except Exception:
-                            pass
-                    try:
-                        _reset_lifecycle_conn()
-                        probe_conn, _close_probe = _lifecycle_conn()
-                        if _claim_is_recent(probe_conn):
-                            continue
-                        claim_guard.mark_lost(
-                            "heartbeat probe confirmed that a newer/terminal claim owns the row"
-                        )
-                    except Exception:
-                        pass
-                    _log.warning(
-                        "jobs: heartbeat could not refresh claim for job %s (kind=%s, non-fatal; "
-                        "handler still running): %s",
+                    _emit_job_event(
+                        "blocked",
+                        error=f"budget_exhausted: {exc}",
+                        extra={"estimate_cents": estimate_cents},
+                    )
+                    _reset_lifecycle_conn()
+                    return JobOutcome(
                         job.id,
                         job.kind,
-                        hb_exc,
+                        "blocked",
+                        reason="budget_exhausted",
                     )
+            # Copy only after the lease ContextVar is bound; otherwise the handler thread sees an
+            # empty key and the core inline guard tries to reacquire this same DB advisory lock.
+            ctx = contextvars.copy_context()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(ctx.run, _run_claimed_handler)
+                while True:
+                    if wait_timeout is None:
+                        run_result = future.result()
+                        break
+                    done, _ = concurrent.futures.wait({future}, timeout=wait_timeout)
+                    if done:
+                        run_result = future.result()
+                        break
+                    # The heartbeat is a LIVENESS signal, never a correctness gate. A long build
+                    # (bootstrap Docker→R2 + claude-agent-task) can run past the stale threshold and lose
+                    # its claim to requeue_stale + a sibling re-claim; a transient DB blip can likewise
+                    # make one refresh fail. NEITHER means the work failed — the handler thread is still
+                    # running and its durable side effects (published site, receipts) are landing. If we
+                    # let a heartbeat exception escape here it is caught below as a "handler error" and the
+                    # ENTIRE 5-minute build is requeued and re-run from scratch, starving the single build
+                    # lane (observed on businesses "simple"/"simple-meal-planning": JobNotRunning at
+                    # jobs.py heartbeat → fail() → requeue → attempt 2 rebuilds everything). So swallow a
+                    # heartbeat failure: keep waiting for the handler, and let the TERMINAL transition be
+                    # the single authority on the outcome.
+                    try:
+                        hb_conn, _close_hb = _lifecycle_conn()
+                        heartbeat(
+                            hb_conn,
+                            job.id,
+                            worker_id=worker_id,
+                            attempt=job.attempts,
+                        )
+                    except Exception as hb_exc:  # noqa: BLE001 — lost claim / DB blip must not requeue live work
+                        if heartbeat_conn_factory is not None:
+                            _reset_lifecycle_conn()
+                            try:
+                                hb_conn, _close_hb = _lifecycle_conn()
+                                heartbeat(
+                                    hb_conn,
+                                    job.id,
+                                    worker_id=worker_id,
+                                    attempt=job.attempts,
+                                )
+                                continue
+                            except Exception:
+                                pass
+                        try:
+                            _reset_lifecycle_conn()
+                            probe_conn, _close_probe = _lifecycle_conn()
+                            if _claim_is_recent(probe_conn):
+                                continue
+                            claim_guard.mark_lost(
+                                "heartbeat probe confirmed that a newer/terminal claim owns the row"
+                            )
+                        except Exception:
+                            pass
+                        _log.warning(
+                            "jobs: heartbeat could not refresh claim for job %s (kind=%s, non-fatal; "
+                            "handler still running): %s",
+                            job.id,
+                            job.kind,
+                            hb_exc,
+                        )
         assert run_result is not None
     except Exception as exc:  # handler failed: release the hold, then fail/requeue
         lifecycle_conn, close_lifecycle = _lifecycle_conn()

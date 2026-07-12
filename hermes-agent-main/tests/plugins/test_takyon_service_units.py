@@ -1,9 +1,6 @@
 import hashlib
-import json
 import os
-import re
 import shutil
-import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -364,16 +361,20 @@ def test_operator_deploy_quiesces_worker_before_observing_and_migrating():
     src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
 
     quiesce = src.index("\nquiesce_remote_worker\n")
-    observe = src.index("\nwait_for_remote_runtime_idle\n")
-    migrate = src.index("\nrun_remote_migrations\n")
+    observe_serving = src.index("\nwait_for_remote_runtime_idle\n")
     stop_dashboard = src.index("TAKYON_STOP_CORE_SERVICES=1")
-    assert quiesce < observe < migrate < stop_dashboard
+    observe_stopped = src.index("\nwait_for_remote_runtime_idle\n", observe_serving + 1)
+    migrate = src.index("\nrun_remote_migrations\n")
+    assert quiesce < observe_serving < stop_dashboard < observe_stopped < migrate
     assert "/run/systemd/system/takyon-worker.service.d/90-takyon-deploy-stop-grace.conf" in src
-    assert "TimeoutStopSec=${TAKYON_DEPLOY_WORKER_STOP_GRACE_SECONDS}s" in src
+    assert "TimeoutStopSec=infinity" in src
+    assert "systemctl stop --no-block takyon-worker.service" in src
+    assert "systemctl restart --no-block takyon-worker.service" in src
     assert "systemctl daemon-reload" in src
     assert "systemctl set-property" not in src
-    assert "WHERE work_request.status = 'running'" in src
-    assert "WHERE work_request.status IN ('queued', 'running')" not in src
+    assert "WHERE status = 'running'" in src
+    assert "WHERE status = 'running'" in src
+    assert "OR (status = 'queued' AND attempts > 0)" in src
     assert "restore_operator_services_on_failure" in src
     assert "trap restore_operator_services_on_failure EXIT" in src
     assert "systemctl stop takyon-worker.service takyon-dashboard.service takyon-docker-broker.service" in src
@@ -392,68 +393,66 @@ def test_operator_deploy_drain_probe_survives_ssh_double_quoted_string():
     assert "assert_takyon_pg_role(conn, 'operator')" in drain
 
 
-def test_operator_deploy_drain_ignores_only_unambiguous_mac_owned_work():
+def test_operator_deploy_drain_waits_for_mac_and_vps_work_without_global_cli_lock():
     src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
     drain = src.split("wait_for_remote_runtime_idle() {", 1)[1].split("wait_for_remote_runtime_idle", 1)[0]
 
-    assert "mac_job.payload->>'work_request_id' = work_request.id" in drain
-    assert "COALESCE(mac_job.locked_by, '') LIKE 'mac-operator-%%'" in drain
-    assert "other_job.payload->>'work_request_id' = work_request.id" in drain
-    assert "COALESCE(other_job.locked_by, '') NOT LIKE 'mac-operator-%%'" in drain
-    assert "COALESCE(locked_by, '') NOT LIKE 'mac-operator-%'" in drain
+    assert "WHERE status = 'running'" in drain
+    assert "OR (status = 'queued' AND attempts > 0)" in drain
+    assert "TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS" in src
+    assert "NULLIF(updated_at, '')::timestamptz >= (NOW() - %s::interval)" in drain
+    assert "COALESCE(locked_by, '')" in drain
+    assert "mac-operator-%" not in drain
+    assert "no job was killed or repinned" in drain
+    # The barrier is deploy-scoped only. Ordinary same-release pools can still work on different
+    # businesses in parallel and are never serialized by a global CLI mutex.
+    prod_cli = (ROOT / "scripts/takyon-operator-prod.sh").read_text()
+    assert "deploy cutover" not in prod_cli
 
 
-def test_operator_deploy_drain_owner_query_semantics():
+def test_operator_deploy_drain_diagnostics_are_exact_and_non_mutating():
     src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
-    match = re.search(
-        r'cur\.execute\(\s*\\"\\"\\"\s*'
-        r'(SELECT COUNT\(\*\)\s+FROM business_work_requests AS work_request.*?)'
-        r'\s*\\"\\"\\",\s*'
-        r'\(f\\"\$TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS seconds\\",\),',
-        src,
-        re.S,
-    )
-    assert match is not None
-    # psycopg's bound-query parser treats every literal percent as formatting syntax. Prove the
-    # embedded SQL keeps its one real %s placeholder while escaping LIKE wildcards as %%.
-    assert "mac-operator-%%" in match.group(1)
-    assert "mac-operator-%'" not in match.group(1).replace("mac-operator-%%", "")
-    match.group(1) % ("1800 seconds",)
-    query = re.sub(
-        r"AND NULLIF\(work_request\.updated_at, ''\)::timestamptz >= \(NOW\(\) - %s::interval\)",
-        "AND 1 = 1",
-        match.group(1),
-        count=1,
-    )
 
-    cases = {
-        "mac-only": ([('running', 'mac-operator-local-1')], 0),
-        "mixed-owner": ([('running', 'mac-operator-local-1'), ('running', 'vps-worker-1')], 1),
-        # The VPS worker is already quiesced before this probe; queued work is durable and cannot
-        # be killed by the restart, so only another running owner blocks activation.
-        "queued-sibling": ([('running', 'mac-operator-local-1'), ('queued', None)], 0),
-        "missing-link": ([], 1),
-        "unknown-owner": ([('running', None)], 1),
-        "terminal-sibling": ([('running', 'mac-operator-local-1'), ('completed', 'vps-worker-1')], 0),
-    }
-    for label, (jobs, expected) in cases.items():
-        conn = sqlite3.connect(":memory:")
-        conn.executescript(
-            """
-            CREATE TABLE business_work_requests (id TEXT, status TEXT, updated_at TEXT);
-            CREATE TABLE jobs (payload TEXT, status TEXT, locked_by TEXT);
-            INSERT INTO business_work_requests VALUES ('work-1', 'running', 'now');
-            """
-        )
-        conn.executemany(
-            "INSERT INTO jobs VALUES (?, ?, ?)",
-            [
-                (json.dumps({"work_request_id": "work-1"}), status, locked_by)
-                for status, locked_by in jobs
-            ],
-        )
-        assert conn.execute(query).fetchone()[0] == expected, label
-        conn.close()
+    assert "no job was killed or repinned" in src
+    assert "print('job ' + json.dumps(list(row)" in src
+    assert "select pool_id, hostname, status, release_sha" in src
+    assert "worker release cutover is not sealed" in src
+    assert "UPDATE jobs" not in src
+
+
+def test_operator_deploy_activates_and_can_restore_the_exact_worker_release():
+    src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
+
+    migrate = src.index("\nrun_remote_migrations\n")
+    activate = src.index("\nactivate_remote_worker_release\n")
+    verify = src.index("\nverify_remote_worker_release_cutover\n")
+    source_activate = src.index("\ntakyon_begin_runtime_activation")
+    assert migrate < activate < verify < source_activate
+    assert "/root/.config/takyon/migration/database-url" in src
+    assert "assert_takyon_pg_role(conn, 'migration')" in src
+    assert "takyon_activate_worker_release(%s)" in src
+    assert "takyon_restore_worker_release(%s, %s)" in src
+    assert '"previous_release_sha"' in src
+    assert 'worker_release_fence_activated=1' in src
+    restore = src.split("restore_operator_services_on_failure() {", 1)[1].split(
+        "trap restore_operator_services_on_failure EXIT", 1
+    )[0]
+    assert "remote_worker_release_fence restore" in restore
+    assert '"$TAKYON_DEPLOY_SOURCE_REVISION" "$worker_release_previous_sha"' in restore
+    assert "target work may have started" in restore
+
+
+def test_operator_deploy_smokes_dashboard_before_opening_target_worker_queue():
+    src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
+
+    smoke = src.index("\noperator_smoke_succeeded=0")
+    final_smoke = src.index("\nif [[ \"$operator_smoke_succeeded\" != \"1\" ]]; then\n  run_remote_smoke\nfi")
+    worker_start = src.index("systemctl restart takyon-worker.service", final_smoke)
+    activated = src.index("\noperator_services_activated=1", worker_start)
+    assert smoke < final_smoke < worker_start < activated
+    source_activate = src.index("\ntakyon_begin_runtime_activation")
+    pre_smoke_activation = src[source_activate:final_smoke]
+    assert "systemctl restart takyon-worker.service" not in pre_smoke_activation
 
 
 def test_operator_bootstrap_remote_shell_contains_no_local_command_substitutions():

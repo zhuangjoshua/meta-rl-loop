@@ -46,17 +46,28 @@ def test_product_edge_deploy_is_clean_published_and_secret_isolated():
     assert 'env["CLOUDFLARE_API_TOKEN"] = token' in command
     assert 'safe_names = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")' in command
     assert '"wrangler@4.110.0",' in command
-    assert '"versions",\n            "upload",' in command
-    assert '"versions",\n            "deploy",' in command
-    assert '"--version-tag",\n            source_revision,' in command
-    assert '"--percentage",\n            "100",' in command
+    assert command.count('"versions",') == 2
+    assert command.count('"--config",\n                    config_path,') == 2
+    assert '"upload",\n                    "--config",' in command
+    assert '"deploy",\n                    "--config",' in command
+    assert '"--version-tag",\n                    source_revision,' in command
+    assert '"--percentage",\n                    "100",' in command
+    assert '"archive",\n            "--format=tar",\n            source_revision,' in command
+    assert 'with tempfile.TemporaryDirectory(prefix="takyon-product-edge-")' in command
+    assert '"deploy/cloudflare/product-worker/worker.js": "worker.js"' in command
+    assert '"deploy/cloudflare/product-worker/wrangler.toml": "wrangler.toml"' in command
     assert "def run_bounded(" in command
     assert "start_new_session=True" in command
+    assert "except BaseException:" in command
     assert "os.killpg(process.pid, signal.SIGTERM)" in command
-    assert "origin/main moved during edge upload; inactive version was not deployed" in command
-    assert command.index('"versions",\n            "upload",') < command.index(
+    assert "os.killpg(process.pid, signal.SIGKILL)" in command
+    assert "signal.signal(signal.SIGTERM, _handle_term)" in command
+    assert "origin/main or HEAD moved during edge upload" in command
+    assert '"rev-parse", "HEAD"' in command
+    assert command.index('"upload",\n                    "--config",') < command.index(
         '["git", "-C", str(repo_root), "fetch"'
-    ) < command.index('"versions",\n            "deploy",')
+    ) < command.index('"deploy",\n                    "--config",')
+    assert '"triggers",\n                    "deploy",' not in command
     assert "print(token)" not in command
     assert "TAKYON_OPERATOR_DATABASE_URL" not in command
     assert "TAKYON_SAFEBOX_OPERATOR_TOKEN" not in command
@@ -65,6 +76,43 @@ def test_product_edge_deploy_is_clean_published_and_secret_isolated():
 
     python_source = command.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
     compile(python_source, "product-edge-deploy-heredoc", "exec")
+
+
+def test_product_edge_config_disables_workers_dev_without_owning_routes():
+    config = (ROOT / "deploy" / "cloudflare" / "product-worker" / "wrangler.toml").read_text(
+        encoding="utf-8"
+    )
+    active_lines = [
+        line.strip()
+        for line in config.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+    assert "workers_dev = false" in active_lines
+    assert not any(line.startswith(("route =", "routes =", "[[routes]]")) for line in active_lines)
+
+
+def test_prod_compute_is_sealed_to_clean_published_live_release():
+    script = _script_source()
+    fetch = script[
+        script.index("fetch_operator_env_exports() {") : script.index(
+            "\nverify_local_runtime_release() {"
+        )
+    ]
+    verify = script[
+        script.index("verify_local_runtime_release() {") : script.index("\nload_operator_env() {")
+    ]
+    load = script[script.index("load_operator_env() {") : script.index("\nunset_raw_runtime_authority_env() {")]
+
+    assert "/opt/takyon/hermes-agent-main/.takyon-deploy-artifact.json" in fetch
+    assert "env['TAKYON_RUNTIME_RELEASE_SHA'] = release_sha" in fetch
+    assert "status --porcelain --untracked-files=all" in verify
+    assert "hermes-agent-main takyon scripts/takyon-operator-prod.sh" in verify
+    assert 'fetch --quiet origin main' in verify
+    assert '[[ "$head" == "$published" ]]' in verify
+    assert '[[ "$head" == "$deployed" ]]' in verify
+    assert 'export TAKYON_RUNTIME_RELEASE_SHA="$head"' in verify
+    assert "verify_local_runtime_release" in load
 
 
 def test_shared_tunnel_monitor_and_initial_start_use_one_reconciler():
@@ -545,6 +593,39 @@ def test_console_wiring_requires_worker_ready_marker_before_shell():
     assert "TAKYON_WORKER_READY_FILE" not in worker
     assert 'tunnel_consumer_pid="$(current_shell_process_pid)"' in console
     assert "release_managed_tunnel_consumer" in console
+
+
+def test_parallel_consoles_never_stop_unrelated_local_worker_pools():
+    script = _script_source()
+    console = script[script.index("cmd_console() {") : script.index("\ncmd_vps_worker() {")]
+    worker = script[script.index("cmd_worker() {") : script.index("\ncmd_worker_once() {")]
+
+    # Each console owns and drains only its wrapper. Global pool shutdown remains available through
+    # the explicit stop-workers command, never as a startup/cleanup side effect. The owned worker is
+    # ineligible for the generic five-second SIGKILL path.
+    assert "stop_local_workers_background" not in worker
+    assert "stop_local_workers" not in console
+    assert 'gracefully_drain_worker_pid "$worker_pid"' in console
+    assert 'terminate_pid "$worker_pid"' not in console
+    graceful = script[
+        script.index("gracefully_drain_worker_pid() {") : script.index(
+            "\nlocal_worker_stop_grace_seconds() {"
+        )
+    ]
+    assert "kill -TERM" in graceful
+    assert "kill -KILL" not in graceful
+
+
+def test_additional_console_shells_stay_bound_to_their_own_pool():
+    script = _script_source()
+    spawn = script[
+        script.index("spawn_console_shell_windows() {") : script.index("\nrun_console_shell() {")
+    ]
+
+    # A second console may overwrite the discovery sidecar while these windows launch. Their
+    # explicit inherited identity must therefore win over process-global discovery.
+    assert 'TAKYON_WORKER_POOL_ID="$session_pool_id"' in spawn
+    assert 'TAKYON_WORKER_POOL_EXCLUSIVE="$session_pool_exclusive"' in spawn
 
 
 def test_tunnel_monitor_fails_loud_without_the_mac_lock_tool():

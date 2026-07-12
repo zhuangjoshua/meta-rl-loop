@@ -111,7 +111,11 @@ export function AppLayout() {
             <div className="space-y-6 rounded-2xl border border-border bg-card p-8 shadow-lg">
               <div className="space-y-2">
                 <h1 className="font-heading text-3xl font-semibold text-foreground">
-                  {access.state === "past_due" ? "Update your billing" : "Complete your subscription"}
+                  {access.state === "past_due"
+                    ? "Update your billing"
+                    : access.state === "canceled"
+                      ? "Subscription canceled"
+                      : "Complete your subscription"}
                 </h1>
                 <p className="text-muted-foreground">One secure checkout unlocks the complete product.</p>
               </div>
