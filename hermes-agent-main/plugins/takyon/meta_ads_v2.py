@@ -269,9 +269,38 @@ def _business_site_hostname(business: str) -> str:
     event actually fires on. This is the only hostname the purchase-attribution rule may
     scope to."""
     try:
-        return urllib.parse.urlparse(core._product_publish_target(business)).netloc
+        return str(
+            urllib.parse.urlparse(core._product_publish_target(business)).hostname or ""
+        ).strip().lower().rstrip(".")
     except Exception:
         return ""
+
+
+def _server_purchase_rule_matches(rule: str, site_hostname: str) -> bool:
+    """Require the CAPI-only event plus the exact authoritative app host/path."""
+    try:
+        payload = json.loads(str(rule or ""))
+    except Exception:
+        return False
+    clauses = payload.get("and") if isinstance(payload, Mapping) else None
+    if not isinstance(clauses, list):
+        return False
+    event_name = ""
+    url_match = ""
+    for clause in clauses:
+        if not isinstance(clause, Mapping):
+            continue
+        event = clause.get("event")
+        url = clause.get("url")
+        if isinstance(event, Mapping):
+            event_name = str(event.get("eq") or "").strip()
+        if isinstance(url, Mapping):
+            url_match = str(url.get("i_contains") or "").strip().lower()
+    return (
+        event_name.startswith("TakyonPurchase_")
+        and len(event_name) >= 32
+        and url_match == f"{site_hostname}/app"
+    )
 
 
 def _business_purchase_attribution(store: Any, business: str) -> tuple[tuple[str, ...] | None, str]:
@@ -302,6 +331,8 @@ def _business_purchase_attribution(store: Any, business: str) -> tuple[tuple[str
             return None, "unavailable"
         if str(doc.get("custom_event_type") or "").strip().upper() != "PURCHASE":
             return None, "unavailable"
+        if str(doc.get("measurement_source") or "").strip() != "stripe_capi":
+            return None, "unavailable"
         conversion_id = str(doc.get("custom_conversion_id") or "").strip()
         if not conversion_id:
             return None, "unavailable"
@@ -315,10 +346,9 @@ def _business_purchase_attribution(store: Any, business: str) -> tuple[tuple[str
         site_host = _business_site_hostname(business)
         if not site_host:
             return None, "unavailable"
-        if str(doc.get("url_match") or "").strip() != site_host and site_host not in str(
-                doc.get("url_match") or ""):
+        if str(doc.get("url_match") or "").strip().lower() != f"{site_host}/app":
             return None, "unavailable"
-        if site_host not in rule:
+        if not _server_purchase_rule_matches(rule, site_host):
             return None, "unavailable"
         pixel_cfg = core._meta_pixel_config()
         current_pixel = (str(pixel_cfg.get("pixel_id") or "").strip()
@@ -1656,16 +1686,28 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
         if not site_host:
             raise core.TakyonError(
                 f"cannot derive the authoritative site hostname for business {business!r}")
-        for supplied in (requested_domain, conversion_path):
-            if supplied and site_host not in supplied:
+        if requested_domain:
+            parsed_domain = urllib.parse.urlparse(
+                requested_domain if "://" in requested_domain else f"//{requested_domain}"
+            ).hostname
+            if str(parsed_domain or "").strip().lower().rstrip(".") != site_host:
                 raise core.TakyonError(
-                    f"cross-business domain rejected: {supplied!r} does not contain this "
+                    f"cross-business domain rejected: {requested_domain!r} is not this "
                     f"business's authoritative hostname {site_host!r}")
-        url_match = conversion_path or site_host
+        if custom_event_type == "PURCHASE" and conversion_path:
+            parsed_path = urllib.parse.urlparse(conversion_path)
+            supplied_host = str(parsed_path.hostname or "").strip().lower().rstrip(".")
+            path_only = str(parsed_path.path or conversion_path.split("?", 1)[0]).strip()
+            if (supplied_host and supplied_host != site_host) or not path_only.startswith("/app"):
+                raise core.TakyonError(
+                    "purchase conversion_path must be the authoritative business /app checkout-return path"
+                )
+        url_match = f"{site_host}/app" if custom_event_type == "PURCHASE" else (
+            conversion_path or site_host
+        )
         name = str(_arg(args, "conversion_name") or f"{slug}-{custom_event_type.lower()}").strip()
-        # URL rule: fire only for this business's own site (per-business isolation on the
-        # shared pixel). Together with custom_event_type this makes the conversion match
-        # BOTH the Purchase event and the business hostname.
+        # For PURCHASE the Safebox replaces this placeholder with an unguessable CAPI-only
+        # event + exact authoritative host/path rule. LEAD keeps the legacy URL rule.
         rule = json.dumps({"url": {"i_contains": url_match}}, ensure_ascii=False)
 
         base = {
@@ -1730,6 +1772,8 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
             rule=rule,
             custom_event_type=custom_event_type,
             event_source_id=_pixel_event_source,
+            business=business,
+            site_hostname=site_host,
         )
         custom_conversion_id = str(
             (result or {}).get("id")
@@ -1747,6 +1791,15 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
             and str((result or {}).get("custom_event_type") or "").strip().upper() == custom_event_type
             and str((result or {}).get("pixel_id") or "").strip() == _pixel_event_source
         )
+        effective_rule = str((result or {}).get("rule") or rule).strip()
+        capi_ready = bool((result or {}).get("capi_ready") is True)
+        if custom_event_type == "PURCHASE":
+            provider_verified = bool(
+                provider_verified
+                and capi_ready
+                and _server_purchase_rule_matches(effective_rule, site_host)
+            )
+        base["rule"] = effective_rule
 
         # ── Site-side install (the half this tool historically skipped). Fail-soft by design:
         # the Meta-side custom conversion above is the primary op; a site-side blocker is
@@ -1820,8 +1873,10 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
                     "custom_conversion_id": custom_conversion_id,
                     "custom_event_type": "PURCHASE",
                     "pixel_id": _pixel_event_source,
-                    "rule": rule,
+                    "rule": effective_rule,
                     "url_match": url_match,
+                    "measurement_source": "stripe_capi",
+                    "capi_ready": True,
                     "ensure_receipt": ensure_rel,
                     "verified_at": core._now(),
                     "created_at": core._now(),
@@ -1831,6 +1886,7 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
                 ensure["purchase_attribution_blocked"] = {
                     "provider_verified": provider_verified,
                     "instrumentation_verified": instrumentation_verified,
+                    "capi_ready": capi_ready,
                     "detail": "canonical record NOT activated; attribution remains unavailable",
                 }
         return core.tool_result({

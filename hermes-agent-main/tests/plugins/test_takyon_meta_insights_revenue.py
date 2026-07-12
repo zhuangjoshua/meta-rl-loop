@@ -1,9 +1,9 @@
-"""Meta-attributed revenue/ROAS read-path + client-side Purchase pixel (option 1).
+"""Meta-attributed revenue/ROAS read-path + server-only purchase signal.
 
 Covers the read side (``core._meta_aggregate_insights_rows`` turning Meta's
 ``action_values``/``actions`` into purchase value / count / ROAS, deduped across the
-synonym action_types) and the write side (the starter app shell firing a value-carrying
-``Purchase`` pixel event on ``?checkout=success``)."""
+synonym action_types) and the browser-side invariant that product customers cannot emit
+the private CAPI event used for financial attribution."""
 
 from plugins.takyon import core
 
@@ -162,7 +162,7 @@ def test_first_action_metric_prefers_canonical_order():
     assert core._meta_first_action_metric([], core._META_PURCHASE_ACTION_TYPES) is None
 
 
-# ── write side: client-side Purchase pixel event (LIVE scaffold, not the dead starter) ──
+# ── write side: browser must never mint the financial Purchase signal ──
 
 
 def _scaffold_hooks_source() -> str:
@@ -173,23 +173,21 @@ def _scaffold_hooks_source() -> str:
     ).read_text(encoding="utf-8")
 
 
-def test_live_scaffold_fires_value_carrying_purchase_on_checkout_success():
+def test_live_scaffold_does_not_emit_purchase_from_browser_checkout_query():
     ts = _scaffold_hooks_source()
-    # Fires the standard Purchase event with a value + currency (not just PageView).
-    assert 'fbq("track", "Purchase"' in ts
-    assert "value: Math.round(cents) / 100" in ts
-    assert "currency:" in ts
-    # Only when the pixel is actually installed, and ONLY on an explicit success return —
-    # a checkout=cancel (or bare session_id) return must never mint a Purchase.
-    assert 'if (params.get("checkout") !== "success") return;' in ts
-    assert "typeof fbq !== \"function\"" in ts
-    # Deduped once per session so a refresh cannot double-count.
-    assert "tk_meta_purchase_fired" in ts
-    # Tagged with the business's own hostname so cross-business purchases on the SHARED
-    # pixel stay identifiable per business in Events Manager.
-    assert "content_name: String(window.location.hostname" in ts
-    # Wired into the one return-from-checkout hook that actually runs.
-    assert "fireMetaPurchasePixel(params);" in ts
+    assert 'fbq("track", "Purchase"' not in ts
+    assert "fireMetaPurchasePixel" not in ts
+    assert "server-only conversion signal" in ts
+
+
+def test_app_checkout_stamps_only_server_owned_meta_capi_metadata():
+    import inspect
+
+    source = inspect.getsource(core.handle_business_create_app_checkout)
+    assert 'params["metadata[takyon_meta_capi]"] = "1"' in source
+    assert 'params["metadata[takyon_meta_pixel_id]"] = meta_pixel_id' in source
+    assert 'params["metadata[takyon_meta_site_host]"] = meta_site_host.lower()' in source
+    assert "checkout_metadata" not in source[source.index("params: dict[str, Any]") :]
 
 
 def test_dead_legacy_starter_carries_no_pixel_code():

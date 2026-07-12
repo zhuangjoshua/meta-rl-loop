@@ -144,3 +144,35 @@ def test_missing_event_source_id_raises_before_any_call(monkeypatch):
 
 def test_digit_guessing_helper_is_gone():
     assert not hasattr(meta_graph, "_existing_conversion_id_from_error")
+
+
+def test_purchase_rule_requires_private_event_and_exact_app_host():
+    rule = json.loads(meta_graph.purchase_custom_conversion_rule(
+        "TakyonPurchase_secret", "clipbook.coscale.app"
+    ))
+    assert {"event": {"eq": "TakyonPurchase_secret"}} in rule["and"]
+    assert {"url": {"i_contains": "clipbook.coscale.app/app"}} in rule["and"]
+
+
+def test_capi_purchase_sends_one_server_event(monkeypatch):
+    captured = {}
+
+    def fake_graph(method, path, params, **kwargs):
+        captured.update(method=method, path=path, params=params, kwargs=kwargs)
+        return {"events_received": 1}
+
+    monkeypatch.setattr(meta_graph, "_graph", fake_graph)
+    out = meta_graph.send_purchase_conversion_event(
+        "capi-token", "123456",
+        event_name="TakyonPurchase_secret",
+        event_time=1_700_000_000,
+        event_id="takyon-stripe:cs_1:evt_1",
+        event_source_url="https://clipbook.coscale.app/app?checkout=success",
+        user_data={"em": ["abc"]}, value=19.0, currency="usd",
+    )
+    payload = json.loads(captured["params"]["data"])[0]
+    assert captured["method"] == "POST" and captured["path"] == "123456/events"
+    assert payload["event_name"] == "TakyonPurchase_secret"
+    assert payload["event_id"] == "takyon-stripe:cs_1:evt_1"
+    assert payload["custom_data"] == {"value": 19.0, "currency": "USD"}
+    assert out["events_received"] == 1

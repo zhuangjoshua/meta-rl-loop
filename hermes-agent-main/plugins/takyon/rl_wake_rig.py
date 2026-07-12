@@ -171,11 +171,19 @@ class RigSafebox:
 
     def meta_graph_ensure_custom_conversion(self, **kw: Any) -> dict[str, Any]:
         self.calls.append({"op": "ensure_custom_conversion", **{k: str(v)[:60] for k, v in kw.items()}})
+        event_name = f"TakyonPurchase_{str(kw.get('business') or 'rig'):0<32}"[:47]
+        site_host = str(kw.get("site_hostname") or "")
+        rule = json.dumps({
+            "and": [
+                {"event": {"eq": event_name}},
+                {"url": {"i_contains": f"{site_host}/app"}},
+            ]
+        }, sort_keys=True, separators=(",", ":"))
         return {
             "id": self._next("cc"), "existed": False, "verified": True,
             "custom_event_type": str(kw.get("custom_event_type") or "").upper(),
             "pixel_id": str(kw.get("event_source_id") or ""),
-            "rule": str(kw.get("rule") or ""),
+            "rule": rule, "capi_ready": True, "purchase_event_name": event_name,
         }
 
 
@@ -450,8 +458,13 @@ def seed_business(dsn: str, store: Any, slug: str) -> None:
         "custom_conversion_id": _rig_purchase_conversion_id(slug),
         "custom_event_type": "PURCHASE",
         "pixel_id": "PIX-RIG-1",
-        "rule": json.dumps({"url": {"i_contains": site_host}}),
-        "url_match": site_host,
+        "rule": json.dumps({"and": [
+            {"event": {"eq": f"TakyonPurchase_{slug:0<32}"[:47]}},
+            {"url": {"i_contains": f"{site_host}/app"}},
+        ]}, sort_keys=True, separators=(",", ":")),
+        "url_match": f"{site_host}/app",
+        "measurement_source": "stripe_capi",
+        "capi_ready": True,
         "verified_at": "2026-07-01T00:00:00+00:00",
         "created_at": "2026-07-01T00:00:00+00:00",
     }), encoding="utf-8")

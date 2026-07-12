@@ -21,6 +21,8 @@ Meta with httpx ``files=``. We never round-trip through a signed/public URL.
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import threading
 import time
 from typing import Any, Mapping
@@ -398,6 +400,91 @@ def _normalized_rule(rule_value: object) -> str:
         return json.dumps(json.loads(str(rule_value)), sort_keys=True, separators=(",", ":"))
     except Exception:
         return str(rule_value or "").strip()
+
+
+def purchase_custom_conversion_rule(event_name: str, site_hostname: str) -> str:
+    """Build the strict server-event purchase rule used for shared-pixel isolation.
+
+    The event name is a Safebox-derived, per-business value sent only through CAPI; it is
+    never emitted by the browser.  The hostname clause is defense in depth and prevents a
+    valid event for one business from being reused against another business's URL.
+    """
+    event = str(event_name or "").strip()
+    host = str(site_hostname or "").strip().lower().rstrip(".")
+    if not event:
+        raise ValueError("purchase custom conversion requires event_name")
+    if not host or "/" in host or ":" in host:
+        raise ValueError("purchase custom conversion requires a hostname")
+    return json.dumps(
+        {
+            "and": [
+                {"event": {"eq": event}},
+                {"url": {"i_contains": f"{host}/app"}},
+            ]
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def derive_purchase_event_name(signing_key: bytes, business: str) -> str:
+    """Derive a stable, unguessable CAPI-only event name for one business."""
+    key = bytes(signing_key or b"")
+    slug = str(business or "").strip().lower()
+    if len(key) < 32 or not slug:
+        raise ValueError("purchase event derivation requires a signing key and business")
+    digest = hmac.new(key, f"meta-purchase-v1:{slug}".encode(), hashlib.sha256).hexdigest()
+    return f"TakyonPurchase_{digest[:32]}"
+
+
+def send_purchase_conversion_event(
+    token: str,
+    pixel_id: str,
+    *,
+    event_name: str,
+    event_time: int,
+    event_id: str,
+    event_source_url: str,
+    user_data: Mapping[str, Any],
+    value: float,
+    currency: str,
+    version: str = "v21.0",
+) -> dict[str, Any]:
+    """Send one Stripe-proven purchase through Meta CAPI.
+
+    The public browser pixel never emits ``event_name``.  The Safebox calls this function
+    only after Stripe signature and live-account object verification, so product subusers
+    cannot manufacture the event that the custom conversion counts.
+    """
+    pixel = str(pixel_id or "").strip()
+    name = str(event_name or "").strip()
+    source_url = str(event_source_url or "").strip()
+    eid = str(event_id or "").strip()
+    if not pixel.isdigit() or not name or not source_url or not eid:
+        raise ValueError("CAPI purchase requires pixel_id, event_name, event_id, and source URL")
+    event = {
+        "event_name": name,
+        "event_time": int(event_time),
+        "event_id": eid,
+        "action_source": "website",
+        "event_source_url": source_url,
+        "user_data": dict(user_data or {}),
+        "custom_data": {
+            "value": round(float(value), 2),
+            "currency": str(currency or "USD").strip().upper() or "USD",
+        },
+    }
+    result = _graph(
+        "POST",
+        f"{pixel}/events",
+        {"data": json.dumps([event], separators=(",", ":"))},
+        token=token,
+        version=version,
+        timeout=60.0,
+    )
+    if int(result.get("events_received") or 0) != 1:
+        raise MetaGraphError("Meta CAPI did not acknowledge exactly one purchase event")
+    return result
 
 
 def verify_custom_conversion(

@@ -900,6 +900,67 @@ def _cap_signing_key() -> bytes:
     return str(os.environ.get(_CAP_SIGNING_KEY_ENV) or "").strip().encode("utf-8")
 
 
+def _send_verified_meta_purchase(event: dict[str, Any], checkout: dict[str, Any]) -> dict[str, Any] | None:
+    """Send the server-only Meta purchase event for a verified Stripe checkout.
+
+    ``checkout`` is the live Stripe object fetched and proven by the Safebox route.  Browser
+    input is never accepted here.  Old checkouts without the fixed Meta metadata simply skip;
+    new checkouts retry through Stripe when an enabled CAPI delivery fails.
+    """
+    metadata = checkout.get("metadata") if isinstance(checkout.get("metadata"), dict) else {}
+    if metadata.get("source") != "takyon_app" or metadata.get("takyon_meta_capi") != "1":
+        return None
+    if str(checkout.get("payment_status") or "").strip().lower() != "paid":
+        raise RuntimeError("meta_capi_purchase_requires_paid_checkout")
+    business = _require_safe_slug(str(metadata.get("business") or ""))
+    pixel_id = str(metadata.get("takyon_meta_pixel_id") or "").strip()
+    site_host = str(metadata.get("takyon_meta_site_host") or "").strip().lower().rstrip(".")
+    if not pixel_id.isdigit() or not site_host.startswith(f"{business}."):
+        raise RuntimeError("meta_capi_checkout_metadata_invalid")
+    capi_token = str(safebox.first_env_backed_value(
+        "META_CAPI_TOKEN", "META_SYSTEM_USER_ACCESS_TOKEN"
+    ) or "").strip()
+    if not capi_token:
+        # Pixel installation can predate CAPI configuration. In that posture the purchase
+        # attribution record cannot activate (ensure reports capi_ready=false), while Stripe
+        # entitlement/revenue processing must continue normally.
+        return None
+    from . import meta_graph
+
+    event_name = meta_graph.derive_purchase_event_name(_cap_signing_key(), business)
+    customer = checkout.get("customer_details") if isinstance(checkout.get("customer_details"), dict) else {}
+    email = str(customer.get("email") or checkout.get("customer_email") or "").strip().lower()
+    if not email:
+        raise RuntimeError("meta_capi_customer_email_unavailable")
+    amount_cents = checkout.get("amount_total")
+    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
+        raise RuntimeError("meta_capi_checkout_amount_invalid")
+    stripe_session_id = str(checkout.get("id") or "").strip()
+    provider_event_id = str(event.get("id") or "").strip()
+    event_id = f"takyon-stripe:{stripe_session_id}:{provider_event_id}"
+    event_time = int(event.get("created") or time.time())
+    graph_version = str(safebox.first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
+    if not graph_version.startswith("v"):
+        graph_version = f"v{graph_version}"
+    result = meta_graph.send_purchase_conversion_event(
+        capi_token,
+        pixel_id,
+        event_name=event_name,
+        event_time=event_time,
+        event_id=event_id,
+        event_source_url=f"https://{site_host}/app?checkout=success",
+        user_data={"em": [hashlib.sha256(email.encode("utf-8")).hexdigest()]},
+        value=amount_cents / 100.0,
+        currency=str(checkout.get("currency") or "usd"),
+        version=graph_version,
+    )
+    return {
+        "sent": True,
+        "event_id": event_id,
+        "events_received": int(result.get("events_received") or 0),
+    }
+
+
 @contextmanager
 def _safebox_db_conn():
     """Open the SAFEBOX-OWNED Postgres connection (same recipe as safebox._creative_credit_conn).
@@ -1338,6 +1399,8 @@ class _MetaEnsureCustomConversionBody(BaseModel):
     rule: str
     custom_event_type: str
     event_source_id: str = ""  # the pixel the conversion listens to; Meta requires it
+    business: str = ""
+    site_hostname: str = ""
     timeout: float = 60.0
 
 
@@ -4430,16 +4493,42 @@ def build_safebox_app() -> FastAPI:
             raise HTTPException(status_code=502, detail="META_SYSTEM_USER_ACCESS_TOKEN is not configured")
         if not str(body.event_source_id or "").strip():
             raise HTTPException(status_code=400, detail="event_source_id_required")
+        event_type = str(body.custom_event_type or "").strip().upper()
+        effective_rule = str(body.rule or "")
+        purchase_event_name = ""
+        if event_type == "PURCHASE":
+            business = _require_safe_slug(str(body.business or ""))
+            site_hostname = str(body.site_hostname or "").strip().lower().rstrip(".")
+            if not site_hostname.startswith(f"{business}."):
+                raise HTTPException(status_code=400, detail="purchase_site_hostname_mismatch")
+            try:
+                purchase_event_name = _meta_graph.derive_purchase_event_name(
+                    _cap_signing_key(), business
+                )
+                effective_rule = _meta_graph.purchase_custom_conversion_rule(
+                    purchase_event_name, site_hostname
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
-            return _meta_graph.ensure_custom_conversion(
+            result = _meta_graph.ensure_custom_conversion(
                 token,
                 str(body.ad_account_id or ""),
                 name=str(body.name or ""),
-                rule=str(body.rule or ""),
-                custom_event_type=str(body.custom_event_type or ""),
+                rule=effective_rule,
+                custom_event_type=event_type,
                 event_source_id=str(body.event_source_id or ""),
                 version=version,
             )
+            if event_type == "PURCHASE":
+                result["capi_ready"] = bool(
+                    str(safebox.first_env_backed_value(
+                        "META_CAPI_TOKEN", "META_SYSTEM_USER_ACCESS_TOKEN"
+                    ) or "").strip()
+                )
+            if purchase_event_name:
+                result["purchase_event_name"] = purchase_event_name
+            return result
         except _meta_graph.MetaGraphError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -4956,6 +5045,15 @@ def build_safebox_app() -> FastAPI:
                 detail="stripe_subscription_reconcile_pending",
             )
 
+        meta_capi: dict[str, Any] | None = None
+        if event_type == "checkout.session.completed":
+            try:
+                meta_capi = _send_verified_meta_purchase(event, obj)
+            except Exception as exc:
+                # Stripe retries the signed webhook. The event id is deterministic, so a
+                # delivery that succeeded before a later failure is deduped by Meta on retry.
+                raise HTTPException(status_code=503, detail="meta_capi_delivery_pending") from exc
+
         with _safebox_db_conn() as conn:
             try:
                 if checkout_subscription is None:
@@ -4971,6 +5069,8 @@ def build_safebox_app() -> FastAPI:
                                 "stripe_subscription_reconcile_pending"
                             )
                         result["subscription"] = subscription_result
+                if meta_capi is not None:
+                    result["meta_capi"] = meta_capi
             except app_payments.RetryableWebhookEvent as exc:
                 raise HTTPException(
                     status_code=503, detail="stripe_event_dependency_pending"

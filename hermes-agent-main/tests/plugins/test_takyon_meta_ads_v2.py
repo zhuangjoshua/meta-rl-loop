@@ -165,7 +165,17 @@ class _FakeSafebox:
             return {"success": True, "id": path, "status": clean_params.get("status")}
         return {"success": True}
 
-    def meta_graph_ensure_custom_conversion(self, *, ad_account_id: str, name: str, rule: str, custom_event_type: str, event_source_id: str = "", timeout=60.0) -> dict:
+    def meta_graph_ensure_custom_conversion(self, *, ad_account_id: str, name: str, rule: str,
+                                            custom_event_type: str, event_source_id: str = "",
+                                            business: str = "", site_hostname: str = "",
+                                            timeout=60.0) -> dict:
+        if str(custom_event_type).upper() == "PURCHASE":
+            rule = json.dumps({
+                "and": [
+                    {"event": {"eq": "TakyonPurchase_testonly0123456789abcdef"}},
+                    {"url": {"i_contains": f"{site_hostname}/app"}},
+                ]
+            }, sort_keys=True, separators=(",", ":"))
         self.graph_rec.custom_conversions.append(
             {
                 "token": "",
@@ -179,7 +189,8 @@ class _FakeSafebox:
         return {
             "id": "custom-conv-1", "name": name, "existed": False, "verified": True,
             "custom_event_type": str(custom_event_type).upper(),
-            "pixel_id": str(event_source_id), "rule": rule,
+            "pixel_id": str(event_source_id), "rule": rule, "capi_ready": True,
+            "purchase_event_name": "TakyonPurchase_testonly0123456789abcdef",
         }
 
 
@@ -1348,8 +1359,12 @@ def test_insights_sync_isolates_revenue_to_the_business_custom_conversion(harnes
             "custom_conversion_id": "42424242",
             "custom_event_type": "PURCHASE",
             "pixel_id": "PIX-TEST-1",
-            "rule": "{\"url\":{\"i_contains\":\"clipbook.coscale.app\"}}",
-            "url_match": "clipbook.coscale.app",
+            "rule": json.dumps({"and": [
+                {"event": {"eq": "TakyonPurchase_testonly0123456789abcdef"}},
+                {"url": {"i_contains": "clipbook.coscale.app/app"}},
+            ]}, sort_keys=True, separators=(",", ":")),
+            "url_match": "clipbook.coscale.app/app",
+            "measurement_source": "stripe_capi",
             "created_at": "2026-07-01T00:00:00+00:00",
         }).encode("utf-8"),
     )
@@ -1431,8 +1446,12 @@ def test_insights_sync_rejects_lead_attribution_record(harness):
             "status": "active",
             "business": "clipbook", "custom_conversion_id": "42424242",
             "custom_event_type": "LEAD", "pixel_id": "PIX-TEST-1",
-            "rule": "{\"url\":{\"i_contains\":\"clipbook.coscale.app\"}}",
-            "url_match": "clipbook.coscale.app",
+            "rule": json.dumps({"and": [
+                {"event": {"eq": "TakyonPurchase_testonly0123456789abcdef"}},
+                {"url": {"i_contains": "clipbook.coscale.app/app"}},
+            ]}, sort_keys=True, separators=(",", ":")),
+            "url_match": "clipbook.coscale.app/app",
+            "measurement_source": "stripe_capi",
         }).encode("utf-8"),
     )
     harness.graph.graph_forward_get_response = _GENERIC_PURCHASE_ROWS
@@ -1452,8 +1471,12 @@ def test_insights_sync_rejects_stale_pixel_attribution_record(harness):
             "status": "active",
             "business": "clipbook", "custom_conversion_id": "42424242",
             "custom_event_type": "PURCHASE", "pixel_id": "PIX-OLD-ROTATED",
-            "rule": "{\"url\":{\"i_contains\":\"clipbook.coscale.app\"}}",
-            "url_match": "clipbook.coscale.app",
+            "rule": json.dumps({"and": [
+                {"event": {"eq": "TakyonPurchase_testonly0123456789abcdef"}},
+                {"url": {"i_contains": "clipbook.coscale.app/app"}},
+            ]}, sort_keys=True, separators=(",", ":")),
+            "url_match": "clipbook.coscale.app/app",
+            "measurement_source": "stripe_capi",
         }).encode("utf-8"),
     )
     harness.graph.graph_forward_get_response = _GENERIC_PURCHASE_ROWS
@@ -1471,8 +1494,12 @@ def test_insights_sync_requests_and_surfaces_meta_attributed_revenue(harness):
             "status": "active",
             "business": "clipbook", "custom_conversion_id": "555",
             "custom_event_type": "PURCHASE", "pixel_id": "PIX-TEST-1",
-            "rule": "{\"url\":{\"i_contains\":\"clipbook.coscale.app\"}}",
-            "url_match": "clipbook.coscale.app",
+            "rule": json.dumps({"and": [
+                {"event": {"eq": "TakyonPurchase_testonly0123456789abcdef"}},
+                {"url": {"i_contains": "clipbook.coscale.app/app"}},
+            ]}, sort_keys=True, separators=(",", ":")),
+            "url_match": "clipbook.coscale.app/app",
+            "measurement_source": "stripe_capi",
         }).encode("utf-8"),
     )
     harness.graph.graph_forward_get_response = {
@@ -1574,7 +1601,8 @@ def test_pixel_ensure_purchase_conversion_activates_verified_canonical_record(ha
     assert record["pixel_id"] == "PIX-TEST-1"    # anchored to the CURRENT shared pixel
     # The rule scopes to the AUTHORITATIVE hostname (never a caller-supplied domain).
     assert "clipbook.coscale.app" in record["rule"]
-    assert record["url_match"] == "clipbook.coscale.app"
+    assert record["url_match"] == "clipbook.coscale.app/app"
+    assert record["measurement_source"] == "stripe_capi"
     # And the strict resolver accepts exactly this record.
     types, label = harness.module._business_purchase_attribution(
         harness.core._store(), "clipbook")
@@ -1614,12 +1642,17 @@ def test_pixel_ensure_purchase_without_live_instrumentation_blocks_record(harnes
     assert types is None and label == "unavailable"
 
 
-def test_pixel_ensure_rejects_cross_business_domain(harness):
+@pytest.mark.parametrize("domain", [
+    "othersaas.coscale.app",
+    "clipbook.coscale.app.evil.example",
+    "notclipbook.coscale.app",
+])
+def test_pixel_ensure_rejects_cross_business_domain(harness, domain):
     harness.set_business_mode("clipbook", "live")
     result = _result(harness.module.handle_business_meta_pixel_ensure({
         "business": "clipbook", "idempotency_key": "clipbook-pixel-xdom-v1",
         "ad_account_id": "123456", "custom_event_type": "PURCHASE",
-        "domain": "othersaas.coscale.app",
+        "domain": domain,
     }))
     assert result["success"] is False
     assert "cross-business domain rejected" in result["error"]

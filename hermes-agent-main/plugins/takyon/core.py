@@ -28190,6 +28190,21 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                         "metadata[checkout_intent_id]": intent_id,
                         "metadata[source]": "takyon_app",
                     }
+                    # Meta purchase attribution is server-only: the Safebox receives this
+                    # fixed metadata back on a Stripe-signed, live-account-proven webhook and
+                    # emits the unguessable per-business CAPI event. Browser/customer metadata
+                    # is never forwarded into these keys.
+                    meta_pixel_cfg = _meta_pixel_config()
+                    meta_pixel_id = (
+                        str(meta_pixel_cfg.get("pixel_id") or "").strip()
+                        if isinstance(meta_pixel_cfg, Mapping)
+                        else ""
+                    )
+                    meta_site_host = urllib.parse.urlparse(canonical_base).hostname or ""
+                    if meta_pixel_id and meta_site_host:
+                        params["metadata[takyon_meta_capi]"] = "1"
+                        params["metadata[takyon_meta_pixel_id]"] = meta_pixel_id
+                        params["metadata[takyon_meta_site_host]"] = meta_site_host.lower()
                     if customer_email:
                         params["customer_email"] = customer_email
                     if mode == "subscription":
