@@ -124,6 +124,78 @@ def test_publish_product_surface_writes_immutable_build_and_flips_current_pointe
     assert (current_root / "assets" / "app.css").read_text(encoding="utf-8") == "body{color:#123456}\n"
 
 
+def test_operator_surface_notes_do_not_reach_published_product_metadata(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "servicebrief0712"
+    site = business_root / "product" / "site"
+    strategy = business_root / "research" / "strategy.md"
+    site.mkdir(parents=True)
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        """# ServiceBrief
+
+## Business name
+ServiceBrief
+
+## Tagline
+Turn technician notes into customer-ready service summaries.
+""",
+        encoding="utf-8",
+    )
+    internal_note = (
+        "Final product pass must complete the HVAC service-summary workflow using real app "
+        "action and durable records wiring before publication."
+    )
+    surface = {
+        "notes": internal_note,
+        "routes": [{"path": "/"}, {"path": "/app"}],
+        "metadata": {
+            "product_display_name": "ServiceBrief",
+            "subuser_app": {
+                "app_mode": "standard_saas",
+                "subscription_style": "monthly",
+                "frontend_stack": "vite_react_ts",
+            },
+            "runtime_features": ["auth", "account", "checkout"],
+        },
+    }
+    monkeypatch.setattr(takyon_core, "_seed_warm_node_modules", lambda *_a, **_k: False)
+    takyon_core._materialize_subuser_app_kit(
+        site,
+        slug="servicebrief0712",
+        surface=surface,
+    )
+
+    dist = site / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text(
+        (site / "index.html").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    publish_root = tmp_path / "product-sites"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
+
+    result = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="servicebrief0712",
+        source_path="product/site",
+        publish_target="https://servicebrief0712.fourmanifold.com/",
+        surface=surface,
+    )
+
+    assert result["status"] == "published"
+    served_html = (publish_root / "servicebrief0712" / "current" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert internal_note not in served_html
+    assert (
+        'content="Turn technician notes into customer-ready service summaries."'
+        in served_html
+    )
+
+
 def test_publish_refuses_tree_changed_after_validation(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "snapshot"
     site = business_root / "product" / "site"

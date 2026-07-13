@@ -978,11 +978,28 @@ Turn every customer conversation into the next roadmap decision.
 def test_starter_owned_metadata_refreshes_on_rebuild(tmp_path):
     from plugins.takyon import core as takyon_core
 
-    surface = _app_shell_surface("vite_react_ts")
-    surface["notes"] = "Original metadata"
-    takyon_core._materialize_subuser_app_starter(tmp_path, slug="fresh-co", surface=surface)
+    site_root = tmp_path / "product" / "site"
+    site_root.mkdir(parents=True)
+    strategy = tmp_path / "research" / "strategy.md"
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        """# Fresh Co
 
-    (tmp_path / "index.html").write_text(
+## Business name
+Fresh Co
+
+## Tagline
+Turn messy field notes into clear customer-ready summaries.
+""",
+        encoding="utf-8",
+    )
+    surface = _app_shell_surface("vite_react_ts")
+    surface["notes"] = "Original operator implementation notes"
+    takyon_core._materialize_subuser_app_starter(
+        site_root, slug="fresh-co", surface=surface
+    )
+
+    (site_root / "index.html").write_text(
         """<!doctype html>
 <html>
   <head>
@@ -997,24 +1014,78 @@ def test_starter_owned_metadata_refreshes_on_rebuild(tmp_path):
     )
 
     refreshed_surface = _app_shell_surface("vite_react_ts")
-    refreshed_surface["notes"] = "Fresh metadata for rebuild"
+    refreshed_surface["notes"] = (
+        "Final product pass must complete real action wiring before publication."
+    )
     takyon_core._rematerialize_starter_owned_files(  # type: ignore[attr-defined]
-        tmp_path,
+        site_root,
         slug="fresh-co",
         surface=refreshed_surface,
     )
 
-    index_html = (tmp_path / "index.html").read_text(encoding="utf-8")
+    index_html = (site_root / "index.html").read_text(encoding="utf-8")
     assert "SCAFFOLD-PLACEHOLDER" not in index_html
-    assert "<title>Fresh Co</title>" in index_html
-    assert 'content="Fresh metadata for rebuild"' in index_html
+    assert "<title>Turn messy field notes into clear customer-ready summaries.</title>" in index_html
+    assert (
+        'content="Turn messy field notes into clear customer-ready summaries."'
+        in index_html
+    )
+    assert "Final product pass must complete" not in index_html
     assert "__STARTER_SITE_NAME__" not in index_html
     assert "Wrong Title" not in index_html
 
-    llms = (tmp_path / "public" / "llms.txt").read_text(encoding="utf-8")
-    assert "Fresh Co" in llms
-    assert "Fresh metadata for rebuild" in llms
+    llms = (site_root / "public" / "llms.txt").read_text(encoding="utf-8")
+    assert "Turn messy field notes into clear customer-ready summaries." in llms
+    assert "Final product pass must complete" not in llms
     assert "__STARTER_PUBLIC_ORIGIN__" not in llms
+
+
+def test_operator_surface_notes_never_enter_public_appkit_materialization(
+    tmp_path, monkeypatch
+):
+    from plugins.takyon import core as takyon_core
+
+    business_root = tmp_path / "businesses" / "servicebrief0712"
+    site_root = business_root / "product" / "site"
+    strategy = business_root / "research" / "strategy.md"
+    site_root.mkdir(parents=True)
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        """# ServiceBrief
+
+## Business name
+ServiceBrief
+
+## Tagline
+Turn technician notes into customer-ready service summaries.
+""",
+        encoding="utf-8",
+    )
+    internal_note = (
+        "Final product pass must complete the HVAC service-summary workflow using real app "
+        "action and durable records wiring before publication."
+    )
+    surface = _app_shell_surface("vite_react_ts")
+    surface["notes"] = internal_note
+    surface["metadata"]["product_display_name"] = "ServiceBrief"
+    monkeypatch.setattr(takyon_core, "_seed_warm_node_modules", lambda *_a, **_k: False)
+
+    takyon_core._materialize_subuser_app_kit(
+        site_root,
+        slug="servicebrief0712",
+        surface=surface,
+    )
+
+    index_html = (site_root / "index.html").read_text(encoding="utf-8")
+    llms = (site_root / "public" / "llms.txt").read_text(encoding="utf-8")
+    public_context = (site_root / "_takyon" / "surface-context.js").read_text(
+        encoding="utf-8"
+    )
+    for public_text in (index_html, llms, public_context):
+        assert internal_note not in public_text
+    assert 'content="Turn technician notes into customer-ready service summaries."' in index_html
+    assert "Turn technician notes into customer-ready service summaries." in llms
+    assert '"notes"' not in public_context
 
 
 def test_starter_metadata_never_promotes_transient_auth_failure_to_seo_copy(tmp_path):

@@ -3076,7 +3076,9 @@ def _subuser_surface_context_payload(
         "routes": routes,
         "publishTarget": _product_publish_target(slug, (surface or {}).get("publish_target") if isinstance(surface, dict) else None),
         "publicUrl": str((surface or {}).get("public_url") or ""),
-        "notes": str((surface or {}).get("notes") or ""),
+        # ``surface.notes`` is operator-only implementation context. It is deliberately absent
+        # from this public, client-bundled payload; customer copy comes from the explicit display
+        # name plus the strategy/hero/landing sources below, never from operator instructions.
         # Free deterministic brand mark so the product UI can render a monogram/accent
         # without a paid logo call. business_generate_logo (credit-gated) publishes a real logo PNG
         # into public/, and ``brandLogoUrl`` below then makes the UI prefer it over this monogram.
@@ -3645,10 +3647,11 @@ def _subuser_app_starter_strings(
     # docs routinely open with "<slug> helps ..."), recapitalize, and bound to one title-length
     # sentence clause. Only if nothing salvageable remains does the humanized slug fallback apply.
     title = _sanitize_starter_title(title, slug=slug)
-    description_from_surface_notes = bool(str((surface or {}).get("notes") or "").strip())
-    description = str((surface or {}).get("notes") or "").strip()
-    if not description:
-        description = _starter_strategy_first_line(strategy_sections.get("tagline") or "")
+    # ``surface.notes`` is an operator-only implementation field, not public marketing copy.
+    # Keep customer metadata provenance allowlisted to the strategy brief and worker-authored
+    # hero/landing copy so an instruction such as "final pass must..." can never reach SEO,
+    # social metadata, llms.txt, or the browser bundle merely because it was useful to operators.
+    description = _starter_strategy_first_line(strategy_sections.get("tagline") or "")
     if not description:
         description = _starter_strategy_first_line(strategy_sections.get("core value proposition") or "")
     if not description:
@@ -3660,7 +3663,7 @@ def _subuser_app_starter_strings(
     # bare slug as the title when real copy exists: derive the title from the first sentence of
     # that description. Runs before the generic "Get started with ..." description fallback so we
     # only borrow genuine value-prop copy, never the boilerplate.
-    if _starter_title_is_generic(title, slug=slug) and description and not description_from_surface_notes:
+    if _starter_title_is_generic(title, slug=slug) and description:
         first_sentence = re.split(r"(?<=[.!?])\s", description, maxsplit=1)[0].strip()
         salvaged = _sanitize_starter_title(first_sentence or description, slug=slug)
         if not _starter_title_is_generic(salvaged, slug=slug):
@@ -38766,7 +38769,10 @@ TAKYON_TOOL_DEFINITIONS = [
                 "tone": {"type": "string", "enum": ["default", "poke"], "description": "Voice preset for the customer-facing product chat/assistant (the generate rail), NOT the operator CEO shell. 'default' is neutral; 'poke' is short, warm, lightly playful, no corporate hedging, always ends on a proactive next step. Recorded on the surface contract and injected into the product-build worker so the generated product assistant speaks in this voice. Omit to keep the current selection (defaults to 'default')."},
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.coscale.app/"},
-                "notes": {"type": "string"},
+                "notes": {
+                    "type": "string",
+                    "description": "Operator-only implementation context; never published as customer metadata or client surface context.",
+                },
                 "metadata": {"type": "object"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
