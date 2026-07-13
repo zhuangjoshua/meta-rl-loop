@@ -406,6 +406,15 @@ class WorkerPool:
                 except _cs.LocalReleaseIdentityError as exc:
                     _stop_invalid_release(exc)
                     break
+                except _cs.LocalReleaseIdentityUnavailable as exc:
+                    # Verification timeout/unavailability is not evidence that code changed. Do
+                    # not renew the pool lease or claim new work until the next successful check,
+                    # but keep the process and every already-running handler alive.
+                    _log.warning(
+                        "worker[%s]: release identity check unavailable; retrying next heartbeat: %s",
+                        worker_id,
+                        exc,
+                    )
                 except Exception as exc:  # noqa: BLE001 — transient DB outage must not kill the pool
                     _log.warning("worker[%s]: pool heartbeat failed: %s", worker_id, exc)
             # Stop requested: mark draining (in-flight work finishes; reservations held).
@@ -498,6 +507,14 @@ class WorkerPool:
                     total_drained += counts["drained"]
                 except _cs.LocalReleaseIdentityError as exc:
                     _stop_invalid_release(exc)
+                except _cs.LocalReleaseIdentityUnavailable as exc:
+                    # Fail closed for new claims without converting a transient verifier timeout
+                    # into a process death that abandons an in-flight product writer.
+                    _log.warning(
+                        "worker[%s]: release identity check unavailable; skipping claim tick: %s",
+                        thread_worker_id,
+                        exc,
+                    )
                 except Exception as exc:  # noqa: BLE001 — a tick failure must not crash the daemon
                     _log.exception("worker[%s]: tick failed: %s", thread_worker_id, exc)
                 finally:

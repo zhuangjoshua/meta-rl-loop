@@ -119,6 +119,16 @@ def test_after_lease_spills_to_anyone_after_window(pg_conn):
     assert got is not None and got.id == j.id
 
 
+def test_after_lease_spills_immediately_when_reserved_pool_is_dead(pg_conn):
+    slug = _provision_direct(pg_conn)
+    j = _enq(pg_conn, slug, _AFTER)
+    cs.decommission_pool(pg_conn, _A)
+
+    got = jobs.claim_one(pg_conn, worker_id=f"{_B}-1", kinds=["ceo_wake"], claim_pool_id=_B)
+
+    assert got is not None and got.id == j.id
+
+
 def test_unreserved_job_claimable_by_any_pool(pg_conn):
     slug = _provision_direct(pg_conn)
     j = _enq(pg_conn, slug, None)
@@ -296,6 +306,74 @@ def test_requeue_stale_renews_after_lease_window(pg_conn):
         "select status, reservation_expires_at > now() from jobs where id = %s", (j.id,)
     ).fetchone()
     assert row[0] == "queued" and row[1] is True
+
+
+def test_requeue_stale_recovers_dead_pool_claim_after_job_heartbeat_grace(pg_conn):
+    slug = _provision_direct(pg_conn)
+    j = _enq(pg_conn, slug, _AFTER, max_attempts=3)
+    got = jobs.claim_one(pg_conn, worker_id=f"{_A}-1", kinds=["ceo_wake"], claim_pool_id=_A)
+    assert got is not None
+    pg_conn.execute(
+        "update worker_pools set lease_expires_at = now() - interval '1 second' "
+        "where pool_id = %s",
+        (_A,),
+    )
+    pg_conn.execute(
+        "update jobs set locked_at = now() - interval '61 seconds' where id = %s",
+        (j.id,),
+    )
+
+    assert jobs.requeue_stale(pg_conn, older_than_seconds=900) >= 1
+    recovered = jobs.get_job(pg_conn, j.id)
+    assert recovered is not None and recovered.status == "queued"
+    claimed = jobs.claim_one(
+        pg_conn,
+        worker_id=f"{_B}-1",
+        kinds=["ceo_wake"],
+        claim_pool_id=_B,
+    )
+    assert claimed is not None and claimed.id == j.id
+
+
+def test_requeue_stale_does_not_reap_dead_pool_claim_with_fresh_job_heartbeat(pg_conn):
+    slug = _provision_direct(pg_conn)
+    j = _enq(pg_conn, slug, _AFTER, max_attempts=3)
+    got = jobs.claim_one(pg_conn, worker_id=f"{_A}-1", kinds=["ceo_wake"], claim_pool_id=_A)
+    assert got is not None
+    pg_conn.execute(
+        "update worker_pools set lease_expires_at = now() - interval '1 second' "
+        "where pool_id = %s",
+        (_A,),
+    )
+    pg_conn.execute(
+        "update jobs set locked_at = now() - interval '30 seconds' where id = %s",
+        (j.id,),
+    )
+
+    assert jobs.requeue_stale(pg_conn, older_than_seconds=900) == 0
+    still_running = jobs.get_job(pg_conn, j.id)
+    assert still_running is not None and still_running.status == "running"
+
+
+def test_requeue_stale_blocks_dead_pool_claim_at_max_attempts(pg_conn):
+    slug = _provision_direct(pg_conn)
+    j = _enq(pg_conn, slug, _AFTER, max_attempts=1)
+    got = jobs.claim_one(pg_conn, worker_id=f"{_A}-1", kinds=["ceo_wake"], claim_pool_id=_A)
+    assert got is not None and got.attempts == 1
+    pg_conn.execute(
+        "update worker_pools set lease_expires_at = now() - interval '1 second' "
+        "where pool_id = %s",
+        (_A,),
+    )
+    pg_conn.execute(
+        "update jobs set locked_at = now() - interval '61 seconds' where id = %s",
+        (j.id,),
+    )
+
+    assert jobs.requeue_stale(pg_conn, older_than_seconds=900) >= 1
+    blocked = jobs.get_job(pg_conn, j.id)
+    assert blocked is not None and blocked.status == "blocked"
+    assert blocked.error == {"reason": "stalled_max_attempts"}
 
 
 # ── pool registry lifecycle ──────────────────────────────────────────────────────────────

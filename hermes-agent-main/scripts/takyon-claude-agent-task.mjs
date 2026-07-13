@@ -716,10 +716,31 @@ function progressEventFromSdkMessage(message) {
     return detail ? { kind: "claude_agent_sdk", status: "output", detail, line: detail } : null;
   }
   if (record.type === "system" && record.subtype === "api_retry") {
-    const detail = compactText(`Claude API retry ${Number(record.attempt || 0)}/${Number(record.max_retries || 0)} in ${Number(record.retry_delay_ms || 0)}ms.`);
+    const status = Number.isInteger(record.error_status)
+      ? `HTTP ${record.error_status}`
+      : "connection error";
+    const reason = compactText(record.error || "unknown", 80) || "unknown";
+    const detail = compactText(
+      `Claude API retry ${Number(record.attempt || 0)}/${Number(record.max_retries || 0)} ` +
+      `in ${Number(record.retry_delay_ms || 0)}ms: ${reason} (${status}).`
+    );
     return detail ? { kind: "claude_agent_sdk", status: "output", detail, line: detail } : null;
   }
   return null;
+}
+
+function apiRetryFailureFromSdkMessage(message) {
+  const record = message && typeof message === "object" ? message : null;
+  if (!record || record.type !== "system" || record.subtype !== "api_retry") return "";
+  const status = Number.isInteger(record.error_status)
+    ? `HTTP ${record.error_status}`
+    : "connection error";
+  const reason = compactText(record.error || "unknown", 80) || "unknown";
+  return compactText(
+    `Claude API retry refused by fail-fast policy on attempt ${Number(record.attempt || 0)}/` +
+    `${Number(record.max_retries || 0)}: ${reason} (${status})`,
+    320
+  );
 }
 
 let lastProgressSignature = "";
@@ -854,6 +875,7 @@ async function main() {
   const pathToClaudeCodeExecutable = String(process.env.TAKYON_CLAUDE_CODE_EXECUTABLE || "").trim();
   const inDockerWorker = String(process.env.TAKYON_CLAUDE_AGENT_IN_DOCKER || "").trim() === "1";
   const siteImageBridgeDir = String(input.siteImageBridgeDir || "").trim();
+  const failOnApiRetry = input.failOnApiRetry === true;
   const siteImageMcpServer = createSiteImageMcpServer({
     createSdkMcpServer,
     tool,
@@ -967,6 +989,11 @@ async function main() {
           }
     })) {
       emitProgress(progressEventFromSdkMessage(message));
+      const apiRetryFailure = failOnApiRetry ? apiRetryFailureFromSdkMessage(message) : "";
+      if (apiRetryFailure) {
+        abortController.abort();
+        throw new Error(apiRetryFailure);
+      }
       const chunk = textFromSdkMessage(message);
       if (chunk) text += `${chunk}\n`;
       if (message && typeof message === "object" && message.type === "result") {
@@ -1005,6 +1032,7 @@ async function main() {
 }
 
 export {
+  apiRetryFailureFromSdkMessage,
   buildPrompt,
   progressEventFromSdkMessage,
   renderTasteLandingPreflight,

@@ -429,9 +429,16 @@ def test_node_worker_has_no_independent_timeout_clock():
         / "takyon-claude-agent-task.mjs"
     ).read_text(encoding="utf-8")
 
-    assert "setTimeout(() =>" not in script
+    main_body = script.split("async function main()", 1)[1].split("\nexport {", 1)[0]
+    assert "setTimeout(" not in main_body
     assert 'process.once("SIGTERM", requestParentAbort)' in script
     assert "abortController.abort()" in script
+
+
+def test_every_business_claude_worker_fails_on_first_sdk_retry():
+    source = Path(core.__file__).read_text(encoding="utf-8")
+
+    assert '"failOnApiRetry": True' in source
 
 
 def _clean_git_runtime(tmp_path: Path) -> tuple[Path, str]:
@@ -475,6 +482,25 @@ def test_runtime_release_sha_rejects_modified_worktree(tmp_path, monkeypatch, di
         (root / "new-runtime.py").write_text("VALUE = 2\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="modified runtime worktree"):
+        _REAL_RUNTIME_RELEASE_SHA(runtime_root=root)
+
+
+def test_runtime_release_sha_timeout_is_unavailable_not_invalid(tmp_path, monkeypatch):
+    root, sha = _clean_git_runtime(tmp_path)
+    monkeypatch.setenv(claim_scope.RUNTIME_RELEASE_SHA_ENV, sha)
+    real_run = subprocess.run
+
+    def timeout_status(command, *args, **kwargs):
+        if "status" in command:
+            raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 10))
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(claim_scope.subprocess, "run", timeout_status)
+
+    with pytest.raises(
+        claim_scope.LocalReleaseIdentityUnavailable,
+        match="timed out verifying runtime worktree cleanliness",
+    ):
         _REAL_RUNTIME_RELEASE_SHA(runtime_root=root)
 
 

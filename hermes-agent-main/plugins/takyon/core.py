@@ -36915,6 +36915,11 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                 "maxTurns": max_turns,
                 "timeoutMs": timeout_ms,
                 "maxBudgetUsd": budget_usd,
+                # A business coding task is a bounded acceptance pass, not an opaque background
+                # retry loop. The SDK exposes its first retry as a structured event; fail there
+                # with the exact sanitized status/reason instead of spending minutes on ten retries.
+                # This applies to every business worker lane, not one product or guidance skill.
+                "failOnApiRetry": True,
                 "allowBash": bool(
                     _workspace_needs_runtime_ui_contract(workspace_rel)
                     or _workspace_needs_customer_ai_copy_contract(workspace_rel)

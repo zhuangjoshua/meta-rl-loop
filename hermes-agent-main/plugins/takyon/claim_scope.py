@@ -62,6 +62,14 @@ class LocalReleaseIdentityError(RuntimeError):
     """The process can no longer prove its advertised release identity."""
 
 
+class LocalReleaseIdentityUnavailable(RuntimeError):
+    """Release verification could not finish; this is not proof that the identity changed.
+
+    Callers must fail closed for new claims while this condition persists, but must not kill an
+    already-running handler. The next heartbeat/tick retries the verification.
+    """
+
+
 def _valid_release_sha(value: object) -> str:
     normalized = str(value or "").strip().lower()
     if len(normalized) != 40 or any(ch not in "0123456789abcdef" for ch in normalized):
@@ -120,6 +128,10 @@ def runtime_release_sha(*, runtime_root: str | os.PathLike[str] | None = None) -
             timeout=5,
             check=False,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise LocalReleaseIdentityUnavailable(
+            f"timed out verifying runtime release SHA from {root}"
+        ) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise LocalReleaseIdentityError(f"cannot resolve runtime release SHA: {exc}") from exc
     git_sha = _valid_release_sha(resolved.stdout if resolved.returncode == 0 else "")
@@ -134,6 +146,10 @@ def runtime_release_sha(*, runtime_root: str | os.PathLike[str] | None = None) -
             timeout=10,
             check=False,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise LocalReleaseIdentityUnavailable(
+            f"timed out verifying runtime worktree cleanliness at {root}"
+        ) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise LocalReleaseIdentityError(
             f"cannot verify runtime worktree cleanliness: {exc}"

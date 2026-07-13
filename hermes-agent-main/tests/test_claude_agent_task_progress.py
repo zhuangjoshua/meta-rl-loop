@@ -14,7 +14,7 @@ def _run_module(expression: str):
     if not node:
         pytest.skip("node is unavailable")
     source = f"""
-import {{ buildPrompt, progressEventFromSdkMessage as progress }} from {json.dumps(SCRIPT.as_uri())};
+import {{ apiRetryFailureFromSdkMessage as retryFailure, buildPrompt, progressEventFromSdkMessage as progress }} from {json.dumps(SCRIPT.as_uri())};
 {expression}
 """
     proc = subprocess.run(
@@ -91,3 +91,33 @@ console.log(JSON.stringify(buildPrompt({
     assert "begin with targeted file inspection, then implement immediately" in prompt
     assert "Do not narrate design exploration" in prompt
     assert "Keep private reasoning private" in prompt
+
+
+def test_api_retry_progress_preserves_sanitized_status_and_reason():
+    result = _run_module(
+        """
+const message = { type: "system", subtype: "api_retry", attempt: 1, max_retries: 10,
+  retry_delay_ms: 508, error_status: 529, error: "server_error" };
+console.log(JSON.stringify({ progress: progress(message), failure: retryFailure(message) }));
+"""
+    )
+
+    assert result["progress"]["line"] == (
+        "Claude API retry 1/10 in 508ms: server_error (HTTP 529)."
+    )
+    assert result["failure"] == (
+        "Claude API retry refused by fail-fast policy on attempt 1/10: "
+        "server_error (HTTP 529)"
+    )
+
+
+def test_api_retry_without_http_status_is_labeled_connection_error():
+    result = _run_module(
+        """
+const message = { type: "system", subtype: "api_retry", attempt: 1, max_retries: 10,
+  retry_delay_ms: 500, error_status: null, error: "unknown" };
+console.log(JSON.stringify(retryFailure(message)));
+"""
+    )
+
+    assert result.endswith("unknown (connection error)")

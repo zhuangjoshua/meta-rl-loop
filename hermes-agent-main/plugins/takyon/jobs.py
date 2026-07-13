@@ -117,7 +117,9 @@ def job_lane(kind: str) -> str:
 # GONE — 'after_lease' reproduces exactly that first-claim-then-spill behavior as a config value,
 # and 'strict' pins the job to the owning pool while that pool's registry lease is alive (spilling,
 # not stranding, when the pool dies). Requeues renew the after_lease window off updated_at so a
-# healthy local retry does not immediately spill to a sibling machine (commit f899da41's contract).
+# healthy local retry does not immediately spill to a sibling machine (commit f899da41's contract),
+# but a dead/missing pool always spills immediately under either reserved policy. Pool liveness is
+# release-bound: a restarted pool advertising different code cannot keep an old-release job pinned.
 _RESERVATION_GATE_SQL = (
     "and ("
     "  j.reserved_pool_id is null "
@@ -125,13 +127,21 @@ _RESERVATION_GATE_SQL = (
     "  or (j.reservation_policy = 'after_lease' "
     "      and j.reservation_expires_at is not null "
     "      and j.reservation_expires_at <= now()) "
-    "  or (j.reservation_policy = 'strict' and not exists ("
+    "  or (j.reservation_policy in ('strict', 'after_lease') and not exists ("
     "        select 1 from worker_pools p "
     "        where p.pool_id = j.reserved_pool_id "
+    "          and p.release_sha = j.required_release_sha "
     "          and p.status in ('joining', 'active', 'draining') "
     "          and p.lease_expires_at > now())) "
     ") "
 )
+
+# A registered pool heartbeats every <=75s under the default 300s lease, while an active job
+# heartbeats its own locked_at every 15s. Once the pool lease is dead, a lock that has also been
+# quiet for this additional grace is an orphaned process claim and can be recovered without waiting
+# for the conservative 900s legacy/poolless stale threshold. A live handler cannot be stolen merely
+# because the pool registry heartbeat blipped: its job heartbeat keeps locked_at fresh.
+_ORPHANED_POOL_CLAIM_GRACE_SECONDS = 60
 _RESERVED_FOR_ME_ORDER_SQL = "case when j.reserved_pool_id = %s then 0 else 1 end, "
 _RENEW_AFTER_LEASE_SQL = (
     "reservation_expires_at = case "
@@ -993,26 +1003,50 @@ def requeue_stale(conn, *, older_than_seconds: int = 900, worker_id: str = "reap
         "jsonb_build_object('task_kind', 'ceo_bootstrap', 'run_id', jobs.id, "
         "'attempt', jobs.attempts)))"
     )
+    stale_claim_gate = (
+        " and ("
+        "locked_at < now() - make_interval(secs => %s) "
+        "or (claimed_pool_id is not null and claimed_release_sha is not null "
+        "and locked_at < now() - make_interval(secs => %s) "
+        "and not exists ("
+        "select 1 from worker_pools pool "
+        "where pool.pool_id = jobs.claimed_pool_id "
+        "and pool.release_sha = jobs.claimed_release_sha "
+        "and pool.status in ('joining', 'active', 'draining') "
+        "and pool.lease_expires_at > now()"
+        "))"
+        ")"
+    )
+    stale_params: tuple[Any, ...] = (
+        older_than_seconds,
+        _ORPHANED_POOL_CLAIM_GRACE_SECONDS,
+    )
     with conn.transaction():
         requeued = conn.execute(
             "update jobs set status = 'queued', locked_by = null, locked_at = null, "
             "claimed_release_sha = null, claimed_pool_id = null, updated_at = now(), "
             f"{_RENEW_AFTER_LEASE_SQL} "
-            "where status = 'running' and locked_at < now() - make_interval(secs => %s) "
-            "and attempts < max_attempts"
+            "where status = 'running'"
+            + stale_claim_gate
+            + " and attempts < max_attempts"
             + local_guard
             + delegated_child_guard,
-            (older_than_seconds, *local_params),
+            (*stale_params, *local_params),
         ).rowcount
         blocked = conn.execute(
             "update jobs set status = 'blocked', "
             "error = %s::jsonb, locked_by = null, locked_at = null, "
             "claimed_release_sha = null, claimed_pool_id = null, updated_at = now() "
-            "where status = 'running' and locked_at < now() - make_interval(secs => %s) "
-            "and attempts >= max_attempts"
+            "where status = 'running'"
+            + stale_claim_gate
+            + " and attempts >= max_attempts"
             + local_guard
             + delegated_child_guard,
-            (json.dumps({"reason": "stalled_max_attempts"}), older_than_seconds, *local_params),
+            (
+                json.dumps({"reason": "stalled_max_attempts"}),
+                *stale_params,
+                *local_params,
+            ),
         ).rowcount
     return int(requeued) + int(blocked)
 
