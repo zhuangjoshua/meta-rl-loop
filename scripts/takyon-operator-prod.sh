@@ -1515,11 +1515,20 @@ require_docker_for_worker() {
     docker build --tag "$worker_image" - < "$worker_dockerfile" \
       || die "failed to build tracked Claude worker image: $worker_image"
   fi
-  # Prove the exact image selected for product work, including operator overrides. The renderer
-  # invokes this absolute Chromium path, so a generic Node image is not an acceptable substitute.
-  if ! docker run --rm --entrypoint /bin/sh "$worker_image" -lc \
-    'command -v agent-browser >/dev/null && test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null'; then
-    die "Claude worker image lacks the Chromium visual-preflight rail: $worker_image"
+  # Prove the exact image selected for product work, including operator overrides. Node is a hard
+  # worker dependency; Chromium is an optional visual aid and must never block worker startup.
+  local worker_image_id
+  worker_image_id="$(docker image inspect --format '{{.Id}}' "$worker_image" 2>/dev/null)" \
+    || die "Claude worker image is unavailable: $worker_image"
+  [[ -n "$worker_image_id" ]] || die "Claude worker image has no Docker identity: $worker_image"
+  if ! docker run --rm --entrypoint node "$worker_image" --version >/dev/null; then
+    die "Claude worker image cannot run Node: $worker_image ($worker_image_id)"
+  fi
+  if docker run --rm --entrypoint /bin/sh "$worker_image" -lc \
+    'test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null' >/dev/null 2>&1; then
+    echo "Optional Chromium renderer available in Claude worker image: $worker_image" >&2
+  else
+    echo "Optional Chromium renderer unavailable; Claude worker will continue without rendered inspection." >&2
   fi
   # One validated image owns both the dedicated product-worker variable and the legacy terminal
   # fallback inherited by older/nested launch paths. This prevents preflighting one image and
@@ -1533,6 +1542,16 @@ require_docker_for_worker() {
     -c 'test -d /takyon-runtime/agent && test -d /takyon-runtime/plugins/takyon' \
     >/dev/null 2>&1; then
     die "Docker cannot bind-mount the runtime checkout at $RUNTIME_DIR; move or create the checkout under a Docker Desktop shared path (normally /Users/...) before starting the production worker"
+  fi
+  if ! docker run --rm \
+    --entrypoint node \
+    --mount "type=bind,src=$RUNTIME_DIR,dst=/takyon-runtime,readonly" \
+    --workdir /takyon-runtime \
+    "$worker_image" \
+    --input-type=module \
+    -e 'await import("@anthropic-ai/claude-agent-sdk"); const { validateNativeTasteSkill } = await import("./scripts/takyon-claude-agent-task.mjs"); await validateNativeTasteSkill();' \
+    >/dev/null 2>&1; then
+    die "Claude worker runtime is missing the Agent SDK or pinned native Taste skill: $RUNTIME_DIR"
   fi
 }
 

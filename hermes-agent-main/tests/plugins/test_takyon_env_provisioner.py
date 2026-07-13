@@ -1373,6 +1373,12 @@ def test_dev_deploy_stages_every_host_then_migrates_before_any_restart():
     assert "TAKYON_ENV=dev" in source
     assert "/opt/takyon/hermes-agent-main/takyon migrate" in source
     assert "if not declared_operator_ip" in source
+    assert "docker image inspect takyon/claude-worker:node20-chromium-v1" in source
+    assert "--entrypoint node" in source
+    assert "@anthropic-ai/claude-agent-sdk" in source
+    assert "validateNativeTasteSkill" in source
+    assert "unavailable (optional)" in source
+    assert "agent-browser" not in source
 
 
 def test_takyon_env_restart_subcommand_registered():

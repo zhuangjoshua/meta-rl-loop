@@ -479,7 +479,12 @@ def test_prod_worker_preflight_proves_runtime_checkout_is_docker_bindable():
     assert "move or create the checkout under a Docker Desktop shared path" in preflight
     assert 'export TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="$worker_image"' in preflight
     assert 'export TERMINAL_DOCKER_IMAGE="$worker_image"' in preflight
-    assert "test -x /usr/bin/chromium" in preflight
+    assert "docker image inspect --format '{{.Id}}'" in preflight
+    assert "--entrypoint node" in preflight
+    assert "@anthropic-ai/claude-agent-sdk" in preflight
+    assert "validateNativeTasteSkill" in preflight
+    assert "Optional Chromium renderer unavailable" in preflight
+    assert "agent-browser" not in preflight
 
 
 def test_prod_worker_preflight_propagates_one_validated_image_to_every_launcher(tmp_path):
@@ -493,6 +498,8 @@ def test_prod_worker_preflight_propagates_one_validated_image_to_every_launcher(
     fake_docker.write_text(
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >>\"$DOCKER_LOG\"\n"
+        "if [ \"${1:-}\" = image ] && [ \"${2:-}\" = inspect ]; then printf 'sha256:test-worker-image\\n'; fi\n"
+        "case \"$*\" in */usr/bin/chromium*) exit 127 ;; esac\n"
         "exit 0\n",
         encoding="utf-8",
     )
@@ -533,6 +540,7 @@ def test_prod_worker_preflight_propagates_one_validated_image_to_every_launcher(
     )
 
     assert result.returncode == 0, result.stderr
+    assert "Optional Chromium renderer unavailable" in result.stderr
     tracked = "takyon/claude-worker:node20-chromium-v1"
     assert result.stdout.splitlines() == [tracked, tracked]
     docker_log = (tmp_path / "docker.log").read_text(encoding="utf-8")
@@ -551,6 +559,7 @@ def test_docker_unshared_checkout_fails_before_worker_start(tmp_path):
     fake_docker.write_text(
         "#!/bin/sh\n"
         "if [ \"${1:-}\" = version ]; then exit 0; fi\n"
+        "if [ \"${1:-}\" = image ] && [ \"${2:-}\" = inspect ]; then printf 'sha256:test-worker-image\\n'; exit 0; fi\n"
         "if [ \"${1:-}\" = run ]; then\n"
         "  case \"$*\" in *takyon-runtime*) exit 125 ;; *) exit 0 ;; esac\n"
         "fi\n"

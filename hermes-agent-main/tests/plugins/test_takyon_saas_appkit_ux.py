@@ -256,19 +256,21 @@ def test_taste_skill_is_byte_exact_pinned_upstream_implementation():
     assert "byte-identical" in provenance
 
 
-def test_taste_landing_worker_has_real_desktop_and_mobile_render_preflight():
+def test_taste_landing_worker_has_optional_images_without_browser_precondition():
     source = Path(takyon_core.__file__).read_text(encoding="utf-8")
     prompt = turn_runtime._business_bootstrap_instruction(
         "native-taste-preflight", "Build a polished SaaS", "live", archetype="web_saas"
     )
     assert "TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT" not in source
     assert "native `design-taste-frontend` skill" in prompt
-    assert "bounded rendered-viewport preflight" in prompt
+    assert "Safebox-gated image generation is available" in prompt
+    assert "images, DESIGN.md, screenshots, and visual audits are optional" in prompt
+    assert "bounded rendered-viewport preflight" not in prompt
     dockerfile = (
         HERMES_ROOT.parent / "deploy" / "argon-alpha-14" / "takyon-claude-worker.Dockerfile"
     ).read_text(encoding="utf-8")
-    assert "chromium" in dockerfile
-    assert "agent-browser@0.26.0" in dockerfile
+    assert "apt-get install" not in dockerfile
+    assert "agent-browser@0.26.0" not in dockerfile
 
 
 def test_taste_render_scratch_cleanup_never_follows_symlinks(tmp_path):
@@ -296,8 +298,9 @@ def test_product_owner_and_design_command_use_native_taste_for_every_worker():
         assert "every Agent SDK session" in text
         assert "guidance_skills" in text
         assert "DESIGN.md" in text
-        assert "1440x900" in text
-        assert "390x844" in text
+        assert "not publication conditions" in text
+        assert "1440x900" not in text
+        assert "390x844" not in text
 
     assert 'guidance_skills: ["taste-frontend"]' not in product
     assert "guidance_skills: []" not in product

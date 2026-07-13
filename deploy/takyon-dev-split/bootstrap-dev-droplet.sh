@@ -105,7 +105,14 @@ if [[ "$ROLE" == "operator" ]]; then
   else
     "${SSH[@]}" "docker image inspect '$DOCKER_IMAGE' >/dev/null 2>&1 || docker pull '$DOCKER_IMAGE'"
   fi
-  "${SSH[@]}" "docker run --rm '$DOCKER_IMAGE' sh -lc 'agent-browser --version && chromium --version'"
+  "${SSH[@]}" "set -euo pipefail
+    docker image inspect '$DOCKER_IMAGE' >/dev/null
+    docker run --rm --entrypoint node '$DOCKER_IMAGE' --version >/dev/null
+    if docker run --rm --entrypoint /bin/sh '$DOCKER_IMAGE' -lc 'test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null' >/dev/null 2>&1; then
+      echo 'optional Claude worker Chromium renderer available'
+    else
+      echo 'optional Claude worker Chromium renderer unavailable; continuing'
+    fi"
 fi
 
 echo "→ [$NODE_NAME] rsync runtime tree"
@@ -115,6 +122,16 @@ COPYFILE_DISABLE=1 rsync -rt --no-perms --no-owner --no-group --checksum --delet
   --exclude='.env' --exclude='secrets' --exclude='logs' --exclude='tmp' \
   -e "ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
   "$TREE/" "root@$HOST:/opt/takyon/hermes-agent-main/"
+
+if [[ "$ROLE" == "operator" ]]; then
+  "${SSH[@]}" "docker run --rm \
+    --entrypoint node \
+    --mount type=bind,src=/opt/takyon/hermes-agent-main,dst=/takyon-runtime,readonly \
+    --workdir /takyon-runtime \
+    '$DOCKER_IMAGE' \
+    --input-type=module \
+    -e 'import fs from \"node:fs\"; const pkg = JSON.parse(fs.readFileSync(\"package.json\", \"utf8\")); const lock = JSON.parse(fs.readFileSync(\"package-lock.json\", \"utf8\")); const sdk = \"@anthropic-ai/claude-agent-sdk\"; if (!pkg.dependencies?.[sdk] || !lock.packages?.[\`node_modules/\${sdk}\`]) throw new Error(\"Agent SDK dependency is not pinned\"); const { validateNativeTasteSkill } = await import(\"./scripts/takyon-claude-agent-task.mjs\"); await validateNativeTasteSkill();' >/dev/null"
+fi
 
 # The dashboard web dist is a BUILT artifact shipped inside the prod tree (the unit starts with
 # --skip-build). A fresh worktree does not contain it; source it from TAKYON_WEB_DIST (default:

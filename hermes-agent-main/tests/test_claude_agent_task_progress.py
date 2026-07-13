@@ -831,7 +831,7 @@ def test_real_sdk_first_api_retry_aborts_after_one_model_request_with_receipt(tm
     assert receipt["usage"] == result["usage"]
 
 
-def test_taste_visual_preflight_is_single_use_even_when_first_render_fails():
+def test_taste_mcp_exposes_optional_image_only():
     result = _run_module(
         """
 const scalar = {
@@ -852,33 +852,22 @@ const z = {
   array: () => ({ ...scalar }),
 };
 const tool = (name, _description, _schema, handler) => ({ name, handler });
-let renderCalls = 0;
 const server = createPreflightServer({
   createSdkMcpServer: (config) => config,
   tool,
   z,
   bridgeDir: "/bridge",
   cwd: "/workspace",
-  publicationContract: { canonicalPreflightIds: ["one"] },
-  renderLandingPreflight: async () => {
-    renderCalls += 1;
-    throw new Error("Chromium missing");
-  },
 });
-const renderTool = server.tools.find((item) => item.name === "business_render_landing_preflight");
-const first = await renderTool.handler({});
-const second = await renderTool.handler({});
-console.log(JSON.stringify({ renderCalls, first, second }));
+console.log(JSON.stringify({
+  names: server.tools.map((item) => item.name),
+  instructions: server.instructions,
+}));
 """
     )
 
-    assert result["renderCalls"] == 1
-    assert result["first"]["isError"] is True
-    assert result["first"]["content"][0]["text"] == "Chromium missing"
-    assert result["second"]["isError"] is True
-    assert result["second"]["content"][0]["text"] == (
-        "Taste landing render preflight is single-use (cap: 1 call)"
-    )
+    assert result["names"] == ["business_generate_site_image"]
+    assert "optional creative tool" in result["instructions"]
 
 
 def test_taste_publication_contract_is_loaded_from_python_source_of_truth():

@@ -2559,7 +2559,7 @@ def test_taste_success_without_publication_receipt_blocks_before_publish(tmp_pat
     assert len(process_calls) == 1
 
 
-def test_taste_timeout_without_design_contract_stops_parent_for_human_review(
+def test_taste_timeout_without_design_contract_can_publish_build_clean_partial(
     tmp_path,
     monkeypatch,
 ):
@@ -2610,7 +2610,18 @@ def test_taste_timeout_without_design_contract_stops_parent_for_human_review(
     monkeypatch.setattr(
         takyon_core,
         "_finalize_product_surface_refresh",
-        lambda **_kwargs: pytest.fail("invalid timed-out Taste contract must block before publish"),
+        lambda **_kwargs: {
+            "status": "passed",
+            "source_path": "product/site",
+            "receipt_path": "metrics/receipts/product-surface/taste-timeout.json",
+            "runtime_features": [],
+            "inventory": {},
+            "publish": {
+                "status": "published",
+                "public_url": "https://latexflow.coscale.app/",
+            },
+            "blocker": "",
+        },
     )
 
     with takyon_core._bound_operator_task_context(
@@ -2633,28 +2644,21 @@ def test_taste_timeout_without_design_contract_stops_parent_for_human_review(
             )
         )
 
-    assert result["success"] is False
-    assert result["blocked"] is True
     assert result["timed_out"] is True
-    assert result["review_required"] is True
-    assert "Taste proof was incomplete" in result["review_blocker"]
+    assert result["partial_workspace_sync_status"] == "synced"
+    assert result["published_from_partial"] is True
+    assert result["surface_refresh"]["publish"]["status"] == "published"
+    assert result["review_required"] is False
     assert len(process_calls) == 1
     operations = store.commits[-1]["operations"]
-    human_review_event = next(
-        op
+    assert not any(
+        op.get("event_type") == "bootstrap.human_review_required"
         for op in operations
-        if op.get("event_type") == "bootstrap.human_review_required"
     )
-    assert human_review_event["payload"]["operator_task"] == {
-        "run_id": "bootstrap-job",
-        "task_kind": "ceo_bootstrap",
-        "attempt": 2,
-    }
-    assert human_review_event["payload"]["timed_out"] is True
     assert any(op.get("action") == "agent.record" for op in operations)
 
 
-def test_taste_timeout_never_publishes_partial_and_requires_human_review(tmp_path, monkeypatch):
+def test_taste_timeout_publishes_build_clean_partial_without_visual_gate(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
 
     class _CapturingStore(_FakeStore):
@@ -2739,15 +2743,15 @@ def test_taste_timeout_never_publishes_partial_and_requires_human_review(tmp_pat
         )
 
     assert result["timed_out"] is True
-    assert result["surface_refresh"] is None
-    assert result["partial_workspace_sync_status"] == "not_synced_unvalidated_product_site"
-    assert result["review_required"] is True
+    assert result["surface_refresh"]["publish"]["status"] == "published"
+    assert result["partial_workspace_sync_status"] == "synced"
+    assert result["published_from_partial"] is True
+    assert result["review_required"] is False
     operations = store.commits[-1]["operations"]
-    event = next(
-        op for op in operations if op.get("event_type") == "bootstrap.human_review_required"
+    assert not any(
+        op.get("event_type") == "bootstrap.human_review_required"
+        for op in operations
     )
-    assert event["payload"]["timed_out"] is True
-    assert event["payload"]["operator_task"]["attempt"] == 3
 
 
 def test_claude_agent_task_bash_wrapper_uses_absolute_env_and_bash_paths():
@@ -2897,56 +2901,15 @@ def test_claude_agent_task_registers_site_image_mcp_only_for_bridge_config():
     assert "OPENAI_API_KEY" not in text
 
 
-def test_claude_agent_task_registers_bounded_direct_chromium_taste_preflight():
+def test_claude_agent_task_exposes_optional_image_without_visual_publication_tools():
     script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
     text = script.read_text(encoding="utf-8")
 
-    # The same Taste-only MCP server owns both the image and rendered-viewport tools. The renderer
-    # is explicit in the SDK allowlist and cannot be called more than once in one SDK session.
-    assert '"business_render_landing_preflight"' in text
-    assert '"mcp__takyon_site_image__business_render_landing_preflight"' in text
-    assert "const TASTE_PREFLIGHT_MAX_CALLS = 1;" in text
-    assert "preflightCalls > TASTE_PREFLIGHT_MAX_CALLS" in text
-    assert "Maximum two calls" not in text
-
-    # Rendering is deterministic and owned by the tool: fixed output paths and dimensions, a
-    # loopback-only strict-port Vite preview, and Chromium invoked directly without the daemon CLI.
-    assert 'return path.join(path.resolve(cwd), ".takyon-preflight");' in text
-    assert "const preflightDir = tastePreflightDir(cwd);" in text
-    assert 'Object.freeze({ name: "desktop", width: 1440, height: 900 })' in text
-    assert 'Object.freeze({ name: "mobile", width: 390, height: 844 })' in text
-    assert 'Object.freeze({ name: "hero-1280", width: 1280, height: 800 })' in text
-    assert 'path.join(cwd, "node_modules", ".bin", "vite")' in text
-    assert '["preview", "--host", "127.0.0.1"' in text
-    assert '"--strictPort"' in text
-    assert 'const TASTE_PREFLIGHT_CHROMIUM = "/usr/bin/chromium";' in text
-    assert '"--remote-debugging-pipe"' in text
-    assert '"Page.captureScreenshot"' in text
-    assert '"Runtime.evaluate"' in text
-    assert "TASTE_RENDER_INSPECTION_JS" in text
-    assert "--screenshot=" not in text
-    assert 'spawn("agent-browser"' not in text
-
-    # Product-controlled Vite config and browser code must never inherit the SDK's operator-session
-    # capability or provider-broker environment. Both children receive the same minimal env.
-    assert "env: preflightChildEnv({ browserNone: true })" in text
-    assert "env: chromiumEnv || preflightChildEnv()," in text
-    assert 'PATH: SANDBOX_PATH' in text
-    assert 'HOME: "/tmp"' in text
-    assert "env: { ...process.env" not in text
-    assert "env: process.env" not in text
-    assert "const result = await renderLandingPreflight(cwd, {" in text
-    assert "isManualTastePreflightCommand(rawCommand)" in text
-    assert "Taste landing preview/browser commands are disabled" in text
-
-    # Both preview and Chromium get their own process groups and the preview is always torn down.
-    assert "detached: true" in text
-    assert 'process.kill(-child.pid, signal)' in text
-    assert "Always address the original process group once more" in text
-    assert "await stopProcessTree(preview?.child);" in text
-    assert "await pngEvidence(outputPath, viewport.width, viewport.height);" in text
-    assert '"business_submit_taste_publication_audit"' in text
-    assert '"mcp__takyon_site_image__business_submit_taste_publication_audit"' in text
+    assert '"mcp__takyon_site_image__business_generate_site_image"' in text
+    assert '"business_render_landing_preflight"' not in text
+    assert '"business_submit_taste_publication_audit"' not in text
+    assert "optional creative tool" in text
+    assert "Images are required" not in text
 
 
 def test_claude_agent_task_script_passes_beta_disable_to_child_env():
@@ -3129,8 +3092,8 @@ def _patch_non_docker_product_site(monkeypatch, store, *, session_slug="latexflo
     )
 
 
-def test_claude_agent_task_timeout_refuses_unvalidated_product_site_sync(tmp_path, monkeypatch):
-    """A product/site timeout is blocked and cannot sync or publish unvalidated partial source."""
+def test_claude_agent_task_timeout_syncs_partial_product_site_source(tmp_path, monkeypatch):
+    """A product/site timeout preserves partial source for the build/typecheck publication gate."""
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
 
     def fake_process(*, payload: dict[str, object], **kwargs):
@@ -3163,7 +3126,7 @@ def test_claude_agent_task_timeout_refuses_unvalidated_product_site_sync(tmp_pat
     assert result["success"] is False
     assert result["blocked"] is True
     assert result["timed_out"] is True
-    assert result["partial_workspace_sync_status"] == "not_synced_unvalidated_product_site"
+    assert result["partial_workspace_sync_status"] == "synced"
     assert "timed out" in (result["error"] or "")
 
 
@@ -3207,8 +3170,8 @@ def test_claude_agent_task_timeout_settles_estimate_not_double_charge(tmp_path, 
     assert finalize_calls[-1]["actual_cents"] is None
 
 
-def test_claude_agent_task_timeout_never_runs_product_publish_gate(tmp_path, monkeypatch):
-    """A timed-out product/site worker cannot reach refresh or publication."""
+def test_claude_agent_task_timeout_runs_product_publish_gate_once(tmp_path, monkeypatch):
+    """A timed-out product/site partial is judged once by the normal build/typecheck gate."""
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
 
     def fake_process(*, payload: dict[str, object], **kwargs):
@@ -3258,5 +3221,5 @@ def test_claude_agent_task_timeout_never_runs_product_publish_gate(tmp_path, mon
 
     assert result["success"] is False
     assert result["timed_out"] is True
-    assert refresh_calls == []
-    assert result["surface_refresh"] is None
+    assert len(refresh_calls) == 1
+    assert result["surface_refresh"]["status"] == "failed"

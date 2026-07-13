@@ -64,8 +64,20 @@ if ! docker image inspect "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" >/dev/null 2>&1; t
   docker pull "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE"
 fi
 docker run --rm --entrypoint node "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" --version >/dev/null
-docker run --rm "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" sh -lc \
-  'agent-browser --version >/dev/null && chromium --version >/dev/null'
+if docker run --rm --entrypoint /bin/sh "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" -lc \
+  'test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null' >/dev/null 2>&1; then
+  echo "optional Claude worker Chromium renderer available"
+else
+  echo "optional Claude worker Chromium renderer unavailable; continuing"
+fi
+docker run --rm \
+  --entrypoint node \
+  --mount "type=bind,src=$runtime,dst=/takyon-runtime,readonly" \
+  --workdir /takyon-runtime \
+  "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" \
+  --input-type=module \
+  -e 'import fs from "node:fs"; const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")); const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8")); const sdk = "@anthropic-ai/claude-agent-sdk"; if (!pkg.dependencies?.[sdk] || !lock.packages?.[`node_modules/${sdk}`]) throw new Error("Agent SDK dependency is not pinned"); const { validateNativeTasteSkill } = await import("./scripts/takyon-claude-agent-task.mjs"); await validateNativeTasteSkill();' \
+  >/dev/null
 
 if grep -F -- 'TAKYON_STORAGE_BACKEND=supabase_s3' "$TAKYON_DASHBOARD_UNIT_CANDIDATE" >/dev/null \
   || grep -F -- 'TAKYON_STORAGE_BACKEND=supabase_s3' "$TAKYON_WORKER_UNIT_CANDIDATE" >/dev/null; then

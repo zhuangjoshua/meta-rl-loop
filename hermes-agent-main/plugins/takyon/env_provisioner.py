@@ -2606,7 +2606,7 @@ class EnvironmentProvisioner:
             )
 
         def _build_operator_worker_image(ip: str) -> "tuple[bool, str]":
-            """Build the revision-pinned coding image without touching host env or secrets."""
+            """Build and verify the revision-pinned coding image without browser requirements."""
             dockerfile = tree_root / "deploy" / "argon-alpha-14" / "takyon-claude-worker.Dockerfile"
             if not dockerfile.is_file():
                 return False, "staged revision is missing takyon-claude-worker.Dockerfile"
@@ -2625,19 +2625,43 @@ class EnvironmentProvisioner:
             verified = subprocess.run(
                 [
                     "ssh", *ssh_base, f"root@{ip}",
-                    "docker run --rm takyon/claude-worker:node20-chromium-v1 sh -lc "
-                    "'agent-browser --version >/dev/null && chromium --version >/dev/null'",
+                    "docker image inspect takyon/claude-worker:node20-chromium-v1 >/dev/null && "
+                    "docker run --rm --entrypoint node "
+                    "takyon/claude-worker:node20-chromium-v1 --version >/dev/null && "
+                    "docker run --rm --entrypoint node "
+                    "--mount type=bind,src=/opt/takyon/hermes-agent-main,dst=/takyon-runtime,readonly "
+                    "--workdir /takyon-runtime takyon/claude-worker:node20-chromium-v1 "
+                    "--input-type=module -e 'import fs from \"node:fs\"; "
+                    "const pkg = JSON.parse(fs.readFileSync(\"package.json\", \"utf8\")); "
+                    "const lock = JSON.parse(fs.readFileSync(\"package-lock.json\", \"utf8\")); "
+                    "const sdk = \"@anthropic-ai/claude-agent-sdk\"; "
+                    "if (!pkg.dependencies?.[sdk] || !lock.packages?.[`node_modules/${sdk}`]) "
+                    "throw new Error(\"Agent SDK dependency is not pinned\"); "
+                    "const { validateNativeTasteSkill } = await import(\"./scripts/takyon-claude-agent-task.mjs\"); "
+                    "await validateNativeTasteSkill();' >/dev/null",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=120,
             )
-            return (
-                verified.returncode == 0,
-                "worker image built and browser verified"
-                if verified.returncode == 0
-                else f"worker image verification failed: {(verified.stderr or verified.stdout or '').strip()[-240:]}",
+            if verified.returncode != 0:
+                return False, (
+                    "worker image verification failed: "
+                    f"{(verified.stderr or verified.stdout or '').strip()[-240:]}"
+                )
+            chromium = subprocess.run(
+                [
+                    "ssh", *ssh_base, f"root@{ip}",
+                    "docker run --rm --entrypoint /bin/sh "
+                    "takyon/claude-worker:node20-chromium-v1 -lc "
+                    "'test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null'",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
+            renderer = "available" if chromium.returncode == 0 else "unavailable (optional)"
+            return True, f"worker image, Node, Agent SDK, and native skill verified; Chromium {renderer}"
 
         def _restart(ip: str, services: "list[str]") -> "tuple[bool, str]":
             remote = (

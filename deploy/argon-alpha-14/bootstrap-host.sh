@@ -113,7 +113,7 @@ EOF
 "
 
 if [[ "$REMOTE_DOCKER_IMAGE" == "$TRACKED_WORKER_IMAGE" ]]; then
-  echo "Building the tracked Claude worker image with Chromium visual preflight"
+  echo "Building the tracked Claude worker image"
   ssh "${target_ssh[@]}" "$TARGET_HOST" \
     "docker build --tag '$REMOTE_DOCKER_IMAGE' -" < "$WORKER_DOCKERFILE"
 else
@@ -121,7 +121,14 @@ else
     "docker image inspect '$REMOTE_DOCKER_IMAGE' >/dev/null 2>&1 || docker pull '$REMOTE_DOCKER_IMAGE'"
 fi
 ssh "${target_ssh[@]}" "$TARGET_HOST" \
-  "docker run --rm '$REMOTE_DOCKER_IMAGE' sh -lc 'agent-browser --version && chromium --version'"
+  "set -euo pipefail
+  docker image inspect '$REMOTE_DOCKER_IMAGE' >/dev/null
+  docker run --rm --entrypoint node '$REMOTE_DOCKER_IMAGE' --version >/dev/null
+  if docker run --rm --entrypoint /bin/sh '$REMOTE_DOCKER_IMAGE' -lc 'test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null' >/dev/null 2>&1; then
+    echo 'optional Claude worker Chromium renderer available'
+  else
+    echo 'optional Claude worker Chromium renderer unavailable; continuing'
+  fi"
 
 # Provision the rate_limit module into the Caddy binary so the tracked Caddyfile
 # (edge DDoS controls) validates and reloads. Idempotent; runs on every host.

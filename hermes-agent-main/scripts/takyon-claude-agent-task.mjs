@@ -1111,29 +1111,19 @@ function createSiteImageMcpServer({
   z,
   bridgeDir,
   cwd,
-  renderLandingPreflight = renderTasteLandingPreflight,
   publicationState = null,
   publicationContract = null,
 }) {
   if (!bridgeDir) return null;
   const state = publicationState || createTastePublicationState(cwd, publicationContract);
-  if (!state.publicationContract) {
-    throw new Error("Taste publication MCP requires the canonical publication contract");
-  }
-  let preflightCalls = 0;
   return createSdkMcpServer({
     name: "takyon_site_image",
     version: "1.0.0",
     alwaysLoad: true,
     instructions:
-      "A Safebox-gated, cost-capped image generator is available. Let the native Taste skill choose " +
-      "the art direction and how many generated assets the page needs within the tool's cap; use each " +
-      "returned public_path in the shipped page. Read every generated full-resolution PNG. After build " +
-      "and typecheck pass, call business_render_landing_preflight instead of starting agent-browser or " +
-      "a preview daemon yourself. Call it exactly once after the final green build, then Read all three " +
-      "returned screenshots. Finally submit business_submit_taste_publication_audit with the six official " +
-      "gate results, every canonical preflight checkbox, and one inspection for every generated asset. " +
-      "A render, Read, or audit failure is a blocker, not a retry.",
+      "A Safebox-gated, cost-capped image generator is available as an optional creative tool. " +
+      "Let the native Taste skill decide whether original imagery improves this business and, if so, " +
+      "choose the art direction, prompt, purpose, aspect ratio, and placement. Do not add filler imagery.",
     tools: [
       tool(
         "business_generate_site_image",
@@ -1157,7 +1147,7 @@ function createSiteImageMcpServer({
             const evidence = await pngEvidence(imagePath);
             const asset = {
               public_path: publicPath,
-              path: registerTasteRequiredRead(state, imagePath),
+              path: imagePath,
               image_sha256: evidence.sha256,
               width: evidence.width,
               height: evidence.height,
@@ -1173,101 +1163,10 @@ function createSiteImageMcpServer({
                   image_sha256: asset.image_sha256,
                   width: asset.width,
                   height: asset.height,
-                  instruction: "Read read_path at full resolution before submitting the Taste audit.",
+                  instruction: "Use the generated image only if it improves the product design.",
                 }),
               }],
             };
-          } catch (error) {
-            return {
-              isError: true,
-              content: [{ type: "text", text: String(error?.message || error) }],
-            };
-          }
-        },
-        { alwaysLoad: true }
-      ),
-      tool(
-        "business_render_landing_preflight",
-        "Deterministically render the built landing at desktop 1440x900, mobile 390x844, and the " +
-          "official hero gate 1280x800. Starts and stops one loopback-only Vite preview, drives the " +
-          "pinned /usr/bin/chromium through the DevTools pipe, captures PNGs, and evaluates the exact " +
-          "TASTE_RENDER_INSPECTION_JS contract. Exactly one call is allowed for this Taste session. " +
-          "Call only after the final green build and typecheck; then Read all returned PNGs.",
-        {},
-        async () => {
-          preflightCalls += 1;
-          if (preflightCalls > TASTE_PREFLIGHT_MAX_CALLS) {
-            return {
-              isError: true,
-              content: [{
-                type: "text",
-                text: "Taste landing render preflight is single-use (cap: 1 call)",
-              }],
-            };
-          }
-          try {
-            const result = await renderLandingPreflight(cwd, {
-              publicationContract: state.publicationContract,
-            });
-            state.renderEvidence = result;
-            for (const screenshot of result.screenshots || []) {
-              registerTasteRequiredRead(state, screenshot.screenshot_path || screenshot.path);
-            }
-            const assets = await refreshTasteGeneratedAssets(state);
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  ...result,
-                  generated_assets_to_read: assets,
-                  call: preflightCalls,
-                  remaining_calls: TASTE_PREFLIGHT_MAX_CALLS - preflightCalls,
-                }),
-              }],
-            };
-          } catch (error) {
-            return {
-              isError: true,
-              content: [{ type: "text", text: String(error?.message || error) }],
-            };
-          }
-        },
-        { alwaysLoad: true }
-      ),
-      tool(
-        "business_submit_taste_publication_audit",
-        "Submit the final native Taste audit after successfully Read-ing every preflight screenshot " +
-          "and every generated PNG. Requires all six official gates, all canonical preflight " +
-          "checkboxes with code/copy evidence, and digest-bound full-resolution asset findings. " +
-          "Any failed gate, missing Read, stale digest, baked text, or fake UI blocks publication.",
-        {
-          official_gates: z.array(z.object({
-            id: z.string().min(1).max(120),
-            passed: z.boolean(),
-            evidence: z.string().min(1).max(4000),
-            source: z.string().min(1).max(1000),
-          }).strict()).length(TASTE_OFFICIAL_GATE_IDS.length),
-          preflight_evidence: z.array(z.object({
-            id: z.string().min(1).max(120),
-            passed: z.boolean(),
-            evidence: z.string().min(1).max(4000),
-            source: z.string().min(1).max(1000),
-          }).strict()).min(1).max(200),
-          asset_inspections: z.array(z.object({
-            public_path: z.string().regex(/^\/generated\/[a-z0-9]+(?:-[a-z0-9]+)*\.png$/),
-            image_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-            inspected_width: z.number().int().positive(),
-            inspected_height: z.number().int().positive(),
-            detected_text: z.array(z.string().max(1000)).max(100),
-            fake_ui_detected: z.boolean(),
-            artifact_labels: z.array(z.string().max(1000)).max(100),
-            source: z.string().min(1).max(1000),
-          }).strict()).min(2).max(20),
-        },
-        async (args) => {
-          try {
-            const evidence = await submitTastePublicationAudit(state, args);
-            return { content: [{ type: "text", text: JSON.stringify(evidence) }] };
           } catch (error) {
             return {
               isError: true,
@@ -1762,7 +1661,7 @@ async function main() {
       detail: `Installed canonical ${TASTE_SKILL_NAME} as a native Claude Code skill.`,
     });
   }
-  const publicationContract = tasteSkillRequired ? await loadTastePublicationContract() : null;
+  const publicationContract = null;
   workerTastePublicationState = tasteSkillRequired
     ? createTastePublicationState(cwd, publicationContract)
     : null;
@@ -1777,10 +1676,6 @@ async function main() {
         publicationContract,
       })
     : null;
-  if (tasteSkillRequired && !siteImageMcpServer) {
-    throw new Error("product/site publication refused: Taste image, render, and audit tools are unavailable");
-  }
-
   let text = "";
   let totalCostUsd = null;
   let finalUsage = null;
@@ -1881,8 +1776,6 @@ async function main() {
               ? {
                   allowedTools: [
                     "mcp__takyon_site_image__business_generate_site_image",
-                    "mcp__takyon_site_image__business_render_landing_preflight",
-                    "mcp__takyon_site_image__business_submit_taste_publication_audit",
                   ],
                 }
               : {}),
@@ -1910,20 +1803,6 @@ async function main() {
                   };
                 }
                 const updatedInput = { ...(toolInput || {}) };
-                const rawCommand = typeof updatedInput.command === "string"
-                  ? updatedInput.command
-                  : typeof updatedInput.cmd === "string"
-                    ? updatedInput.cmd
-                    : "";
-                if (siteImageMcpServer && isManualTastePreflightCommand(rawCommand)) {
-                  return {
-                    behavior: "deny",
-                    message:
-                      "Taste landing preview/browser commands are disabled. Run build and typecheck, " +
-                      "then call business_render_landing_preflight and Read all returned PNGs.",
-                    toolUseID: options.toolUseID
-                  };
-                }
                 if (typeof updatedInput.command === "string") {
                   updatedInput.command = sandboxedBashCommand(updatedInput.command);
                 } else if (typeof updatedInput.cmd === "string") {
@@ -2066,11 +1945,6 @@ async function main() {
       )
     ) {
       throw new Error("product/site publication refused: native Taste content was pasted into the worker prompt");
-    }
-    if (tasteSkillRequired && !workerTastePublicationState?.audit?.passed) {
-      throw new Error(
-        "product/site publication refused: trusted rendered Taste publication audit was not submitted and passed"
-      );
     }
   } catch (error) {
     const failFastFailure = failOnApiRetry

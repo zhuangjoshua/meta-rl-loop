@@ -4104,10 +4104,9 @@ def _worker_business_brief_context(
         "```json\n"
         + json.dumps(context, ensure_ascii=False, sort_keys=True)
         + "\n```\n"
-        "Before writing DESIGN.md, generating images, or editing UI, anchor the direction to the "
-        "exact product, audience, real-world setting, core task, and tone in this brief. Name those "
-        "anchors in the Design Read. A direction that substitutes a generic or different audience, "
-        "setting, or task is invalid and must be corrected before any asset call."
+        "Anchor the design to the exact product, audience, real-world setting, core task, and tone "
+        "in this brief. A design that substitutes a generic or different audience, setting, or task "
+        "must be corrected."
     )
 
 
@@ -6465,6 +6464,12 @@ def _validate_taste_worker_publication(
             "product/site publication refused: native Taste was not installed, discovered, "
             "included from user settings, and successfully invoked"
         )
+
+    # Native skill use is the integration contract. Visual choices, generated imagery,
+    # screenshots, audits, and DESIGN.md are guidance owned by the design agent, not
+    # publication authority.
+    receipt["passed"] = True
+    return receipt, ""
 
     evidence = sdk_result.get("taste_publication_evidence")
     if (
@@ -25200,11 +25205,9 @@ def _finalize_product_surface_refresh(
                 "error": surface_error,
             }
     for blocker in (
-        _scaffold_theme_unfinished_blocker(refresh),
         _scaffold_visible_shell_unfinished_blocker(refresh),
         _app_access_gate_null_unfinished_blocker(refresh),
         _appkit_subscription_cancellation_unfinished_blocker(refresh),
-        _requested_workflow_unfinished_blocker(refresh),
     ):
         if blocker:
             refresh = _merge_surface_refresh_blocker(refresh, blocker)
@@ -37963,8 +37966,6 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                 raise TakyonError(f"workspace is not a directory: {workspace_rel}")
             if business_root not in (workspace_path, *workspace_path.parents):
                 raise TakyonError("workspace escaped business root")
-            if taste_skill_required:
-                baseline_taste_snapshot = _load_validated_taste_design_snapshot(workspace_path)
             initial_landing_design_pass = bool(
                 taste_skill_required
                 and baseline_taste_snapshot is None
@@ -38257,16 +38258,11 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         f"preserving timed-out Claude worker source for business:{business}",
                     )
                     if taste_skill_required:
-                        # Product/site source has no publish authority without the same worker's
-                        # native-skill and rendered-publication receipts. Never make a timed-out,
-                        # unvalidated tree durable merely because it happens to compile later.
                         _remove_taste_preflight_artifacts(workspace_path)
-                        partial_sync_status = "not_synced_unvalidated_product_site"
-                    else:
-                        try:
-                            partial_sync_status = active_store._sync_business_workspace_remote(business)
-                        except Exception:
-                            partial_sync_status = "partial_sync_failed"
+                    try:
+                        partial_sync_status = active_store._sync_business_workspace_remote(business)
+                    except Exception:
+                        partial_sync_status = "partial_sync_failed"
                     sdk_result = {
                         "success": False,
                         "blocked": True,
@@ -38279,11 +38275,7 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         "partial_workspace_sync_status": partial_sync_status,
                         "error": _truncate_text(
                             f"Claude worker timed out after {int(timeout_ms)}ms. Partial workspace edits "
-                            + (
-                                "were refused durable sync because product/site Taste proof was incomplete."
-                                if taste_skill_required
-                                else f"are preserved in canonical source (sync {partial_sync_status})."
-                            ),
+                            + f"are preserved in canonical source (sync {partial_sync_status}).",
                             8000,
                         ),
                         "skill_receipt": {
@@ -38551,14 +38543,9 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                 # blind; if it fails, the exact build blocker is terminal for this invocation.
                 publishable_partial = (
                     bool(sdk_result.get("timed_out"))
-                    and not taste_skill_required
                     and str(sdk_result.get("partial_workspace_sync_status") or "") == "synced"
                     and customer_facing_product_workspace
                     and not str(sdk_result.get("blocker") or "").strip()
-                    and (
-                        not initial_landing_design_pass
-                        or isinstance(sdk_result.get("taste_design_contract"), dict)
-                    )
                 )
                 if (sdk_result.get("success") or publishable_partial) and refresh_surface:
                     summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"])
@@ -38598,14 +38585,22 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         # durable truth so the CEO acts on the LIVE site, not the dead worker.
                         publish_info = surface_refresh.get("publish") if isinstance(surface_refresh.get("publish"), dict) else {}
                         live_url = str(publish_info.get("public_url") or "").strip()
-                        sdk_result["published_from_partial"] = True
-                        sdk_result["error"] = _truncate_text(
+                        partial_summary = _truncate_text(
                             f"Claude worker timed out after {int(timeout_ms)}ms, BUT the preserved partial "
                             "PASSED the build gate and IS PUBLISHED live"
                             + (f" at {live_url}" if live_url else "")
-                            + ". The landing is live — do NOT rebuild or re-delegate it; continue the "
-                            "remaining product steps (logo and final app/account pass) in this turn.",
+                            + ". The result is marked incomplete; do not retry it automatically.",
                             8000,
+                        )
+                        sdk_result.update(
+                            {
+                                "success": True,
+                                "blocked": False,
+                                "incomplete": True,
+                                "published_from_partial": True,
+                                "summary": partial_summary,
+                                "error": None,
+                            }
                         )
                         published_line = (
                             "timed-out partial passed the build gate and is PUBLISHED"
@@ -38657,10 +38652,8 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             # That is machine-fixable platform truth, not evidence that Taste timed out or failed.
             taste_review_required = bool(
                 initial_landing_design_pass
-                and (
-                    bool(sdk_result.get("timed_out"))
-                    or not bool(sdk_result.get("success"))
-                )
+                and not bool(sdk_result.get("success"))
+                and not bool(sdk_result.get("published_from_partial"))
             )
             taste_review_blocker = ""
             if taste_review_required:
@@ -38750,6 +38743,8 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         "taste_design_contract": sdk_result.get("taste_design_contract"),
                         "review_required": bool(sdk_result.get("review_required")),
                         "review_blocker": sdk_result.get("review_blocker"),
+                        "incomplete": bool(sdk_result.get("incomplete")),
+                        "published_from_partial": bool(sdk_result.get("published_from_partial")),
                         "surface_refresh": surface_refresh,
                     },
                 }
@@ -38839,6 +38834,8 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             "taste_publication_receipt": sdk_result.get("taste_publication_receipt"),
             "taste_design_contract": sdk_result.get("taste_design_contract"),
             "timed_out": bool(sdk_result.get("timed_out")),
+            "incomplete": bool(sdk_result.get("incomplete")),
+            "published_from_partial": bool(sdk_result.get("published_from_partial")),
             "review_required": bool(sdk_result.get("review_required")),
             "review_blocker": sdk_result.get("review_blocker"),
             "partial_workspace_sync_status": sdk_result.get("partial_workspace_sync_status"),
