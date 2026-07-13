@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
+import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const PROGRESS_PREFIX = "TAKYON_SDK_EVENT ";
@@ -41,6 +43,83 @@ function normalizeRelative(value) {
 function sandboxedBashCommand(command) {
   const script = String(command || "");
   return `/usr/bin/env -i PATH=${SANDBOX_PATH} HOME=/tmp /bin/bash -lc ${JSON.stringify(script)}`;
+}
+
+const SITE_IMAGE_BRIDGE_TIMEOUT_MS = 240_000;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function invokeSiteImageBridge(bridgeDir, args) {
+  const requestId = randomUUID();
+  const requestsDir = path.join(bridgeDir, "requests");
+  const responsesDir = path.join(bridgeDir, "responses");
+  const requestPath = path.join(requestsDir, `${requestId}.json`);
+  const temporaryPath = path.join(requestsDir, `.${requestId}.tmp`);
+  const responsePath = path.join(responsesDir, `${requestId}.json`);
+  await fs.writeFile(temporaryPath, `${JSON.stringify({ args })}\n`, { encoding: "utf8", mode: 0o600 });
+  await fs.rename(temporaryPath, requestPath);
+  const deadline = Date.now() + SITE_IMAGE_BRIDGE_TIMEOUT_MS;
+  try {
+    while (Date.now() < deadline) {
+      try {
+        const response = JSON.parse(await fs.readFile(responsePath, "utf8"));
+        if (!response || typeof response !== "object") {
+          throw new Error("site-image bridge returned an invalid response");
+        }
+        if (!response.success) {
+          throw new Error(String(response.error || "site-image generation failed"));
+        }
+        return response;
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      await delay(75);
+    }
+    throw new Error("site-image generation timed out after 240 seconds");
+  } finally {
+    await Promise.allSettled([fs.unlink(requestPath), fs.unlink(responsePath)]);
+  }
+}
+
+function createSiteImageMcpServer({ createSdkMcpServer, tool, z, bridgeDir }) {
+  if (!bridgeDir) return null;
+  return createSdkMcpServer({
+    name: "takyon_site_image",
+    version: "1.0.0",
+    alwaysLoad: true,
+    instructions:
+      "Taste landing image generation is mandatory. After the Design Read, generate exactly two " +
+      "distinct page-role assets: one hero and one supporting image. Use every returned public_path " +
+      "in an <img data-takyon-landing-asset=\"hero|supporting\">. The tool is capped and money-gated.",
+    tools: [
+      tool(
+        "business_generate_site_image",
+        "Generate one real, business-owned landing image through Takyon's Safebox-gated creative rail. " +
+          "Art-direct one exact page role. No baked-in text, UI labels, logos, watermarks, browser chrome, " +
+          "fake product controls, generic filler, or stock hotlinks. Returns only a local /generated/... path.",
+        {
+          slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(80),
+          prompt: z.string().min(1).max(12000),
+          aspect_ratio: z.enum(["16:9", "4:3", "1:1", "3:4", "9:16"]),
+          purpose: z.string().min(1).max(200),
+        },
+        async (args) => {
+          try {
+            const result = await invokeSiteImageBridge(bridgeDir, args);
+            return { content: [{ type: "text", text: JSON.stringify(result) }] };
+          } catch (error) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: String(error?.message || error) }],
+            };
+          }
+        },
+        { alwaysLoad: true }
+      ),
+    ],
+  });
 }
 
 function buildClaudeSessionEnv({
@@ -421,7 +500,8 @@ async function main() {
     }
   }
 
-  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const { query, createSdkMcpServer, tool } = await import("@anthropic-ai/claude-agent-sdk");
+  const { z } = await import("zod");
   const abortController = new AbortController();
   const maxTurns = Number.parseInt(String(input.maxTurns || ""), 10) || 12;
   const maxBudgetUsd = Number.parseFloat(String(input.maxBudgetUsd || "")) || 2;
@@ -429,6 +509,13 @@ async function main() {
   const allowBash = Boolean(input.allowBash);
   const pathToClaudeCodeExecutable = String(process.env.TAKYON_CLAUDE_CODE_EXECUTABLE || "").trim();
   const inDockerWorker = String(process.env.TAKYON_CLAUDE_AGENT_IN_DOCKER || "").trim() === "1";
+  const siteImageBridgeDir = String(input.siteImageBridgeDir || "").trim();
+  const siteImageMcpServer = createSiteImageMcpServer({
+    createSdkMcpServer,
+    tool,
+    z,
+    bridgeDir: siteImageBridgeDir,
+  });
 
   let text = "";
   let totalCostUsd = null;
@@ -464,9 +551,16 @@ async function main() {
             includePartialMessages: true,
             thinking: { type: "adaptive", display: "summarized" },
             effort: ["low", "medium", "high"].includes(effort) ? effort : "high",
-            tools: allowBash
-              ? ["Read", "Write", "Edit", "MultiEdit", "Grep", "Glob", "Bash"]
-              : ["Read", "Write", "Edit", "MultiEdit", "Grep", "Glob"],
+            tools: [
+              "Read", "Write", "Edit", "MultiEdit", "Grep", "Glob",
+              ...(allowBash ? ["Bash"] : []),
+            ],
+            ...(siteImageMcpServer
+              ? { allowedTools: ["mcp__takyon_site_image__business_generate_site_image"] }
+              : {}),
+            ...(siteImageMcpServer
+              ? { mcpServers: { takyon_site_image: siteImageMcpServer } }
+              : {}),
             disallowedTools: allowBash ? [] : ["Bash"],
             permissionMode: "acceptEdits",
             persistSession: false,

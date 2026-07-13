@@ -262,6 +262,13 @@ TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT = """Taste landing rendered-viewport pre
 - Stop the local server, close the browser session, and remove `.takyon-preflight/` before finishing. A missing browser executable, failed screenshot, unread screenshot, or unverified viewport is BLOCKED, not success.
 - Use only local loopback URLs. Browser rendering is verification, never provider access, deployment, or an external network call.
 """
+TASTE_LANDING_IMAGE_CONTRACT = """Taste landing generated-asset contract (HARD):
+- This same Taste session has one additional tool: `business_generate_site_image`. It is bound to this business, Safebox money-gated, and capped at exactly two distinct successful image slugs; it returns only local `/generated/<slug>.png` paths.
+- After the Design Read and before completing the landing, call it for exactly TWO art-directed images: one real hero visual and one supporting visual. Use the brief, chosen foundation, palette, crop, material, lighting, and exact page role in each prompt. No baked-in text, UI labels, logos, watermarks, browser chrome, fake product controls, generic filler, or stock hotlinks.
+- Render both returned paths in `src/screens/landing.tsx` as real `<img>` elements. Mark the hero image `data-takyon-landing-asset="hero"` and the other `data-takyon-landing-asset="supporting"`. The brand logo, favicon, inline SVG, CSS-only art, and div-based fake screenshot do not count.
+- Persist both asset roles, slugs, prompts, paths, crops, and the reason each belongs to the Design Read in `DESIGN.md`. On an attached/retried run, inspect `.takyon/site-images/` and reuse already generated assets instead of spending again.
+- The landing cannot publish unless two distinct generated PNG receipts/files exist, both paths are used in the landing, and one is marked as the hero. Typography-only is not an allowed exception.
+"""
 MOBILE_APP_BUILD_GATE_CONTRACT = """Mobile app build gate (HARD):
 - This is a customer-facing iOS app workspace (Expo SDK 54, managed). Diagnosing an error is NOT done; only a green verify is done.
 - Before you finish, you MUST run and confirm green, yourself, with Bash — do not assume:
@@ -4246,6 +4253,107 @@ def _read_taste_design_contract(workspace_path: Path) -> tuple[dict[str, Any], s
     }, ""
 
 
+def _read_taste_landing_asset_contract(workspace_path: Path) -> tuple[dict[str, Any], str]:
+    """Require two real, generated, visibly used landing images before Taste may publish."""
+    root = Path(workspace_path).resolve()
+    receipts_dir = root / ".takyon" / "site-images"
+    landing_path = root / "src" / "screens" / "landing.tsx"
+    if not receipts_dir.is_dir():
+        return {}, "Taste landing asset contract missing: no generated site-image receipts exist."
+    if not landing_path.is_file():
+        return {}, "Taste landing asset contract invalid: src/screens/landing.tsx is missing."
+    try:
+        landing_source = landing_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {}, f"Taste landing asset contract unreadable: {exc}"
+
+    assets: dict[str, dict[str, Any]] = {}
+    for receipt_path in sorted(receipts_dir.glob("*.json")):
+        try:
+            if receipt_path.stat().st_size > 256 * 1024:
+                continue
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(receipt, Mapping) or not receipt.get("success"):
+            continue
+        public_path = str(receipt.get("public_path") or "").strip()
+        match = re.fullmatch(r"/generated/([a-z0-9]+(?:-[a-z0-9]+)*)\.png", public_path)
+        if match is None:
+            continue
+        slug = match.group(1)
+        image_path = root / "public" / "generated" / f"{slug}.png"
+        try:
+            header = image_path.read_bytes()[:16]
+            size = image_path.stat().st_size
+        except OSError:
+            continue
+        if size < 512 or not header.startswith(b"\x89PNG\r\n\x1a\n"):
+            continue
+        assets[public_path] = {
+            "slug": slug,
+            "public_path": public_path,
+            "receipt": receipt_path.relative_to(root).as_posix(),
+            "bytes": size,
+        }
+
+    if len(assets) < 2:
+        return {
+            "valid_generated_images": list(assets.values()),
+        }, (
+            "Taste landing asset contract invalid: exactly two distinct Safebox-generated PNG assets "
+            f"are required; found {len(assets)}."
+        )
+
+    used_paths = [public_path for public_path in assets if public_path in landing_source]
+    direct_roles: dict[str, str] = {}
+    declared_roles: set[str] = set()
+    image_tags = re.findall(r"<img\b[^>]*>", landing_source, flags=re.IGNORECASE | re.DOTALL)
+    for image_tag in image_tags:
+        role_match = re.search(
+            r"data-takyon-landing-asset\s*=\s*[\"'](hero|supporting)[\"']",
+            image_tag,
+            flags=re.IGNORECASE,
+        )
+        if role_match is None:
+            continue
+        role = role_match.group(1).lower()
+        declared_roles.add(role)
+        for public_path in assets:
+            if public_path in image_tag:
+                direct_roles[public_path] = role
+                break
+    if len(used_paths) < 2 or not {"hero", "supporting"}.issubset(declared_roles):
+        return {
+            "valid_generated_images": list(assets.values()),
+            "used_paths": used_paths,
+            "declared_roles": sorted(declared_roles),
+        }, (
+            "Taste landing asset contract invalid: src/screens/landing.tsx must render two distinct "
+            "generated paths as real <img> elements marked hero and supporting."
+        )
+    hero_path = next(
+        (path for path, role in direct_roles.items() if role == "hero"),
+        used_paths[0],
+    )
+    supporting_path = next(
+        (
+            path
+            for path, role in direct_roles.items()
+            if role == "supporting" and path != hero_path
+        ),
+        next(path for path in used_paths if path != hero_path),
+    )
+    selected_paths = [hero_path, supporting_path]
+    return {
+        "assets": [
+            {**assets[path], "role": "hero" if path == hero_path else "supporting"}
+            for path in selected_paths
+        ],
+        "hero_path": hero_path,
+    }, ""
+
+
 def _should_run_claude_agent_in_docker(workspace_rel: str) -> bool:
     mode = str(os.getenv("TAKYON_CLAUDE_AGENT_DOCKER", "auto") or "auto").strip().lower()
     if mode in {"0", "false", "no", "off"}:
@@ -5744,6 +5852,208 @@ def _product_worker_runtime_snapshot(repo_root: Path) -> Path:
         raise
 
 
+_SITE_IMAGE_BRIDGE_CONTAINER_DIR = "/run/takyon-site-image-bridge"
+_SITE_IMAGE_BRIDGE_MAX_IMAGES = 2
+_SITE_IMAGE_BRIDGE_MAX_ATTEMPTS = 6
+_SITE_IMAGE_BRIDGE_RESPONSE_TIMEOUT_SECONDS = 240
+
+
+class _SiteImageWorkerBridge:
+    """Narrow file-RPC bridge from one Taste worker to the authoritative creative rail.
+
+    The Docker worker receives only an ephemeral bind-mounted request directory. The parent owns the
+    business/store binding, derives idempotency, caps the run at two distinct successful images, and
+    calls the existing Safebox-gated handler. No provider key, Safebox transport token, reusable
+    capability, or general business-tool endpoint enters the worker.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: "TakyonStore",
+        business: str,
+        idempotency_prefix: str,
+        root: Path,
+    ) -> None:
+        self.store = store
+        self.business = _slugify(business)
+        self.idempotency_prefix = str(idempotency_prefix or "taste-site-image").strip()
+        self.root = Path(root).resolve()
+        self.requests_dir = self.root / "requests"
+        self.responses_dir = self.root / "responses"
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._serve,
+            name=f"takyon-site-image-{self.business}",
+            daemon=True,
+        )
+        self._handled: set[str] = set()
+        self._successful_slugs: set[str] = set()
+        self._attempts = 0
+
+    def start(self) -> None:
+        self.requests_dir.mkdir(parents=True, exist_ok=True)
+        self.responses_dir.mkdir(parents=True, exist_ok=True)
+        receipts_dir = self.store._resolve_business_file(
+            self.business,
+            "product/site/.takyon/site-images",
+        )
+        if receipts_dir.is_dir():
+            for receipt_path in sorted(receipts_dir.glob("*.json")):
+                try:
+                    prior = json.loads(receipt_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                slug = str(prior.get("slug") or "").strip() if isinstance(prior, Mapping) else ""
+                asset_path = self.store._resolve_business_file(
+                    self.business,
+                    f"product/site/public/generated/{slug}.png",
+                )
+                if (
+                    slug
+                    and prior.get("success")
+                    and str(prior.get("public_path") or "") == f"/generated/{slug}.png"
+                    and asset_path.is_file()
+                ):
+                    self._successful_slugs.add(slug)
+        try:
+            os.chmod(self.root, 0o700)
+            os.chmod(self.requests_dir, 0o700)
+            os.chmod(self.responses_dir, 0o700)
+        except OSError:
+            pass
+        self._thread.start()
+
+    def close(self) -> bool:
+        self._stop.set()
+        self._thread.join(timeout=float(_SITE_IMAGE_BRIDGE_RESPONSE_TIMEOUT_SECONDS + 5))
+        return not self._thread.is_alive()
+
+    def _write_response(self, request_id: str, response: Mapping[str, Any]) -> None:
+        destination = self.responses_dir / f"{request_id}.json"
+        _atomic_write_text(destination, json.dumps(dict(response), ensure_ascii=False) + "\n")
+
+    def _handle_request(self, request_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        if self._attempts >= _SITE_IMAGE_BRIDGE_MAX_ATTEMPTS:
+            raise TakyonError("site-image bridge attempt cap reached")
+        self._attempts += 1
+        raw_args = request.get("args")
+        if not isinstance(raw_args, Mapping):
+            raise TakyonError("site-image bridge args must be an object")
+        prompt = str(raw_args.get("prompt") or "").strip()
+        if not prompt or len(prompt) > 12_000:
+            raise TakyonError("site-image prompt must contain 1-12000 characters")
+        raw_slug = str(raw_args.get("slug") or "").strip()
+        slug = _file_slug(raw_slug, "site-image")
+        if not raw_slug or slug != raw_slug:
+            raise TakyonError("site-image slug must already be a stable lowercase file slug")
+        aspect_ratio = str(raw_args.get("aspect_ratio") or "16:9").strip()
+        if aspect_ratio not in {"16:9", "4:3", "1:1", "3:4", "9:16"}:
+            raise TakyonError("unsupported site-image aspect_ratio")
+        purpose = str(raw_args.get("purpose") or "site imagery").strip()[:200]
+
+        receipt_path = self.store._resolve_business_file(
+            self.business,
+            f"product/site/.takyon/site-images/{slug}.json",
+        )
+        asset_path = self.store._resolve_business_file(
+            self.business,
+            f"product/site/public/generated/{slug}.png",
+        )
+        if slug not in self._successful_slugs and receipt_path.exists() and asset_path.exists():
+            try:
+                prior = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except Exception:
+                prior = {}
+            if prior.get("success") and str(prior.get("public_path") or "") == f"/generated/{slug}.png":
+                self._successful_slugs.add(slug)
+        if slug not in self._successful_slugs and len(self._successful_slugs) >= _SITE_IMAGE_BRIDGE_MAX_IMAGES:
+            raise TakyonError("Taste landing site-image cap is exactly two distinct images")
+
+        raw_result = _handle_business_generate_site_image_with_store(
+            {
+                "business": self.business,
+                "slug": slug,
+                "prompt": prompt,
+                "aspect_ratio": aspect_ratio,
+                "purpose": purpose,
+                "idempotency_key": f"{self.idempotency_prefix}:site-image:{slug}",
+                "reason": "Taste landing image generation",
+                "actor": "taste-worker-bridge",
+            },
+            self.store,
+        )
+        try:
+            result = json.loads(raw_result) if isinstance(raw_result, str) else dict(raw_result or {})
+        except Exception as exc:
+            raise TakyonError("site-image handler returned invalid JSON") from exc
+        if not result.get("success"):
+            raise TakyonError(str(result.get("error") or "site-image generation failed"))
+        public_path = str(result.get("public_path") or "").strip()
+        if public_path != f"/generated/{slug}.png":
+            raise TakyonError("site-image handler returned an unexpected public path")
+        self._successful_slugs.add(slug)
+        return {
+            "success": True,
+            "slug": slug,
+            "public_path": public_path,
+            "generated_images": len(self._successful_slugs),
+            "remaining_images": max(0, _SITE_IMAGE_BRIDGE_MAX_IMAGES - len(self._successful_slugs)),
+        }
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            found = False
+            try:
+                request_paths = sorted(self.requests_dir.glob("*.json"))
+            except OSError:
+                request_paths = []
+            for request_path in request_paths:
+                request_id = request_path.stem
+                if request_id in self._handled:
+                    continue
+                found = True
+                self._handled.add(request_id)
+                if not re.fullmatch(r"[a-f0-9-]{16,64}", request_id):
+                    continue
+                try:
+                    request = json.loads(request_path.read_text(encoding="utf-8"))
+                    if not isinstance(request, Mapping):
+                        raise TakyonError("site-image bridge request must be an object")
+                    response = self._handle_request(request_id, request)
+                except Exception as exc:
+                    response = {"success": False, "error": _truncate_text(str(exc), 1200)}
+                try:
+                    self._write_response(request_id, response)
+                except OSError:
+                    pass
+            if not found:
+                self._stop.wait(0.05)
+
+
+@contextmanager
+def _site_image_worker_bridge(
+    *,
+    store: "TakyonStore",
+    business: str,
+    idempotency_prefix: str,
+):
+    root = Path(tempfile.mkdtemp(prefix=f"takyon-site-image-{_slugify(business)}-"))
+    bridge = _SiteImageWorkerBridge(
+        store=store,
+        business=business,
+        idempotency_prefix=idempotency_prefix,
+        root=root,
+    )
+    bridge.start()
+    try:
+        yield bridge
+    finally:
+        stopped = bridge.close()
+        if stopped:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 def _run_claude_agent_task_in_docker(
     *,
     payload: dict[str, Any],
@@ -5751,6 +6061,7 @@ def _run_claude_agent_task_in_docker(
     timeout_ms: int,
     business: str,
     operator_user_id: str,
+    site_image_bridge_dir: Path | None = None,
 ) -> tuple[list[str], dict[str, Any], str, Mapping[str, str]]:
     from tools.environments.docker import (
         _build_security_args,
@@ -5765,6 +6076,10 @@ def _run_claude_agent_task_in_docker(
 
     repo_root = _repo_root().resolve()
     runtime_snapshot = _product_worker_runtime_snapshot(repo_root)
+    bridge_host_value = str(
+        site_image_bridge_dir or payload.get("_siteImageBridgeHostDir") or ""
+    ).strip()
+    bridge_host_dir = Path(bridge_host_value).resolve() if bridge_host_value else None
     image = str(
         os.getenv("TAKYON_CLAUDE_AGENT_DOCKER_IMAGE")
         or os.getenv("TERMINAL_DOCKER_IMAGE")
@@ -5772,10 +6087,15 @@ def _run_claude_agent_task_in_docker(
     ).strip()
     worker_model = _resolve_claude_agent_model(payload.get("model"))
     payload = {
-        **payload,
+        **{key: value for key, value in payload.items() if key != "_siteImageBridgeHostDir"},
         "model": worker_model,
         "cwd": "/workspace",
         "root": "/workspace",
+        **(
+            {"siteImageBridgeDir": _SITE_IMAGE_BRIDGE_CONTAINER_DIR}
+            if bridge_host_dir is not None
+            else {}
+        ),
     }
     # No raw provider auth on the worker plane: the SDK is pointed at the safebox PROXY ROOT and
     # authenticated with a minted operator.session token below. The raw ANTHROPIC_API_KEY /
@@ -5905,6 +6225,15 @@ def _run_claude_agent_task_in_docker(
     # is the safebox proxy. When unset, the worker stays on the default bridge and reaches the proxy
     # through host NAT (still key-free; egress confinement is the remaining hardening).
     network_args: list[str] = ["--network", broker_network] if broker_network else []
+    bridge_mount_args: list[str] = []
+    if bridge_host_dir is not None:
+        bridge_root = bridge_host_dir
+        if not bridge_root.is_dir():
+            raise TakyonError("site-image worker bridge directory is unavailable")
+        bridge_mount_args = [
+            "--mount",
+            f"type=bind,src={bridge_root},dst={_SITE_IMAGE_BRIDGE_CONTAINER_DIR}",
+        ]
 
     run_cmd = [
         docker,
@@ -5925,6 +6254,7 @@ def _run_claude_agent_task_in_docker(
         *sdk_mount_args,
         *identity_mount_args,
         *npm_cache_mount_args,
+        *bridge_mount_args,
         "--mount",
         f"type=bind,src={workspace_path},dst=/workspace",
         "--mount",
@@ -31713,13 +32043,12 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
-def handle_business_generate_site_image(args: dict, **_: Any) -> str:
+def _handle_business_generate_site_image_with_store(args: dict, store: "TakyonStore") -> str:
     """Generate one business-owned site image through the gated Gemini site-image route.
 
     The coding worker receives only the published path. The Gemini key stays on the safebox, and the
     provider call is structurally wrapped in reserve -> commit/release by gated_creative_call.
     """
-    store = _store()
     try:
         business = _resolved_business_slug(args, required=True)
         idempotency_key = str(args.get("idempotency_key") or "").strip()
@@ -31858,6 +32187,10 @@ def handle_business_generate_site_image(args: dict, **_: Any) -> str:
         )
     except Exception as exc:
         return tool_error(str(exc), success=False)
+
+
+def handle_business_generate_site_image(args: dict, **_: Any) -> str:
+    return _handle_business_generate_site_image_with_store(args, _store())
 
 
 # Google Search Console verification: aliases live in core._API_ENV_ALIASES under
@@ -36345,6 +36678,7 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         MOBILE_APP_BUILD_GATE_CONTRACT if mobile_app_workspace else PRODUCT_BUILD_GATE_CONTRACT
                     )
                 if taste_guidance_active and _workspace_needs_runtime_ui_contract(workspace_rel):
+                    worker_instruction_parts.append(TASTE_LANDING_IMAGE_CONTRACT)
                     worker_instruction_parts.append(TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT)
                 if mobile_app_workspace:
                     worker_instruction_parts.append(MOBILE_APP_WORKER_CONTRACT)
@@ -36415,6 +36749,15 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                 else _bound_claude_worker_progress(_default_worker_progress_sink)
             )
             scoped_workspaces.enter_context(worker_progress_binding)
+            site_image_bridge: _SiteImageWorkerBridge | None = None
+            if taste_guidance_active and _workspace_needs_runtime_ui_contract(workspace_rel):
+                site_image_bridge = scoped_workspaces.enter_context(
+                    _site_image_worker_bridge(
+                        store=active_store,
+                        business=business,
+                        idempotency_prefix=idempotency_key,
+                    )
+                )
             # ONE wall-clock budget for the entire coding task.  Turn-cap, build-fix, and Docker
             # bind retries all consume this same deadline; no retry receives a fresh timeout.  The
             # caller chooses the total (bootstrap passes 900s), while timeout-partial validation may
@@ -36453,6 +36796,14 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                     "maxTurns": active_max_turns,
                     "timeoutMs": attempt_timeout_ms,
                     "instruction": active_worker_instruction,
+                    **(
+                        {
+                            "_siteImageBridgeHostDir": str(site_image_bridge.root),
+                            "siteImageBridgeDir": str(site_image_bridge.root),
+                        }
+                        if site_image_bridge is not None
+                        else {}
+                    ),
                 }
                 started_line = (
                     f"Claude worker started for {workspace_rel}."
@@ -36645,6 +36996,27 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         }
                     else:
                         sdk_result["taste_design_contract"] = design_contract
+                        asset_contract, asset_contract_blocker = _read_taste_landing_asset_contract(
+                            workspace_path
+                        )
+                        if asset_contract_blocker:
+                            try:
+                                blocked_sync_status = active_store._sync_business_workspace_remote(
+                                    business
+                                )
+                            except Exception as sync_exc:
+                                blocked_sync_status = f"failed: {sync_exc}"
+                            sdk_result = {
+                                **sdk_result,
+                                "success": False,
+                                "blocked": True,
+                                "blocker": "taste_landing_asset_contract_invalid",
+                                "error": asset_contract_blocker,
+                                "taste_landing_asset_contract": asset_contract,
+                                "workspace_sync_status": blocked_sync_status,
+                            }
+                        else:
+                            sdk_result["taste_landing_asset_contract"] = asset_contract
                 if sdk_result.get("success"):
                     # The SDK summary often contains the worker's internal design deliberation
                     # ("Now I have full context... Reading this as... Dial: variance=..."). Preserve

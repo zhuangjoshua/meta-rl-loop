@@ -148,8 +148,59 @@ def test_bootstrap_uses_taste_once_then_inherits_brand_for_product_work():
     assert "exactly like 2a" not in product_pass
     assert "`effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`" in product_pass
     assert "intentionally separate from the Taste landing's medium/60/900 bounds" in product_pass
-
     assert "#### 3a. Upgrade landing proof" not in prompt
+
+
+def test_taste_landing_requires_two_non_logo_images_and_keeps_logo_after_publish():
+    prompt = turn_runtime._business_bootstrap_instruction(
+        "taste-assets-test",
+        "Build a SaaS where customers generate and save account briefs",
+        "live",
+        archetype="web_saas",
+    )
+    landing_heading = "#### 2a. Build and publish the landing page"
+    logo_heading = "#### 2b. Add the real logo, then finish the /app access shell + profile"
+    landing_pass = prompt.split(landing_heading, 1)[1].split(
+        "#### 2a.1. Register Search Console", 1
+    )[0]
+    landing_lower = landing_pass.lower()
+
+    assert "exactly two" in landing_lower
+    assert "business_generate_site_image" in landing_pass
+    assert "after the design read" in landing_lower
+    assert "before finishing the landing" in landing_lower
+    assert "hero" in landing_lower
+    assert "supporting" in landing_lower
+    assert "required" in landing_lower
+    assert "never use the logo as either image" in landing_lower
+    assert "typography-led direction may use no generated image" not in landing_lower
+    assert "may use no generated image" not in landing_lower
+
+    # Image generation is part of the continuous Taste-owned 2a call. The distinct logo workflow
+    # remains after the first landing has published and is not a substitute for those site images.
+    assert prompt.index(landing_heading) < prompt.index(logo_heading)
+    logo_pass = prompt.split(logo_heading, 1)[1].split(
+        "#### 2c. Workflow verification gate", 1
+    )[0]
+    assert "Once the landing page has published in 2a" in logo_pass
+    assert "business_generate_logo" in logo_pass
+
+
+def test_opted_in_animation_complements_generated_imagery_instead_of_replacing_it():
+    prompt = turn_runtime._business_bootstrap_instruction(
+        "taste-animation-test",
+        "Build an animated analytics SaaS",
+        "live",
+        animations=True,
+        archetype="web_saas",
+    )
+    landing_pass = prompt.split("#### 2a. Build and publish the landing page", 1)[1].split(
+        "#### 2a.1. Register Search Console", 1
+    )[0]
+    animation = landing_pass.split("Landing hero animation", 1)[1]
+    assert "complement" in animation.lower()
+    assert "generated" in animation.lower()
+    assert "replaces a plain static hero image" not in animation.lower()
 
 
 def test_bootstrap_keeps_named_cancellation_policy_out_of_worker_authored_copy():

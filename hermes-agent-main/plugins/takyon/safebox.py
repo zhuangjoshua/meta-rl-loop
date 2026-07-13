@@ -1360,11 +1360,11 @@ def business_bootstrap_free_credits() -> int:
     """
     raw = str(os.environ.get("TAKYON_BUSINESS_BOOTSTRAP_FREE_CREDITS") or "").strip()
     if not raw:
-        return 3
+        return 7
     try:
         return max(0, int(raw))
     except ValueError:
-        return 3
+        return 7
 
 
 def _safebox_key_slug(value: Any, limit: int = 48) -> str:
@@ -1639,7 +1639,8 @@ def _local_grant_business_bootstrap_credits(
         owner_user_id = str(row[0] if not isinstance(row, dict) else row.get("owner_user_id") or "").strip()
         if owner_user_id != user_ref:
             raise PermissionError("business_bootstrap_credit_owner_mismatch")
-        # Operator-plane dogfooding: the bootstrap starter seed (logo + X) is granted to the
+        # Operator-plane dogfooding: the bootstrap starter seed (two Taste site images + logo + X)
+        # is granted to the
         # verified business owner UNCONDITIONALLY. It previously required a settled operator create
         # charge (the 3% plan decrement), but operator company creation is now ungated from the plan
         # (see cli._operator_create_balance_preflight), so the seed no longer depends on a paid
@@ -1652,7 +1653,7 @@ def _local_grant_business_bootstrap_credits(
             credits,
             f"{slug}-bootstrap-free-seed",
             metadata={
-                "reason": "bootstrap free starter (X+logo)",
+                "reason": "bootstrap free starter (2 site images + logo + X)",
                 "operator_user_id": user_ref,
                 "create_charge_reservation_key": reservation_key,
                 "grant_policy": "business_bootstrap_starter",

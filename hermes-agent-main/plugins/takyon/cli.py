@@ -1888,8 +1888,8 @@ def _seed_business_free_credits(slug: str, *, operator_user_id: str | None = Non
 
     Idempotent on the slug inside Safebox, so a retried create never re-grants. Fail-open only for
     identity-less / non-Postgres dev runs, where there is no authoritative create charge to verify and
-    local creation must not be blocked. This makes the bootstrap logo + first X auto-run; without it
-    both fail closed on a zero credit balance."""
+    local creation must not be blocked. This funds the two required Taste site images while preserving
+    the post-landing logo + first X allowance; without it those actions fail closed on a zero balance."""
     from .core import _db_backend
 
     business_slug = str(slug or "").strip()

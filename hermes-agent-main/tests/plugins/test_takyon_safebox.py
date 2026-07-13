@@ -14,6 +14,17 @@ from plugins.takyon.stripe_util import build_signature_header
 from plugins.takyon.user_api_keys import generate_api_key
 
 
+def test_business_bootstrap_free_credits_default_invalid_and_override(monkeypatch):
+    monkeypatch.delenv("TAKYON_BUSINESS_BOOTSTRAP_FREE_CREDITS", raising=False)
+    assert safebox.business_bootstrap_free_credits() == 7
+
+    monkeypatch.setenv("TAKYON_BUSINESS_BOOTSTRAP_FREE_CREDITS", "not-an-integer")
+    assert safebox.business_bootstrap_free_credits() == 7
+
+    monkeypatch.setenv("TAKYON_BUSINESS_BOOTSTRAP_FREE_CREDITS", "11")
+    assert safebox.business_bootstrap_free_credits() == 11
+
+
 def test_read_env_backed_value_prefers_process_env(monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_process")

@@ -152,6 +152,28 @@ class _FakeStore:
         return {"success": True}
 
 
+def _write_valid_taste_landing_assets(root: Path) -> None:
+    generated = root / "public" / "generated"
+    receipts = root / ".takyon" / "site-images"
+    screens = root / "src" / "screens"
+    generated.mkdir(parents=True, exist_ok=True)
+    receipts.mkdir(parents=True, exist_ok=True)
+    screens.mkdir(parents=True, exist_ok=True)
+    png = b"\x89PNG\r\n\x1a\n" + (b"x" * 512)
+    for slug in ("hero-scene", "supporting-scene"):
+        (generated / f"{slug}.png").write_bytes(png)
+        (receipts / f"{slug}.json").write_text(
+            json.dumps({"success": True, "public_path": f"/generated/{slug}.png"}),
+            encoding="utf-8",
+        )
+    (screens / "landing.tsx").write_text(
+        '<img src="/generated/hero-scene.png" data-takyon-landing-asset="hero" />\n'
+        '<img src="/generated/supporting-scene.png" '
+        'data-takyon-landing-asset="supporting" />\n',
+        encoding="utf-8",
+    )
+
+
 def test_claude_agent_task_uses_broader_defaults_and_pinned_model_for_product_site_work(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
@@ -1526,6 +1548,73 @@ def test_run_claude_agent_task_in_docker_keyless_without_network_uses_default_br
     assert "--network" not in run_cmd
 
 
+def test_docker_claude_worker_mounts_explicit_site_image_bridge_without_credentials(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    bridge = tmp_path / "site-image-bridge"
+    bridge.mkdir()
+    _patch_docker_for_lockdown(tmp_path, monkeypatch)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-provider-key-should-not-leak")
+    monkeypatch.setenv("GEMINI_API_KEY", "raw-gemini-key-should-not-leak")
+    monkeypatch.setenv("OPENAI_API_KEY", "raw-openai-key-should-not-leak")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
+    monkeypatch.setattr(
+        takyon_core,
+        "_mint_claude_agent_operator_session_token",
+        lambda business, operator_user_id: "operator-session-capability",
+    )
+
+    run_cmd, payload, _worker_cwd, _worker_env = takyon_core._run_claude_agent_task_in_docker(
+        payload={"business": "taste-assets", "workspace": "product/site", "instruction": "x"},
+        workspace_path=workspace,
+        timeout_ms=30_000,
+        business="taste-assets",
+        operator_user_id="owner-1",
+        site_image_bridge_dir=bridge,
+    )
+
+    joined = " ".join(run_cmd)
+    assert (
+        f"type=bind,src={bridge},dst=/run/takyon-site-image-bridge" in run_cmd
+    )
+    assert payload["siteImageBridgeDir"] == "/run/takyon-site-image-bridge"
+    assert "operator-session-capability" in joined
+    assert "raw-provider-key-should-not-leak" not in joined
+    assert "raw-gemini-key-should-not-leak" not in joined
+    assert "raw-openai-key-should-not-leak" not in joined
+    assert "GEMINI_API_KEY=" not in joined
+    assert "OPENAI_API_KEY=" not in joined
+    assert "SITE_IMAGE_BRIDGE_TOKEN" not in joined
+
+
+def test_docker_claude_worker_omits_site_image_bridge_without_explicit_config(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _patch_docker_for_lockdown(tmp_path, monkeypatch)
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
+    monkeypatch.setattr(
+        takyon_core,
+        "_mint_claude_agent_operator_session_token",
+        lambda business, operator_user_id: "operator-session-capability",
+    )
+
+    run_cmd, payload, _worker_cwd, _worker_env = takyon_core._run_claude_agent_task_in_docker(
+        payload={"business": "ordinary-work", "workspace": "product/site", "instruction": "x"},
+        workspace_path=workspace,
+        timeout_ms=30_000,
+        business="ordinary-work",
+        operator_user_id="owner-1",
+    )
+
+    assert "siteImageBridgeDir" not in payload
+    assert not any("takyon-site-image-bridge" in part for part in run_cmd)
+
+
 def test_run_claude_agent_task_in_docker_defaults_to_proxy_when_remote_safebox_configured(tmp_path, monkeypatch):
     """No explicit broker flag, but a remote safebox IS configured → lockdown defaults ON (key-free via
     the proxy). The raw-key worker path is gone, so this is the ONLY way the worker runs on a deployed
@@ -2092,6 +2181,7 @@ def test_successful_taste_worker_with_policy_publish_blocker_is_not_human_review
             "DESIGN_VARIANCE: 4\nMOTION_INTENSITY: 2\nVISUAL_DENSITY: 3\n",
             encoding="utf-8",
         )
+        _write_valid_taste_landing_assets(root)
         return types.SimpleNamespace(
             returncode=0,
             stdout=json.dumps({"success": True, "summary": "implemented"}),
@@ -2345,6 +2435,7 @@ def test_taste_timeout_published_partial_still_requires_human_review(tmp_path, m
             "DESIGN_VARIANCE: 6\nMOTION_INTENSITY: 4\nVISUAL_DENSITY: 5\n",
             encoding="utf-8",
         )
+        _write_valid_taste_landing_assets(root)
         raise subprocess.TimeoutExpired(cmd=["node"], timeout=1.0)
 
     _patch_non_docker_product_site(monkeypatch, store)
@@ -2544,6 +2635,25 @@ def test_claude_agent_task_script_honors_explicit_claude_executable_env():
     text = script.read_text(encoding="utf-8")
     assert "TAKYON_CLAUDE_CODE_EXECUTABLE" in text
     assert "pathToClaudeCodeExecutable" in text
+
+
+def test_claude_agent_task_registers_site_image_mcp_only_for_bridge_config():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
+    text = script.read_text(encoding="utf-8")
+    assert "createSdkMcpServer" in text
+    assert "business_generate_site_image" in text
+    assert '"takyon_site_image"' in text
+    assert "siteImageBridgeDir" in text
+    assert "mcpServers" in text
+
+    # The file-RPC directory is the sole bridge configuration. Registering the MCP server must be
+    # conditional on that explicit input; no reusable token or provider credential enters Node.
+    assert "if (!bridgeDir) return null" in text
+    assert "siteImageMcpServer" in text
+    assert "siteImageMcpServer\n              ?" in text or "siteImageMcpServer ?" in text
+    assert "SITE_IMAGE_BRIDGE_TOKEN" not in text
+    assert "GEMINI_API_KEY" not in text
+    assert "OPENAI_API_KEY" not in text
 
 
 def test_claude_agent_task_script_passes_beta_disable_to_child_env():

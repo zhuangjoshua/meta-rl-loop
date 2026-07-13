@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -105,3 +107,96 @@ def test_site_image_capability_is_scoped_to_gemini_site_images():
     assert audience in safebox_app._CREATIVE_GEMINI_AUDIENCES
     assert audience not in safebox_app._CREATIVE_OPENAI_AUDIENCES
     assert audience not in safebox_app._CREATIVE_FAL_AUDIENCES
+
+
+def test_site_image_worker_bridge_caps_two_distinct_successes(tmp_path, monkeypatch):
+    class FakeStore:
+        def _resolve_business_file(self, business, relative):
+            return tmp_path / "businesses" / business / relative
+
+    calls: list[dict[str, object]] = []
+
+    def fake_generate(args, _store):
+        calls.append(dict(args))
+        return json.dumps(
+            {
+                "success": True,
+                "slug": args["slug"],
+                "public_path": f"/generated/{args['slug']}.png",
+            }
+        )
+
+    monkeypatch.setattr(core, "_handle_business_generate_site_image_with_store", fake_generate)
+    bridge_root = tmp_path / "bridge"
+    bridge = core._SiteImageWorkerBridge(
+        store=FakeStore(),
+        business="lumen",
+        idempotency_prefix="taste-run-1",
+        root=bridge_root,
+    )
+    bridge.start()
+    try:
+        responses = []
+        for slug in ("hero-atmosphere", "supporting-detail", "third-image"):
+            request_id = str(uuid.uuid4())
+            (bridge.requests_dir / f"{request_id}.json").write_text(
+                json.dumps(
+                    {
+                        "args": {
+                            "slug": slug,
+                            "prompt": f"Art-directed {slug}, no text or logos.",
+                            "aspect_ratio": "16:9",
+                            "purpose": slug,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            response_path = bridge.responses_dir / f"{request_id}.json"
+            deadline = time.monotonic() + 2
+            while not response_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            responses.append(json.loads(response_path.read_text(encoding="utf-8")))
+    finally:
+        assert bridge.close() is True
+
+    assert [response["success"] for response in responses] == [True, True, False]
+    assert "exactly two" in responses[2]["error"]
+    assert [call["idempotency_key"] for call in calls] == [
+        "taste-run-1:site-image:hero-atmosphere",
+        "taste-run-1:site-image:supporting-detail",
+    ]
+
+
+def test_taste_landing_asset_contract_requires_generated_hero_and_supporting_images(tmp_path):
+    root = tmp_path / "product" / "site"
+    receipts = root / ".takyon" / "site-images"
+    generated = root / "public" / "generated"
+    landing = root / "src" / "screens" / "landing.tsx"
+    receipts.mkdir(parents=True)
+    generated.mkdir(parents=True)
+    landing.parent.mkdir(parents=True)
+    png = b"\x89PNG\r\n\x1a\n" + (b"x" * 600)
+    for slug in ("hero-atmosphere", "supporting-detail"):
+        (generated / f"{slug}.png").write_bytes(png)
+        (receipts / f"{slug}.json").write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "slug": slug,
+                    "public_path": f"/generated/{slug}.png",
+                }
+            ),
+            encoding="utf-8",
+        )
+    landing.write_text(
+        '<img src="/generated/hero-atmosphere.png" data-takyon-landing-asset="hero" />\n'
+        '<img data-takyon-landing-asset="supporting" src="/generated/supporting-detail.png" />\n',
+        encoding="utf-8",
+    )
+
+    contract, blocker = core._read_taste_landing_asset_contract(root)
+
+    assert blocker == ""
+    assert contract["hero_path"] == "/generated/hero-atmosphere.png"
+    assert {asset["role"] for asset in contract["assets"]} == {"hero", "supporting"}
