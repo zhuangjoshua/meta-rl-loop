@@ -211,6 +211,7 @@ def test_plugin_registers_authority_tools_on_separate_toolset():
     assert toolsets["business_reddit_ad_insights_sync"] == "takyon-authority"
     assert toolsets["business_refresh_product_surface"] == "takyon-authority"
     assert toolsets["business_check_runtime_capabilities"] == "takyon-authority"
+    assert toolsets["business_delete_business"] == "takyon-authority"
     assert takyon_toolset_name("business_gc") == "takyon-authority"
     assert takyon_toolset_name("business_record_event") == "takyon"
 
@@ -4849,10 +4850,13 @@ def test_delete_business_dry_run_keeps_state_and_files(tmp_path):
 
     assert deletion["dry_run"] is True
     assert deletion["filesystem"]["files"] >= 1
-    assert deletion["subuser_product_site"] == {
-        "target": "root@134.209.123.8",
-        "path": "/opt/takyon/.takyon/product-sites/latexflow",
-    }
+    assert deletion["subuser_product_site"]["target"] == "root@134.209.123.8"
+    assert deletion["subuser_product_site"]["path"] == "/opt/takyon/.takyon/product-sites/latexflow"
+    assert deletion["subuser_product_site"]["cache_path"] == "/opt/takyon/.takyon/cache/businesses/latexflow"
+    assert [replica["target"] for replica in deletion["subuser_product_site"]["replicas"]] == [
+        "root@134.209.123.8",
+        "root@206.81.10.173",
+    ]
     assert (tmp_path / "businesses" / "latexflow" / "product" / "spec.md").exists()
     assert store.read(scope="global", query="list_businesses")["businesses"][0]["slug"] == "latexflow"
 

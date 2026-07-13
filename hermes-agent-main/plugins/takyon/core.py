@@ -12689,10 +12689,41 @@ def _subuser_remote_product_site_path(slug: str) -> PurePosixPath:
     return target
 
 
+def _subuser_remote_business_cache_root() -> PurePosixPath:
+    return _subuser_remote_home() / "cache" / "businesses"
+
+
+def _subuser_remote_business_cache_path(slug: str) -> PurePosixPath:
+    root = _subuser_remote_business_cache_root()
+    target = root / _slugify(slug)
+    if root not in (target, *target.parents):
+        raise TakyonError("subuser remote business cache escaped cache/businesses root")
+    return target
+
+
 def _subuser_product_site_summary(slug: str) -> dict[str, Any]:
     return {
         "target": _subuser_vps_ssh_target(),
         "path": str(_subuser_remote_product_site_path(slug)),
+    }
+
+
+def _subuser_business_residue_summary(slug: str) -> dict[str, Any]:
+    targets = _subuser_vps_ssh_targets()
+    product_site_path = str(_subuser_remote_product_site_path(slug))
+    business_cache_path = str(_subuser_remote_business_cache_path(slug))
+    return {
+        "target": targets[0] if targets else "",
+        "path": product_site_path,
+        "cache_path": business_cache_path,
+        "replicas": [
+            {
+                "target": target,
+                "path": product_site_path,
+                "cache_path": business_cache_path,
+            }
+            for target in targets
+        ],
     }
 
 
@@ -13039,7 +13070,17 @@ def _sync_subuser_product_site(slug: str, live_root: Path) -> dict[str, Any]:
 
 
 def _delete_subuser_product_site(slug: str) -> dict[str, Any]:
-    summary = _subuser_product_site_summary(slug)
+    """Remove a business's static site and runtime cache from every sub-user replica."""
+    summary = _subuser_business_residue_summary(slug)
+    targets = _subuser_vps_ssh_targets()
+    if not targets:
+        return {
+            **summary,
+            "removed": False,
+            "cleanup_complete": False,
+            "status": "blocked",
+            "error": "no sub-user VPS hosts configured for this environment",
+        }
     ssh = shutil.which("ssh")
     if not ssh:
         raise TakyonError("ssh is unavailable; cannot remove sub-user product site")
@@ -13049,70 +13090,158 @@ def _delete_subuser_product_site(slug: str) -> dict[str, Any]:
 
     remote_root = _subuser_remote_product_sites_root()
     remote_path = _subuser_remote_product_site_path(slug)
+    cache_root = _subuser_remote_business_cache_root()
+    cache_path = _subuser_remote_business_cache_path(slug)
     remote_command = dedent(
         f"""\
         set -euo pipefail
-        root={shlex.quote(str(remote_root))}
-        target={shlex.quote(str(remote_path))}
-        case "$target" in
-          "$root"/*) ;;
-          *)
-            echo "refusing to delete remote path outside sub-user product-sites root: $target" >&2
-            exit 64
-            ;;
-        esac
-        if [ -e "$target" ] || [ -L "$target" ]; then
-          rm -rf -- "$target"
-          echo removed
-        else
-          echo missing
-        fi
+        delete_one() {{
+          label="$1"
+          root="$2"
+          target="$3"
+          case "$target" in
+            "$root"/*) ;;
+            *)
+              echo "refusing to delete remote path outside expected root: $target" >&2
+              exit 64
+              ;;
+          esac
+          status=missing
+          if [ -e "$target" ] || [ -L "$target" ]; then
+            rm -rf -- "$target"
+            status=removed
+          fi
+          if [ -e "$target" ] || [ -L "$target" ]; then
+            echo "remote path remains after deletion: $target" >&2
+            exit 65
+          fi
+          printf '%s=%s\n' "$label" "$status"
+        }}
+        delete_one product_site {shlex.quote(str(remote_root))} {shlex.quote(str(remote_path))}
+        delete_one business_cache {shlex.quote(str(cache_root))} {shlex.quote(str(cache_path))}
         """
     )
-    try:
-        proc = subprocess.run(
-            [
-                ssh,
-                "-i",
-                str(ssh_key),
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "IdentitiesOnly=yes",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                summary["target"],
-                remote_command,
-            ],
-            text=True,
-            capture_output=True,
-            timeout=45,
-            env=_runtime_env(),
-        )
-    except subprocess.TimeoutExpired as exc:
-        output = "\n".join(part for part in ((exc.stdout or "").strip(), (exc.stderr or "").strip()) if part)
-        raise TakyonError(
-            f"timed out removing sub-user product site for {slug}: {_truncate_text(output, 4000)}"
-        ) from exc
-    except Exception as exc:
-        raise TakyonError(f"failed to invoke ssh for sub-user product site delete: {exc}") from exc
+    replicas: list[dict[str, Any]] = []
+    for target in targets:
+        replica: dict[str, Any] = {
+            "target": target,
+            "path": str(remote_path),
+            "cache_path": str(cache_path),
+        }
+        try:
+            proc = subprocess.run(
+                [
+                    ssh,
+                    "-i",
+                    str(ssh_key),
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=10",
+                    "-o",
+                    "IdentitiesOnly=yes",
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
+                    target,
+                    remote_command,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=45,
+                env=_runtime_env(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = "\n".join(
+                str(part).strip() for part in (exc.stdout or "", exc.stderr or "") if str(part).strip()
+            )
+            replicas.append(
+                {
+                    **replica,
+                    "removed": False,
+                    "cleanup_complete": False,
+                    "status": "failed",
+                    "error": _truncate_text(output or "ssh timed out", 4000),
+                }
+            )
+            continue
+        except Exception as exc:
+            replicas.append(
+                {
+                    **replica,
+                    "removed": False,
+                    "cleanup_complete": False,
+                    "status": "failed",
+                    "error": _truncate_text(str(exc), 4000),
+                }
+            )
+            continue
 
-    output = "\n".join(part for part in ((proc.stdout or "").strip(), (proc.stderr or "").strip()) if part)
-    if proc.returncode != 0:
-        raise TakyonError(
-            f"sub-user product site cleanup failed for {slug}: {_truncate_text(output or f'ssh exited {proc.returncode}', 4000)}"
+        output = "\n".join(part for part in ((proc.stdout or "").strip(), (proc.stderr or "").strip()) if part)
+        if proc.returncode != 0:
+            replicas.append(
+                {
+                    **replica,
+                    "removed": False,
+                    "cleanup_complete": False,
+                    "status": "failed",
+                    "error": _truncate_text(output or f"ssh exited {proc.returncode}", 4000),
+                }
+            )
+            continue
+
+        statuses: dict[str, str] = {}
+        for line in (proc.stdout or "").splitlines():
+            label, separator, value = line.strip().lower().partition("=")
+            if separator and label in {"product_site", "business_cache"} and value in {"removed", "missing"}:
+                statuses[label] = value
+        if set(statuses) != {"product_site", "business_cache"}:
+            replicas.append(
+                {
+                    **replica,
+                    "removed": False,
+                    "cleanup_complete": False,
+                    "status": "failed",
+                    "error": _truncate_text(output or "sub-user cleanup returned an incomplete receipt", 4000),
+                }
+            )
+            continue
+
+        removed = any(value == "removed" for value in statuses.values())
+        replicas.append(
+            {
+                **replica,
+                "product_site": {
+                    "path": str(remote_path),
+                    "removed": statuses["product_site"] == "removed",
+                    "status": statuses["product_site"],
+                },
+                "business_cache": {
+                    "path": str(cache_path),
+                    "removed": statuses["business_cache"] == "removed",
+                    "status": statuses["business_cache"],
+                },
+                "removed": removed,
+                "cleanup_complete": True,
+                "status": "removed" if removed else "missing",
+            }
         )
 
-    status = "removed"
-    stdout_lines = [line.strip().lower() for line in (proc.stdout or "").splitlines() if line.strip()]
-    if stdout_lines and stdout_lines[-1] == "missing":
-        status = "missing"
+    cleanup_complete = len(replicas) == len(targets) and all(
+        bool(replica.get("cleanup_complete")) for replica in replicas
+    )
+    removed = any(bool(replica.get("removed")) for replica in replicas)
+    errors = [
+        f"{replica['target']}: {replica['error']}"
+        for replica in replicas
+        if replica.get("error")
+    ]
     return {
         **summary,
-        "removed": status == "removed",
-        "status": status,
+        "replicas": replicas,
+        "removed": removed,
+        "cleanup_complete": cleanup_complete,
+        "status": ("removed" if removed else "missing") if cleanup_complete else "partial",
+        **({"error": _truncate_text("; ".join(errors), 4000)} if errors else {}),
     }
 
 
@@ -19471,7 +19600,7 @@ class TakyonStore:
                 product_service_route["exists"] = False
         cron_preview = self._delete_business_crons(slug, confirm=False) if delete_cron else {"matched": [], "removed": []}
         db_counts = self._business_delete_db_counts(conn, slug)
-        subuser_product_site = _subuser_product_site_summary(slug)
+        subuser_product_site = _subuser_business_residue_summary(slug)
         public_edge_site = _public_edge_product_site_summary(slug)
 
         result: dict[str, Any] = {
@@ -19519,19 +19648,17 @@ class TakyonStore:
             result["published_site"] = {**published_site_summary, "removed": False}
         else:
             result["published_site"] = {**published_site_summary, "removed": False}
-        # Sub-user product-site cleanup SSHes operator->sub-user with a key that is intentionally NOT
-        # present on the operator host (least-privilege). It also depends on the sub-user host being
-        # reachable. Both are best-effort: product sites are served from the Cloudflare R2 edge, not
-        # this legacy per-business directory, so a left-behind dir is harmless residue. It MUST NOT
-        # abort the authoritative DB-row delete below (which runs last) — otherwise a missing key would
-        # strand the control-plane row while every other asset is already gone. Record the failure
-        # instead of raising, so the dashboard "X" delete works inline on the operator host.
+        # Sub-user residue cleanup is best-effort so a missing SSH key cannot strand the authoritative
+        # control-plane row after other assets are gone. Its receipt is included in the truthfulness
+        # gate below: failure on any replica is reported, never silently presented as a clean delete.
         try:
             result["subuser_product_site"] = _delete_subuser_product_site(slug)
         except Exception as subuser_exc:  # noqa: BLE001 - best-effort residue cleanup, never fatal
             result["subuser_product_site"] = {
                 **subuser_product_site,
                 "removed": False,
+                "cleanup_complete": False,
+                "status": "blocked",
                 "skipped": True,
                 "error": _truncate_text(str(subuser_exc), 300),
             }
@@ -19574,6 +19701,13 @@ class TakyonStore:
         # control-plane row delete so the operator sees the real end state, not an optimistic one.
         edge_still_present = bool(result["public_edge_site"].get("still_present"))
         service_origin_blocked = bool(service_blocker or caddy_blocker)
+        subuser_receipt = result["subuser_product_site"]
+        subuser_cleanup_complete = bool(
+            subuser_receipt.get(
+                "cleanup_complete",
+                subuser_receipt.get("status") in {"removed", "missing"} and not subuser_receipt.get("error"),
+            )
+        )
         still_serving_reasons: list[str] = []
         if edge_still_present:
             still_serving_reasons.append(
@@ -19584,7 +19718,12 @@ class TakyonStore:
             still_serving_reasons.append(f"product service file: {service_blocker}")
         if caddy_blocker:
             still_serving_reasons.append(f"product caddy route: {caddy_blocker}")
-        result["still_serving"] = edge_still_present or service_origin_blocked
+        if not subuser_cleanup_complete:
+            still_serving_reasons.append(
+                "sub-user replica site/cache cleanup incomplete"
+                + (f": {subuser_receipt['error']}" if subuser_receipt.get("error") else "")
+            )
+        result["still_serving"] = edge_still_present or service_origin_blocked or not subuser_cleanup_complete
         result["still_serving_reasons"] = still_serving_reasons
 
         deleted = self._delete_business_db_rows(conn, slug, db_counts=db_counts)

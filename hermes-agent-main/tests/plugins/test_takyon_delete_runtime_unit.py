@@ -1,10 +1,35 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import types
 
 from plugins.takyon import core as takyon_core
 from plugins.takyon.core import TakyonStore
+
+
+def test_delete_business_is_unavailable_on_subuser_host(monkeypatch):
+    cleanup_calls: list[str] = []
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "subuser")
+    monkeypatch.setattr(
+        takyon_core,
+        "_delete_subuser_product_site",
+        lambda slug: cleanup_calls.append(slug),
+    )
+
+    result = json.loads(
+        takyon_core.handle_business_delete_business(
+            {
+                "business": "notewave",
+                "confirm": True,
+                "idempotency_key": "subuser-delete-must-fail",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "subuser host cannot open the default operator store" in result["error"]
+    assert cleanup_calls == []
 
 
 def test_delete_business_removes_product_runtime_surfaces(tmp_path, monkeypatch):
@@ -149,8 +174,11 @@ def test_delete_business_subuser_cleanup_failure_is_not_fatal(tmp_path, monkeypa
     assert not business_root.exists()
     # The failure is recorded, not swallowed silently or fatal.
     assert result["subuser_product_site"]["removed"] is False
+    assert result["subuser_product_site"]["cleanup_complete"] is False
     assert result["subuser_product_site"]["skipped"] is True
     assert "ssh key not found" in result["subuser_product_site"]["error"]
+    assert result["still_serving"] is True
+    assert any("sub-user replica site/cache cleanup incomplete" in reason for reason in result["still_serving_reasons"])
 
 
 def test_delete_business_no_files_still_removes_public_surfaces(tmp_path, monkeypatch):
@@ -288,10 +316,17 @@ def test_delete_subuser_product_site_uses_tracked_ssh_defaults(tmp_path, monkeyp
 
     def fake_run(command, **kwargs):
         calls.append(command)
-        return types.SimpleNamespace(returncode=0, stdout="removed\n", stderr="")
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout="product_site=removed\nbusiness_cache=removed\n",
+            stderr="",
+        )
 
+    monkeypatch.setenv("TAKYON_ENV", "prod")
     monkeypatch.setenv("TAKYON_SUBUSER_VPS_SSH_KEY", str(key_path))
     monkeypatch.delenv("TAKYON_SUBUSER_VPS_HOST", raising=False)
+    monkeypatch.delenv("TAKYON_SUBUSER_VPS_HOSTS", raising=False)
+    monkeypatch.delenv("TAKYON_SUBUSER_REPLICA_HOSTS", raising=False)
     monkeypatch.delenv("TAKYON_SUBUSER_VPS_USER", raising=False)
     monkeypatch.delenv("TAKYON_SUBUSER_REMOTE_HOME", raising=False)
     monkeypatch.delenv("TAKYON_SUBUSER_REMOTE_PRODUCT_SITES", raising=False)
@@ -300,13 +335,20 @@ def test_delete_subuser_product_site_uses_tracked_ssh_defaults(tmp_path, monkeyp
 
     result = takyon_core._delete_subuser_product_site("latexflow")
 
-    assert result == {
-        "target": "root@134.209.123.8",
-        "path": "/opt/takyon/.takyon/product-sites/latexflow",
-        "removed": True,
-        "status": "removed",
-    }
-    assert calls and calls[0][0] == "/usr/bin/ssh"
+    assert result["target"] == "root@134.209.123.8"
+    assert result["path"] == "/opt/takyon/.takyon/product-sites/latexflow"
+    assert result["cache_path"] == "/opt/takyon/.takyon/cache/businesses/latexflow"
+    assert result["removed"] is True
+    assert result["cleanup_complete"] is True
+    assert result["status"] == "removed"
+    assert [replica["target"] for replica in result["replicas"]] == [
+        "root@134.209.123.8",
+        "root@206.81.10.173",
+    ]
+    assert all(replica["product_site"]["removed"] for replica in result["replicas"])
+    assert all(replica["business_cache"]["removed"] for replica in result["replicas"])
+    assert len(calls) == 2
+    assert all(call[0] == "/usr/bin/ssh" for call in calls)
     assert calls[0][1:10] == [
         "-i",
         str(key_path),
@@ -320,8 +362,46 @@ def test_delete_subuser_product_site_uses_tracked_ssh_defaults(tmp_path, monkeyp
     ]
     assert calls[0][10] == "StrictHostKeyChecking=accept-new"
     assert calls[0][11] == "root@134.209.123.8"
-    assert "target=/opt/takyon/.takyon/product-sites/latexflow" in calls[0][12]
-    assert "root=/opt/takyon/.takyon/product-sites" in calls[0][12]
+    assert calls[1][11] == "root@206.81.10.173"
+    assert "delete_one product_site /opt/takyon/.takyon/product-sites" in calls[0][12]
+    assert "/opt/takyon/.takyon/product-sites/latexflow" in calls[0][12]
+    assert "delete_one business_cache /opt/takyon/.takyon/cache/businesses" in calls[0][12]
+    assert "/opt/takyon/.takyon/cache/businesses/latexflow" in calls[0][12]
+
+
+def test_delete_subuser_product_site_attempts_all_replicas_after_failure(tmp_path, monkeypatch):
+    key_path = tmp_path / "takyon_argon_alpha14"
+    key_path.write_text("dummy-key\n", encoding="utf-8")
+    calls: list[str] = []
+
+    def fake_run(command, **kwargs):
+        target = command[11]
+        calls.append(target)
+        if target == "root@134.209.123.8":
+            return types.SimpleNamespace(returncode=255, stdout="", stderr="connection refused")
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout="product_site=missing\nbusiness_cache=removed\n",
+            stderr="",
+        )
+
+    monkeypatch.setenv("TAKYON_ENV", "prod")
+    monkeypatch.setenv("TAKYON_SUBUSER_VPS_SSH_KEY", str(key_path))
+    monkeypatch.delenv("TAKYON_SUBUSER_VPS_HOST", raising=False)
+    monkeypatch.delenv("TAKYON_SUBUSER_VPS_HOSTS", raising=False)
+    monkeypatch.delenv("TAKYON_SUBUSER_REPLICA_HOSTS", raising=False)
+    monkeypatch.setattr(takyon_core.shutil, "which", lambda name: "/usr/bin/ssh" if name == "ssh" else None)
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    result = takyon_core._delete_subuser_product_site("latexflow")
+
+    assert calls == ["root@134.209.123.8", "root@206.81.10.173"]
+    assert result["removed"] is True
+    assert result["cleanup_complete"] is False
+    assert result["status"] == "partial"
+    assert result["replicas"][0]["status"] == "failed"
+    assert result["replicas"][1]["cleanup_complete"] is True
+    assert "root@134.209.123.8: connection refused" in result["error"]
 
 
 def test_subuser_vps_ssh_key_path_falls_back_to_tracked_operator_secret(monkeypatch, tmp_path):
