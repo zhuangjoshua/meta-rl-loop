@@ -175,6 +175,10 @@ def test_runtime_deploys_fail_closed_on_venv_symlinks_and_protect_remote_venvs()
         assert "rsync -az --delete --force" not in src, path
     assert "--filter='protect /.venv'" in release_helper
     assert "--exclude '/.venv'" in release_helper
+    stage = release_helper.split("takyon_stage_runtime_release() {", 1)[1].split(
+        "takyon_prepare_runtime_rollback() {", 1
+    )[0]
+    assert "rsync -az --delete --no-owner --no-group" in stage
 
 
 def test_runtime_rsync_rules_cannot_replace_remote_venv_with_source_symlink(tmp_path):

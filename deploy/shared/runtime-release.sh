@@ -38,7 +38,9 @@ takyon_stage_runtime_release() {
     rm -rf '$TAKYON_REMOTE_STAGED_RUNTIME' '$TAKYON_REMOTE_BACKUP_RUNTIME' '$TAKYON_REMOTE_RELEASE_META'
     install -d '$TAKYON_REMOTE_STAGED_RUNTIME' '$TAKYON_REMOTE_RELEASE_META/candidates' '$TAKYON_REMOTE_RELEASE_META/backups'"
 
-  rsync -az --delete \
+  # The sealed artifact is assembled on the operator's Mac. Preserve its deliberate 0444/0555
+  # modes, but never transplant that Mac user's uid/gid onto a root-owned VPS runtime tree.
+  rsync -az --delete --no-owner --no-group \
     --exclude '.git/' \
     --exclude '.pytest_cache/' \
     --exclude '__pycache__/' \

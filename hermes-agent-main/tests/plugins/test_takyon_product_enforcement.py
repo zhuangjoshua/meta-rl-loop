@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import shutil
 import sqlite3
@@ -997,6 +998,45 @@ def test_kit_materialization_excludes_scaffold_and_artifacts(tmp_path):
     assert (kit / "runtime-client.js").is_file()
     assert not (kit / "scaffold").exists()
     assert not list(kit.rglob("node_modules")) and not list(kit.rglob("dist"))
+
+
+def test_kit_materialization_repairs_read_only_deployed_sources(monkeypatch, tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    source = tmp_path / "sealed-runtime-kit"
+    source.mkdir()
+    runtime_file = source / "README.md"
+    runtime_file.write_text("first\n", encoding="utf-8")
+    runtime_file.chmod(0o444)
+    workspace = tmp_path / "workspace"
+    monkeypatch.setattr(takyon_core, "_subuser_app_kit_source_dir", lambda: source)
+
+    takyon_core._materialize_subuser_app_kit(workspace, slug="sealed-kit", surface=None)
+    destination = workspace / "_takyon" / "README.md"
+    destination.chmod(0o444)  # reproduce an existing workspace poisoned by the old copy2 path
+    runtime_file.chmod(0o644)
+    runtime_file.write_text("second\n", encoding="utf-8")
+    runtime_file.chmod(0o444)
+
+    takyon_core._materialize_subuser_app_kit(workspace, slug="sealed-kit", surface=None)
+
+    assert destination.read_text(encoding="utf-8") == "second\n"
+    assert destination.stat().st_mode & 0o200
+
+
+def test_all_appkit_runtime_copies_drop_sealed_release_modes():
+    from plugins.takyon import core as takyon_core
+
+    for function_name in (
+        "_materialize_subuser_app_kit",
+        "_materialize_subuser_app_scaffold",
+        "_rematerialize_starter_owned_files",
+        "_materialize_mobile_app_workspace",
+        "_rematerialize_mobile_starter_owned_files",
+    ):
+        source = inspect.getsource(getattr(takyon_core, function_name))
+        assert "shutil.copy2" not in source, function_name
+        assert "_replace_mutable_workspace_file" in source, function_name
 
 
 def _app_shell_surface(frontend_stack: str | None) -> dict:

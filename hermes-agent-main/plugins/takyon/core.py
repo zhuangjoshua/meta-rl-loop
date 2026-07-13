@@ -3220,6 +3220,21 @@ def _materialized_surface_for_workspace(
     }
 
 
+def _replace_mutable_workspace_file(source: Path, destination: Path) -> None:
+    """Copy a runtime-owned source into a mutable workspace without inheriting release modes.
+
+    Deployed runtime trees are intentionally sealed 0444/0555. ``shutil.copy2`` preserves that
+    mode, so the first AppKit materialization made its destination read-only and every later refresh
+    failed with EACCES. Atomic replacement also repairs already-poisoned 0444 destinations because
+    it needs write access only to their parent directory.
+    """
+    _atomic_write_bytes(destination, source.read_bytes())
+    try:
+        destination.chmod(0o644)
+    except OSError:
+        pass
+
+
 def _materialize_subuser_app_kit(
     workspace_root: Path,
     *,
@@ -3242,8 +3257,7 @@ def _materialize_subuser_app_kit(
             if {"node_modules", "dist", ".git"} & set(rel.parts):
                 continue
             destination = target_root / rel
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, destination)
+            _replace_mutable_workspace_file(path, destination)
     materialized_surface = _materialized_surface_for_workspace(workspace_root, surface=surface)
     context_payload = _subuser_surface_context_payload(
         materialized_surface,
@@ -3299,8 +3313,7 @@ def _rematerialize_mobile_starter_owned_files(workspace_root: Path) -> None:
         if not src_path.is_file():
             raise TakyonError(f"mobile_app scaffold is missing starter-owned {rel}")
         destination = workspace_root / rel
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_path, destination)
+        _replace_mutable_workspace_file(src_path, destination)
 
 
 def _workspace_is_mobile_app_dir(workspace_raw: str) -> bool:
@@ -3361,7 +3374,7 @@ def _materialize_mobile_app_workspace(
             try:
                 text = path.read_text(encoding="utf-8")
             except (UnicodeDecodeError, ValueError):
-                shutil.copy2(path, destination)
+                _replace_mutable_workspace_file(path, destination)
                 continue
             for token, value in substitutions.items():
                 text = text.replace(token, value)
@@ -3390,7 +3403,9 @@ def _materialize_mobile_app_workspace(
     # app workspaces, exactly like _rematerialize_appkit_owned_src on the web side.
     kit_dir = workspace_root / "_takyon"
     kit_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source / "_takyon" / "runtime-client.ts", kit_dir / "runtime-client.ts")
+    _replace_mutable_workspace_file(
+        source / "_takyon" / "runtime-client.ts", kit_dir / "runtime-client.ts"
+    )
     auth_payload = _subuser_public_auth_payload(surface) or {}
     context = {
         "runtimeApiBase": f"https://{canonical_slug}.{_company_base_domain()}/api/takyon/apps/{canonical_slug}",
@@ -3937,7 +3952,7 @@ def _materialize_subuser_app_scaffold(
                 text = text.replace(token, value)
             destination.write_text(text, encoding="utf-8")
         else:
-            shutil.copy2(path, destination)
+            _replace_mutable_workspace_file(path, destination)
     # Free brand mark: seed a deterministic SVG monogram favicon (no provider call) and
     # make sure index.html links it. vite copies public/favicon.svg verbatim into dist/,
     # so the published slug host serves /favicon.svg instead of 404ing.
@@ -4014,7 +4029,7 @@ def _rematerialize_starter_owned_files(
                 text = text.replace(token, value)
             destination.write_text(text, encoding="utf-8")
         else:
-            shutil.copy2(src_path, destination)
+            _replace_mutable_workspace_file(src_path, destination)
 
 
 def _materialize_subuser_app_starter(
