@@ -334,7 +334,7 @@ def _business_bootstrap_instruction(
         "",
         "For /:",
         "- Write ICP-specific copy immediately.",
-        "- The hero, problem, features, pricing, and CTA must reflect the idea brief's customer and pain.",
+        "- Communicate the idea brief's customer, problem, value, offer or pricing, and real conversion path when relevant. These are content inputs, not a required section list: the native Taste skill decides whether, where, and how each belongs in the composition, and may omit anything irrelevant.",
         "- The landing page must be unmistakably product-specific from the first pass. Let the native Taste skill infer the appropriate visual intensity from the brief instead of prescribing a bold, minimal, or other preset aesthetic.",
         "",
         "For /app:",

@@ -33,7 +33,7 @@ def test_public_shell_separates_login_signup_and_redirects_signed_in_viewers():
     assert "setSubscribeAfterAuth(true)" not in auth  # the boolean comes from startGoogleAuth's argument
     assert auth.count("startGoogleAuth(true)") == 2
     assert "shouldSubscribeAfterAuth" in read("src/lib/hooks.ts")
-    assert 'if (access.loading) return <LandingLoading />' in landing
+    assert 'aria-busy={access.loading || undefined}' in landing
     assert '<Navigate to="/app" replace />' in landing
     assert "PublicSiteHeader" in landing
     assert navigation.count("Log in") >= 1
@@ -41,6 +41,43 @@ def test_public_shell_separates_login_signup_and_redirects_signed_in_viewers():
     assert "border-b border-border" in navigation
     assert "max-w-7xl" not in navigation
     assert 'className="flex w-full' in navigation
+
+
+def test_landing_seed_is_composition_neutral_and_non_shippable(tmp_path):
+    landing = read("src/screens/landing.tsx")
+
+    assert 'data-takyon-scaffold="landing"' in landing
+    assert "PublicSiteHeader" in landing
+    assert '<Navigate to="/app" replace />' in landing
+    for forced_composition in (
+        "<section",
+        "grid-cols",
+        "StoreSection",
+        "Sign up",
+        "Your workspace",
+        "Outcome-focused",
+        "Real product visuals",
+        "Evidence over hype",
+    ):
+        assert forced_composition not in landing
+
+    product_root = tmp_path / "site"
+    seeded_landing = product_root / "src" / "screens" / "landing.tsx"
+    seeded_landing.parent.mkdir(parents=True)
+    seeded_landing.write_text(landing, encoding="utf-8")
+    markers = takyon_core._scaffold_visible_shell_markers(product_root)
+    assert markers == [
+        {
+            "path": "src/screens/landing.tsx",
+            "issue": "scaffold_visible_shell",
+            "snippet": "screen still carries the scaffold sentinel marker and renders the blank shell",
+        }
+    ]
+    blocker = takyon_core._scaffold_visible_shell_unfinished_blocker(
+        {"inventory": {"risk_markers": markers}}
+    )
+    assert "product still ships the blank scaffold screen" in blocker
+    assert "src/screens/landing.tsx" in blocker
 
 
 def test_nested_public_pages_have_stable_header_and_no_conversion_ctas():
@@ -160,6 +197,27 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     assert "Upgrade landing proof from the verified research" not in prompt
     assert "### 4. X post" not in prompt
     assert "scheduled CEO wake rail" in prompt
+
+
+def test_bootstrap_supplies_content_inputs_without_mandating_landing_sections():
+    prompt = turn_runtime._business_bootstrap_instruction(
+        "composition-neutral-test",
+        "Build a paid micro-SaaS for turning client notes into reusable briefs",
+        "live",
+        archetype="web_saas",
+    )
+    landing_guidance = prompt.split("For /:", 1)[1].split("For /app:", 1)[0]
+
+    assert (
+        "customer, problem, value, offer or pricing, and real conversion path when relevant"
+        in landing_guidance
+    )
+    assert "content inputs, not a required section list" in landing_guidance
+    assert "native Taste skill decides whether, where, and how" in landing_guidance
+    assert "may omit anything irrelevant" in landing_guidance
+    assert "hero, problem, features, pricing, and CTA must" not in prompt
+    assert "left-and-right" not in landing_guidance
+    assert "split hero" not in landing_guidance
 
 
 def test_bootstrap_uses_native_taste_without_prompt_body_guidance_injection():
@@ -634,10 +692,26 @@ def test_mobile_subscription_conformance_requires_discoverable_profile_navigatio
 
 def test_landing_has_no_forced_visual_module_and_keeps_default_interaction_sounds():
     main = read("src/main.tsx")
+    landing = read("src/screens/landing.tsx")
+    navigation = read("src/components/site-navigation.tsx")
+    store = read("src/screens/store.tsx")
     sounds = read("src/lib/interaction-sounds.ts")
     assert "SocialProofMarquee" not in main
     assert "PublicLandingRoute" not in main
     assert '<Route path="/" element={<LandingScreen />} />' in main
+    assert '<Route path="/store" element={<StoreScreen />} />' in main
+    assert "StoreSection" not in landing
+    assert "export function StoreScreen" in store
+    assert "<StoreSection" in store
+    for path, label in (
+        ('to="/"', "Home"),
+        ('to="/pricing"', "Pricing"),
+        ('to="/faq"', "FAQ"),
+        ('to="/privacy"', "Privacy"),
+        ('to="/terms"', "Terms"),
+    ):
+        assert path in navigation
+        assert label in navigation
     assert not (SCAFFOLD / "src/components/social-proof-marquee.tsx").exists()
     assert "animate-proof-marquee" not in read("src/index.css")
     assert "installInteractionSounds" in main
@@ -655,6 +729,19 @@ def test_pricing_uses_only_published_plan_price_and_limits():
     contract = takyon_core._subuser_app_kit_contract_block(None)
     assert "never invent a promotion" in contract
     assert "defaultPlanLimitLabels()" in contract
+
+    assert takyon_core.DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS == 1_900
+    assert takyon_core.DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD == 5_000_000
+
+    prompt = turn_runtime._business_bootstrap_instruction(
+        "pricing-preservation-test",
+        "Build a paid micro-SaaS with a $29 monthly plan",
+        "live",
+        archetype="web_saas",
+    )
+    assert "Use an explicitly requested monthly price when one is already known." in prompt
+    assert "If pricing is not settled yet, keep the canonical starter monthly plan" in prompt
+    assert "$19" not in prompt
 
 
 def test_surface_context_carries_strategy_product_name_instead_of_internal_slug(tmp_path):
