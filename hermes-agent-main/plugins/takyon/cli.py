@@ -4208,16 +4208,69 @@ def _command_with_current_business(tokens: list[str], current_business: str | No
     return tokens
 
 
-def _bare_control_command_is_unambiguous(
+def _bare_local_command_is_unambiguous(
     tokens: list[str], current_business: str | None
 ) -> bool:
-    """Keep ordinary prose beginning with pause/resume/kill on the CEO chat path."""
-    if not tokens or tokens[0].lower() not in {"pause", "resume", "kill"}:
-        return True
+    """Dispatch only grammar-shaped bare commands; ordinary prose stays on the CEO chat path.
+
+    Slash commands are always explicit and bypass this check.  Bare commands remain convenient for
+    their short canonical forms, but an arbitrary sentence beginning with ``read``, ``show``,
+    ``test``, ``focus``, ``delete``, etc. must never be reinterpreted as an operator command.
+    """
+    if not tokens:
+        return False
+    command = tokens[0].lower().lstrip("/")
     if len(tokens) == 1:
+        return command != "read"
+
+    def _path_arg() -> bool:
+        if current_business is None or len(tokens) != 2:
+            return False
+        value = tokens[1]
+        return (
+            value not in {".", ".."}
+            and not value.endswith((":", ";", ",", "?", "!"))
+            and ("/" in value or "." in value or value.startswith(("./", "../", "~")))
+        ) or value in {".", ".."}
+
+    if command in {"read", "show"}:
+        return _path_arg()
+    if command in {"files", "workspace"}:
+        return _path_arg()
+    if command in {"status", "pulse", "jobs", "campaigns", "workspaces", "capabilities", "caps", "businesses", "list"}:
+        return False
+    if command == "test":
+        return current_business is not None and len(tokens) == 2 and tokens[1].lower() in {
+            "on", "off", "status", "show", "test", "live",
+        }
+    if command == "focus":
+        return current_business is not None and len(tokens) == 2 and tokens[1].lower() in {
+            "all", "any", "clear", "default", "marketing", "marketing-only", "off",
+            "product", "product-only", "show", "status",
+        }
+    if command in {"pause", "resume", "kill"}:
+        target = tokens[1].lower()
+        if target == "global":
+            return len(tokens) == 2
+        if target == "business":
+            return len(tokens) == 3
+        return len(tokens) == 2 and target.startswith("business:")
+    if command == "delete":
+        return current_business is not None and all(
+            token == "confirm" or token.startswith("--") for token in tokens[1:]
+        )
+    if command in {"credits", "credit"}:
+        return current_business is not None and tokens[1].lower() in {
+            "status", "show", "packs", "buy", "checkout", "reconcile", "allocate", "alloc", "set",
+        }
+    if command == "budget":
+        return current_business is not None and tokens[1].lower() in {"show", "status", "set"}
+    if command == "memory":
+        return current_business is not None and tokens[1].lower() in {"list", "record"}
+    # These commands intentionally carry a free-form CEO instruction after the command word.
+    if command in {"wake", "run", "goal", "/goal"}:
         return current_business is not None
-    target = tokens[1].lower()
-    return target == "global" or target == "business" or target.startswith("business:")
+    return False
 
 
 def _looks_like_slug(value: str) -> bool:
@@ -4623,7 +4676,16 @@ def _handle_shell_line(
     if is_slash and command == "ceo":
         return _format_ceo_focus(current_business, store, model), current_business
 
-    if command == "use":
+    bare_use_is_explicit = (
+        command == "use"
+        and not is_slash
+        and len(tokens) == 2
+        and (
+            tokens[1].lower() in {"global", "root", "coscale", "operator"}
+            or _business_exists(store, tokens[1])
+        )
+    )
+    if command == "use" and (is_slash or len(tokens) == 1 or bare_use_is_explicit):
         if len(tokens) < 2:
             return "Using global scope", None
         slug = _slugify(tokens[1])
@@ -4633,10 +4695,10 @@ def _handle_shell_line(
             raise SystemExit(f"business:{slug} does not exist yet. Use /create {slug} <goal>.")
         return f"Using business:{slug}", slug
 
-    if command in {"help", "commands", "skills", "harness"}:
+    if command in {"help", "commands", "skills", "harness"} and (is_slash or len(tokens) == 1):
         return _format_harness_commands(), current_business
 
-    harness_command = None if bare_create_language else _get_harness_command(command)
+    harness_command = _get_harness_command(command) if is_slash and not bare_create_language else None
     if harness_command:
         business = current_business
         if harness_command.get("requires_business"):
@@ -4659,7 +4721,7 @@ def _handle_shell_line(
         command in _local_command_names()
         and command != "ceo"
         and not bare_create_language
-        and (is_slash or _bare_control_command_is_unambiguous(tokens, current_business))
+        and (is_slash or _bare_local_command_is_unambiguous(tokens, current_business))
     ):
         normalized = _command_with_current_business(tokens, current_business)
         result = run_takyon_command(

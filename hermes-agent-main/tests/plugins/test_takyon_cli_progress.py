@@ -2218,6 +2218,74 @@ def test_scoped_resume_language_routes_to_agent_not_control_command(monkeypatch)
     assert "Resume the preserved blocked product source" in captured["message"]
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Read only: call business_list_app_records exactly once",
+        "Read",
+        "Show me the exact saved record reference",
+        "Test whether the revised report persists after reload",
+        "Focus on verifying the paid product workflow",
+        "Delete nothing; this is a read-only check",
+        "List the saved reports for this customer",
+        "Help me verify the customer account",
+        "Use the existing product workflow to check persistence",
+        "Plan how to verify the persisted revision",
+    ],
+)
+def test_scoped_local_command_prefix_in_prose_routes_to_agent(monkeypatch, line):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+    captured: dict[str, str] = {}
+
+    def fake_run_agent(message, **_kwargs):  # noqa: ANN001
+        captured["message"] = message
+        return "checked"
+
+    monkeypatch.setattr(cli, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        cli,
+        "run_takyon_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("natural prose must not reach a local command")
+        ),
+    )
+
+    output, business = cli._handle_shell_line(
+        line,
+        current_business="visitbrief0713e",
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert output == "checked"
+    assert business == "visitbrief0713e"
+    assert line in captured["message"]
+
+
+def test_scoped_grammar_shaped_bare_read_remains_local(monkeypatch):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+    captured: dict[str, object] = {}
+
+    def fake_run_takyon_command(argv, **_kwargs):  # noqa: ANN001
+        captured["argv"] = argv
+        return {"success": True, "path": "research/strategy.md", "content": "# Strategy"}
+
+    monkeypatch.setattr(cli, "run_takyon_command", fake_run_takyon_command)
+
+    output, business = cli._handle_shell_line(
+        "read research/strategy.md",
+        current_business="visitbrief0713e",
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert captured["argv"] == ["read", "visitbrief0713e", "research/strategy.md"]
+    assert "# Strategy" in output
+    assert business == "visitbrief0713e"
+
+
 def test_explicit_create_command_is_rejected_inside_business_scope(monkeypatch):
     monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
 
