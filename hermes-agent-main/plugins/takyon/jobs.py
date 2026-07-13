@@ -213,12 +213,18 @@ class Job:
 
 @dataclass(frozen=True)
 class JobRunResult:
-    """What a handler returns: the result payload to persist and the TRUE cost (microcents → cents,
-    the handler's call) to settle. ``actual_cost_cents`` is clamped to ≤ the reserved estimate by
-    run_one (settle never exceeds the hold)."""
+    """What a handler returns: the result payload, TRUE cost, and authoritative terminal status.
+
+    ``actual_cost_cents`` is clamped to ≤ the reserved estimate by :func:`run_one` (settlement
+    never exceeds the hold). ``terminal_status='blocked'`` is for a handler that ran but reached a
+    named terminal blocker; its actual spend is still settled, its structured result is preserved,
+    and the job is never retried or misreported as completed.
+    """
 
     result: dict[str, Any] | None = None
     actual_cost_cents: int = 0
+    terminal_status: str = "completed"
+    terminal_reason: str | None = None
 
 
 @dataclass
@@ -849,17 +855,21 @@ def block(
     *,
     reason: str,
     detail: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
     worker_id: str | None = None,
     attempt: int | None = None,
 ) -> None:
-    """Terminal block (invariant #8): the work could not run for a NAMED reason (budget exhausted, no
-    handler, missing config). Distinct from 'failed' (the work was attempted and errored)."""
+    """Terminal block (invariant #8) for a named incomplete outcome.
+
+    Preflight blockers (budget/config) store no result; handlers that return a terminal blocker may
+    preserve their structured result so callers see the exact proof instead of a fabricated success.
+    """
     err = {"reason": reason}
     if detail:
         err["detail"] = detail
     _refresh_job_lifecycle_session(conn)
     claim_gate = ""
-    params: list[Any] = [json.dumps(err), job_id]
+    params: list[Any] = [json.dumps(result) if result is not None else None, json.dumps(err), job_id]
     if worker_id is not None:
         claim_gate += " and locked_by = %s"
         params.append(str(worker_id))
@@ -868,7 +878,7 @@ def block(
         params.append(int(attempt))
     with conn.transaction():
         updated = conn.execute(
-            "update jobs set status = 'blocked', error = %s::jsonb, "
+            "update jobs set status = 'blocked', result = %s::jsonb, error = %s::jsonb, "
             "locked_by = null, locked_at = null, claimed_release_sha = null, "
             "claimed_pool_id = null, updated_at = now() "
             "where id = %s and status = 'running'" + claim_gate,
@@ -876,6 +886,125 @@ def block(
         ).rowcount
     if updated == 0:
         raise JobClaimLost(f"block rejected stale claim generation for job={job_id}")
+
+
+def _clear_pending_terminal_settlement(conn, job_id: str, reservation_key: str) -> bool:
+    """Clear a pending-settlement marker only after Safebox confirms the idempotent settle."""
+    _refresh_job_lifecycle_session(conn)
+    with conn.transaction():
+        updated = conn.execute(
+            "update jobs set error = case "
+            "when (coalesce(error -> 'detail', '{}'::jsonb) - 'billing_settlement') = '{}'::jsonb "
+            "then error - 'detail' "
+            "else jsonb_set(error, '{detail}', (error -> 'detail') - 'billing_settlement') end, "
+            "updated_at = now() "
+            "where id = %s and status = 'blocked' "
+            "and error #>> '{detail,billing_settlement,status}' = 'pending' "
+            "and error #>> '{detail,billing_settlement,reservation_key}' = %s",
+            (job_id, reservation_key),
+        ).rowcount
+    return bool(updated)
+
+
+def _note_pending_terminal_settlement_error(
+    conn,
+    job_id: str,
+    reservation_key: str,
+    exc: Exception,
+) -> None:
+    """Keep an ambiguous settlement pending; never convert incurred spend into a refund."""
+    marker_patch = json.dumps(
+        {
+            "status": "pending",
+            "last_error": str(exc)[:500],
+        }
+    )
+    _refresh_job_lifecycle_session(conn)
+    with conn.transaction():
+        conn.execute(
+            "update jobs set error = jsonb_set("
+            "error, '{detail,billing_settlement}', "
+            "(error #> '{detail,billing_settlement}') || %s::jsonb), updated_at = now() "
+            "where id = %s and status = 'blocked' "
+            "and error #>> '{detail,billing_settlement,status}' = 'pending' "
+            "and error #>> '{detail,billing_settlement,reservation_key}' = %s",
+            (marker_patch, job_id, reservation_key),
+        )
+
+
+def reconcile_pending_terminal_settlements(
+    conn,
+    *,
+    owner_user_id: str | None = None,
+    retry_after_seconds: int = 30,
+    limit: int = 1,
+) -> int:
+    """Retry ambiguous terminal settlements without rerunning their completed handlers.
+
+    The blocked job is the durable outbox: its error detail carries the exact reservation and true
+    cost. Safebox settlement is idempotent, so a response lost after commit is safe to replay. The
+    marker is cleared only after a confirmed response; failures remain pending and are throttled by
+    ``updated_at``.
+    """
+    retry_after = max(0, int(retry_after_seconds))
+    batch_size = max(1, min(int(limit), 100))
+    owner_gate = ""
+    params: list[Any] = [retry_after]
+    if owner_user_id:
+        owner_gate = (
+            "and exists (select 1 from businesses b where b.slug = jobs.business_slug "
+            "and b.owner_user_id = %s) "
+        )
+        params.append(str(owner_user_id))
+    params.append(batch_size)
+    _refresh_job_lifecycle_session(conn)
+    rows = conn.execute(
+        "select id, error #>> '{detail,billing_settlement,reservation_key}' as reservation_key, "
+        "(error #>> '{detail,billing_settlement,actual_cents}')::bigint as actual_cents "
+        "from jobs where status = 'blocked' "
+        "and error #>> '{detail,billing_settlement,status}' = 'pending' "
+        "and updated_at <= now() - make_interval(secs => %s) "
+        + owner_gate
+        + "order by updated_at, id limit %s",
+        tuple(params),
+    ).fetchall()
+    reconciled = 0
+    for row in rows:
+        if isinstance(row, Mapping):
+            job_id = str(row.get("id") or "")
+            reservation_key = str(row.get("reservation_key") or "")
+            actual_cents = int(row.get("actual_cents") or 0)
+        else:
+            job_id = str(row[0] or "")
+            reservation_key = str(row[1] or "")
+            actual_cents = int(row[2] or 0)
+        if not job_id or not reservation_key:
+            continue
+        try:
+            billing.settle(conn, reservation_key, max(0, actual_cents))
+        except Exception as exc:  # noqa: BLE001 - ambiguous finalization remains durable and retryable
+            _log.warning(
+                "jobs: pending settlement replay failed for blocked job %s; retaining the hold: %s",
+                job_id,
+                exc,
+            )
+            try:
+                _note_pending_terminal_settlement_error(conn, job_id, reservation_key, exc)
+            except Exception:
+                pass
+            continue
+        try:
+            reconciled += int(
+                _clear_pending_terminal_settlement(conn, job_id, reservation_key)
+            )
+        except Exception as exc:  # noqa: BLE001 - replay remains safe while the marker is durable
+            _log.warning(
+                "jobs: settlement confirmed for blocked job %s but its pending marker could not "
+                "be cleared; the idempotent replay remains safe: %s",
+                job_id,
+                exc,
+            )
+    return reconciled
 
 
 def fail(
@@ -1337,6 +1466,12 @@ def run_one(
                             hb_exc,
                         )
         assert run_result is not None
+        returned_terminal_status = str(run_result.terminal_status or "completed").strip().lower()
+        if returned_terminal_status not in {"completed", "blocked"}:
+            raise ValueError(
+                "JobRunResult.terminal_status must be 'completed' or 'blocked', got "
+                f"{run_result.terminal_status!r}"
+            )
     except Exception as exc:  # handler failed: release the hold, then fail/requeue
         lifecycle_conn, close_lifecycle = _lifecycle_conn()
         release_exc: Exception | None = None
@@ -1401,9 +1536,9 @@ def run_one(
             job.id, job.kind, status, reserved_cents=reserved, reason="handler_error"
         )
 
-    # The handler returned successfully, but success is authoritative only while THIS exact attempt
-    # still owns the claim. Refresh/verify before money settlement so an obsolete attempt cannot charge
-    # and cannot report completion through a sibling's newer generation.
+    # The handler returned an authoritative terminal outcome, but it may settle only while THIS exact
+    # attempt still owns the claim. Refresh/verify before money settlement so an obsolete attempt
+    # cannot charge and cannot report completion/blockage through a sibling's newer generation.
     actual = 0
     lifecycle_conn, close_lifecycle = _lifecycle_conn()
     try:
@@ -1414,16 +1549,77 @@ def run_one(
             worker_id=worker_id,
             attempt=job.attempts,
         )
-        if estimate_cents > 0:
-            actual = max(0, min(int(run_result.actual_cost_cents or 0), reserved))
-            billing.settle(lifecycle_conn, reservation_key, actual)
-        complete(
-            lifecycle_conn,
-            job.id,
-            result=run_result.result,
-            worker_id=worker_id,
-            attempt=job.attempts,
-        )
+        if returned_terminal_status == "blocked":
+            # Persist the blocker BEFORE touching the cross-plane money finalizer. If this exact
+            # claim was lost, block() rejects it and the reservation is released below; no stale
+            # attempt can settle spend and then requeue without its blocker. Safebox settlement is
+            # necessarily a separate transaction, so state-first is the only no-double-run order.
+            if estimate_cents > 0:
+                actual = max(0, min(int(run_result.actual_cost_cents or 0), reserved))
+            settlement_detail = (
+                {
+                    "billing_settlement": {
+                        "status": "pending",
+                        "reservation_key": reservation_key,
+                        "actual_cents": actual,
+                    }
+                }
+                if estimate_cents > 0
+                else None
+            )
+            block(
+                lifecycle_conn,
+                job.id,
+                reason=str(run_result.terminal_reason or "handler_blocked"),
+                detail=settlement_detail,
+                result=run_result.result,
+                worker_id=worker_id,
+                attempt=job.attempts,
+            )
+            if estimate_cents > 0:
+                try:
+                    billing.settle(lifecycle_conn, reservation_key, actual)
+                except Exception as settle_exc:  # noqa: BLE001 - ambiguous finalization stays pending
+                    _log.warning(
+                        "jobs: blocked job %s persisted but cost settlement was not confirmed; "
+                        "retaining its durable pending marker for idempotent reconciliation: %s",
+                        job.id,
+                        settle_exc,
+                    )
+                    try:
+                        _note_pending_terminal_settlement_error(
+                            lifecycle_conn,
+                            str(job.id),
+                            reservation_key,
+                            settle_exc,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        _clear_pending_terminal_settlement(
+                            lifecycle_conn,
+                            str(job.id),
+                            reservation_key,
+                        )
+                    except Exception as marker_exc:  # noqa: BLE001 - Safebox settle is idempotent
+                        _log.warning(
+                            "jobs: settlement confirmed for blocked job %s but its pending marker "
+                            "could not be cleared; reconciliation may safely replay it: %s",
+                            job.id,
+                            marker_exc,
+                        )
+        else:
+            if estimate_cents > 0:
+                actual = max(0, min(int(run_result.actual_cost_cents or 0), reserved))
+                billing.settle(lifecycle_conn, reservation_key, actual)
+            complete(
+                lifecycle_conn,
+                job.id,
+                result=run_result.result,
+                worker_id=worker_id,
+                attempt=job.attempts,
+            )
     except JobNotRunning:
         # Our generation was superseded before authoritative settlement/finalization. Never mutate
         # the newer row and never claim completion; release this attempt's hold idempotently.
@@ -1435,7 +1631,7 @@ def run_one(
         claim_guard.mark_lost("terminal completion transition rejected stale claim")
         _log.warning(
             "jobs: job %s (kind=%s) handler returned after losing attempt %s; refusing to "
-            "finalize or report completion",
+            "finalize or report its terminal outcome",
             job.id,
             job.kind,
             job.attempts,
@@ -1455,13 +1651,24 @@ def run_one(
         )
     finally:
         _close_lifecycle_conn(lifecycle_conn, close_lifecycle)
+    terminal_reason = (
+        str(run_result.terminal_reason or "handler_blocked")
+        if returned_terminal_status == "blocked"
+        else None
+    )
     _emit_job_event(
-        "completed",
+        returned_terminal_status,
         actual_cents=actual,
+        error=terminal_reason,
         extra={"reserved_cents": reserved},
     )
     return JobOutcome(
-        job.id, job.kind, "completed", reserved_cents=reserved, actual_cents=actual
+        job.id,
+        job.kind,
+        returned_terminal_status,
+        reserved_cents=reserved,
+        actual_cents=actual,
+        reason=terminal_reason,
     )
 
 

@@ -3097,6 +3097,8 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 "wake": wake_result,
             },
             actual_cost_cents=cents,
+            terminal_status="blocked",
+            terminal_reason="bootstrap_human_review_required",
         )
 
     if platform_publish_blocker:
@@ -3125,6 +3127,8 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 },
             },
             actual_cost_cents=cents,
+            terminal_status="blocked",
+            terminal_reason="platform_publish_blocked",
         )
 
     # ── Post-turn finalization (NON-FATAL by contract) ──────────────────────────────────────────
@@ -3982,6 +3986,43 @@ def drain_tick(
             break
         if max_jobs is not None and counts["drained"] >= max_jobs:
             break
+
+    # Retry at most one ambiguous terminal settlement after useful queue work. The blocked parent is
+    # never rerun; Safebox's reservation finalizer is idempotent, and owner scoping matches claims.
+    reconcile_conn = conn
+    close_reconcile_conn = False
+    if heartbeat_conn_factory is not None and counts["drained"] > 0:
+        try:
+            reconcile_conn = heartbeat_conn_factory()
+            close_reconcile_conn = True
+        except Exception as exc:  # noqa: BLE001 - leave the durable marker for the next tick
+            reconcile_conn = None
+            _log.warning(
+                "worker[%s]: could not open a fresh pending-settlement connection: %s",
+                worker_id,
+                exc,
+            )
+    try:
+        if reconcile_conn is not None and callable(getattr(reconcile_conn, "transaction", None)):
+            try:
+                jobs.reconcile_pending_terminal_settlements(
+                    reconcile_conn,
+                    owner_user_id=owner_user_id,
+                    retry_after_seconds=_env_int("TAKYON_JOB_SETTLEMENT_RETRY_SECONDS", 30),
+                    limit=1,
+                )
+            except Exception as exc:  # noqa: BLE001 - durable marker remains the retry source
+                _log.warning(
+                    "worker[%s]: pending billing settlement reconciliation failed: %s",
+                    worker_id,
+                    exc,
+                )
+    finally:
+        if close_reconcile_conn and reconcile_conn is not None:
+            try:
+                reconcile_conn.close()
+            except Exception:
+                pass
 
     return counts
 

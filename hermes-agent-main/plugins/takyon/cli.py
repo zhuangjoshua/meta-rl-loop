@@ -642,7 +642,7 @@ def _format_cli_value(value: Any) -> str:
             if value.get("detached"):
                 return f"Create {status} for business:{slug}. Use /use {slug} to attach."
             job_id = str(bootstrap_job.get("job_id") or "").strip()
-            if status == "completed" and bootstrap_completion_status == "needs_human_review":
+            if status in {"completed", "blocked"} and bootstrap_completion_status == "needs_human_review":
                 blocker = str(
                     follow_job_result.get("review_blocker")
                     or "a bounded bootstrap rail requires human review"
@@ -652,7 +652,7 @@ def _format_cli_value(value: Any) -> str:
                     f"Create STOPPED for business:{slug}{took_suffix}: HUMAN REVIEW REQUIRED — "
                     f"{blocker}. Automation and wake scheduling are suppressed.{job_suffix}"
                 )
-            if status == "completed" and bootstrap_completion_status == "platform_blocked":
+            if status in {"completed", "blocked"} and bootstrap_completion_status == "platform_blocked":
                 blocker = str(
                     follow_job_result.get("review_blocker")
                     or "the platform publish rail blocked activation"
@@ -4577,7 +4577,7 @@ def _handle_shell_line(
             status = str(follow_result.get("status") or bootstrap_job.get("status") or "queued")
             if detach or bool(result.get("detached")):
                 return f"Create {status} for business:{actual_slug}. Use /use {actual_slug} to attach.", current_business
-            return f"Create {status} for business:{actual_slug}.", actual_slug
+            return _format_cli_value(result), actual_slug
         return _format_cli_value(result), actual_slug
 
     try:

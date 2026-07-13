@@ -2295,6 +2295,8 @@ def test_bootstrap_platform_publish_failure_stops_without_requeue_or_human_claim
     assert result.result["review_required"] is False
     assert result.result["review_blocker"] == "database activation failed"
     assert result.result["wake"]["reason"] == "platform_publish_blocked"
+    assert result.terminal_status == "blocked"
+    assert result.terminal_reason == "platform_publish_blocked"
     assert captured["store"].commits == []
     assert ("blocked", "ceo_bootstrap") in captured["events"]
 
@@ -2517,6 +2519,8 @@ def test_bootstrap_taste_human_review_blocker_stops_without_continuation_or_refr
     assert result.result["bootstrap_completion_status"] == "needs_human_review"
     assert result.result["review_required"] is True
     assert result.result["review_source"] == "taste_worker"
+    assert result.terminal_status == "blocked"
+    assert result.terminal_reason == "bootstrap_human_review_required"
     assert result.result["wake"] == {
         "status": "suppressed",
         "enabled": False,

@@ -1973,7 +1973,7 @@ def test_format_cli_value_surfaces_platform_publish_stop_without_human_review():
             "business": "demo",
             "bootstrap_job": {"job_id": "job-1", "status": "queued"},
             "follow": {
-                "status": "completed",
+                "status": "blocked",
                 "result": {
                     "bootstrap_completion_status": "platform_blocked",
                     "review_required": False,
@@ -1986,6 +1986,27 @@ def test_format_cli_value_surfaces_platform_publish_stop_without_human_review():
     assert "PLATFORM PUBLISH BLOCKED" in rendered
     assert "database activation failed" in rendered
     assert "HUMAN REVIEW REQUIRED" not in rendered
+
+
+def test_format_cli_value_surfaces_authoritative_blocked_human_review():
+    rendered = cli._format_cli_value(
+        {
+            "business": "demo",
+            "bootstrap_job": {"job_id": "job-review", "status": "queued"},
+            "follow": {
+                "status": "blocked",
+                "result": {
+                    "bootstrap_completion_status": "needs_human_review",
+                    "review_required": True,
+                    "review_blocker": "first provider retry stopped the build",
+                },
+            },
+        }
+    )
+
+    assert "HUMAN REVIEW REQUIRED" in rendered
+    assert "first provider retry stopped the build" in rendered
+    assert "Create completed" not in rendered
 
 
 def test_format_cli_value_completed_product_does_not_report_x():
@@ -2296,3 +2317,40 @@ def test_handle_shell_create_does_not_shlex_pasted_brief(monkeypatch):
         "--",
         'No-signup trial: don\'t block on an unfinished "quote',
     ]
+
+
+def test_handle_shell_create_surfaces_authoritative_human_review_blocker(monkeypatch):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        cli,
+        "run_takyon_command",
+        lambda *_args, **_kwargs: {
+            "business": "demo",
+            "bootstrap_job": {
+                "job_id": "job-review",
+                "business": "demo",
+                "status": "queued",
+            },
+            "follow": {
+                "status": "blocked",
+                "result": {
+                    "bootstrap_completion_status": "needs_human_review",
+                    "review_required": True,
+                    "review_blocker": "first provider retry stopped the build",
+                },
+            },
+        },
+    )
+
+    output, business = cli._handle_shell_line(
+        "/create demo Build a workflow",
+        current_business=None,
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert business == "demo"
+    assert "HUMAN REVIEW REQUIRED" in output
+    assert "first provider retry stopped the build" in output
+    assert "Create completed" not in output

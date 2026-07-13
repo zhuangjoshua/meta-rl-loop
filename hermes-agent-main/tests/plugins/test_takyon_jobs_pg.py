@@ -370,6 +370,164 @@ def test_run_one_reserves_settles_completes_and_moves_ledger(pg_conn):
     assert bal.reserved_cents == 0
 
 
+def test_run_one_preserves_returned_block_and_settles_true_cost_without_retry(
+    pg_conn, monkeypatch
+):
+    """A handler-known terminal blocker is not a successful wrapper and is not an exception retry.
+
+    The work already ran, so its exact cost settles; the structured blocker result remains readable
+    from the job row, and ``max_attempts=2`` cannot trigger a second run.
+    """
+    slug, _uid = _provision_business(pg_conn)
+    queued = jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_bootstrap",
+        idempotency_key="returned-block",
+        payload={"estimate_cents": 500},
+        max_attempts=2,
+    )
+
+    class _BlockedHandler:
+        calls = 0
+
+        def __call__(self, _job):
+            self.calls += 1
+            return jobs.JobRunResult(
+                result={
+                    "bootstrap_completion_status": "needs_human_review",
+                    "review_blocker": "first provider retry stopped the build",
+                },
+                actual_cost_cents=125,
+                terminal_status="blocked",
+                terminal_reason="bootstrap_human_review_required",
+            )
+
+    handler = _BlockedHandler()
+    money_calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        billing,
+        "reserve",
+        lambda _conn, _uid, estimate, key, **_kwargs: billing.Reservation(
+            key=key, allowance_cents=estimate
+        ),
+    )
+
+    def _settle_after_block(_conn, key, actual):
+        assert jobs.get_job(pg_conn, queued.id).status == "blocked"
+        money_calls.append((key, actual))
+
+    monkeypatch.setattr(billing, "settle", _settle_after_block)
+    outcome = jobs.run_one(
+        pg_conn,
+        worker_id="w1",
+        handlers={"ceo_bootstrap": handler},
+    )
+
+    assert outcome.status == "blocked"
+    assert outcome.reason == "bootstrap_human_review_required"
+    assert outcome.actual_cents == 125
+    assert handler.calls == 1
+    job = jobs.get_job(pg_conn, outcome.job_id)
+    assert job.status == "blocked"
+    assert job.attempts == 1
+    assert job.result == {
+        "bootstrap_completion_status": "needs_human_review",
+        "review_blocker": "first provider retry stopped the build",
+    }
+    assert job.error == {"reason": "bootstrap_human_review_required"}
+    assert jobs.run_one(
+        pg_conn,
+        worker_id="w1",
+        handlers={"ceo_bootstrap": handler},
+    ) is None
+    assert handler.calls == 1
+    assert len(money_calls) == 1
+    assert money_calls[0][1] == 125
+
+
+def test_blocked_settlement_timeout_stays_pending_and_reconciles_without_rerun(
+    pg_conn, monkeypatch
+):
+    slug, _uid = _provision_business(pg_conn)
+    queued = jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_bootstrap",
+        idempotency_key="returned-block-settle-timeout",
+        payload={"estimate_cents": 500},
+        max_attempts=2,
+    )
+
+    class _BlockedHandler:
+        calls = 0
+
+        def __call__(self, _job):
+            self.calls += 1
+            return jobs.JobRunResult(
+                result={"bootstrap_completion_status": "needs_human_review"},
+                actual_cost_cents=125,
+                terminal_status="blocked",
+                terminal_reason="bootstrap_human_review_required",
+            )
+
+    handler = _BlockedHandler()
+    monkeypatch.setattr(
+        billing,
+        "reserve",
+        lambda _conn, _uid, estimate, key, **_kwargs: billing.Reservation(
+            key=key, allowance_cents=estimate
+        ),
+    )
+    settle_calls: list[tuple[str, int]] = []
+    fail_response = True
+
+    def _ambiguous_settle(_conn, key, actual):
+        nonlocal fail_response
+        assert jobs.get_job(pg_conn, queued.id).status == "blocked"
+        settle_calls.append((key, actual))
+        if fail_response:
+            raise TimeoutError("Safebox response lost after request")
+
+    monkeypatch.setattr(billing, "settle", _ambiguous_settle)
+    monkeypatch.setattr(
+        billing,
+        "release_reservation",
+        lambda *_args, **_kwargs: pytest.fail("ambiguous incurred spend must never be released"),
+    )
+
+    outcome = jobs.run_one(
+        pg_conn,
+        worker_id="w1",
+        handlers={"ceo_bootstrap": handler},
+    )
+
+    assert outcome.status == "blocked"
+    assert outcome.actual_cents == 125
+    assert handler.calls == 1
+    pending_job = jobs.get_job(pg_conn, queued.id)
+    assert pending_job.error["reason"] == "bootstrap_human_review_required"
+    assert pending_job.error["detail"]["billing_settlement"] == {
+        "status": "pending",
+        "reservation_key": f"job:{queued.id}:1",
+        "actual_cents": 125,
+        "last_error": "Safebox response lost after request",
+    }
+
+    fail_response = False
+    assert jobs.reconcile_pending_terminal_settlements(
+        pg_conn,
+        retry_after_seconds=0,
+    ) == 1
+    reconciled_job = jobs.get_job(pg_conn, queued.id)
+    assert reconciled_job.error == {"reason": "bootstrap_human_review_required"}
+    assert handler.calls == 1
+    assert settle_calls == [
+        (f"job:{queued.id}:1", 125),
+        (f"job:{queued.id}:1", 125),
+    ]
+
+
 def test_run_one_blocks_when_budget_exhausted_without_running(pg_conn):
     # Invariant #8: a reserve the buckets cannot cover BLOCKS with a reason and runs nothing — never a
     # fabricated completion, never a charge to no one.
