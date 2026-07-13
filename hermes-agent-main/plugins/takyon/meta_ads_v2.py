@@ -1705,7 +1705,13 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
         url_match = f"{site_host}/app" if custom_event_type == "PURCHASE" else (
             conversion_path or site_host
         )
-        name = str(_arg(args, "conversion_name") or f"{slug}-{custom_event_type.lower()}").strip()
+        default_conversion_name = f"{slug}-{custom_event_type.lower()}"
+        if custom_event_type == "PURCHASE":
+            # v1 used a 47-character private event name that Meta stored but would not
+            # process as a conversion.  A distinct deterministic provider name prevents
+            # duplicate recovery from binding a repaired ensure to that immutable v1 rule.
+            default_conversion_name += "-v2"
+        name = str(_arg(args, "conversion_name") or default_conversion_name).strip()
         # For PURCHASE the Safebox replaces this placeholder with an unguessable CAPI-only
         # event + exact authoritative host/path rule. LEAD keeps the legacy URL rule.
         rule = json.dumps({"url": {"i_contains": url_match}}, ensure_ascii=False)

@@ -1590,6 +1590,7 @@ def test_pixel_ensure_purchase_conversion_activates_verified_canonical_record(ha
     assert result["success"] is True and result["ok"] is True
     assert result["value"]["provider_verified"] is True
     assert result["value"]["site"]["instrumentation_verified"] is True
+    assert harness.graph.custom_conversions[-1]["name"] == "clipbook-purchase-v2"
     record_path = harness.business_file_path(
         "clipbook", "metrics/meta-pixel/purchase-attribution.json")
     assert record_path.exists()
