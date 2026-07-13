@@ -14,7 +14,7 @@ def _run_module(expression: str):
     if not node:
         pytest.skip("node is unavailable")
     source = f"""
-import {{ apiRetryFailureFromSdkMessage as retryFailure, buildPrompt, progressEventFromSdkMessage as progress }} from {json.dumps(SCRIPT.as_uri())};
+import {{ apiRetryFailureFromSdkMessage as retryFailure, buildPrompt, createSiteImageMcpServer as createPreflightServer, progressEventFromSdkMessage as progress }} from {json.dumps(SCRIPT.as_uri())};
 {expression}
 """
     proc = subprocess.run(
@@ -121,3 +121,41 @@ console.log(JSON.stringify(retryFailure(message)));
     )
 
     assert result.endswith("unknown (connection error)")
+
+
+def test_taste_visual_preflight_is_single_use_even_when_first_render_fails():
+    result = _run_module(
+        """
+const scalar = {
+  regex() { return this; },
+  max() { return this; },
+  min() { return this; },
+};
+const z = { string: () => ({ ...scalar }), enum: () => ({ ...scalar }) };
+const tool = (name, _description, _schema, handler) => ({ name, handler });
+let renderCalls = 0;
+const server = createPreflightServer({
+  createSdkMcpServer: (config) => config,
+  tool,
+  z,
+  bridgeDir: "/bridge",
+  cwd: "/workspace",
+  renderLandingPreflight: async () => {
+    renderCalls += 1;
+    throw new Error("Chromium missing");
+  },
+});
+const renderTool = server.tools.find((item) => item.name === "business_render_landing_preflight");
+const first = await renderTool.handler({});
+const second = await renderTool.handler({});
+console.log(JSON.stringify({ renderCalls, first, second }));
+"""
+    )
+
+    assert result["renderCalls"] == 1
+    assert result["first"]["isError"] is True
+    assert result["first"]["content"][0]["text"] == "Chromium missing"
+    assert result["second"]["isError"] is True
+    assert result["second"]["content"][0]["text"] == (
+        "Taste landing render preflight is single-use (cap: 1 call)"
+    )

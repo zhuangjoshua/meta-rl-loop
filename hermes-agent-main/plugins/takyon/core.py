@@ -256,9 +256,9 @@ PRODUCT_BUILD_GATE_CONTRACT = """Customer-facing product build gate (HARD):
 """
 TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT = """Taste landing rendered-viewport preflight (HARD):
 - This is the initial public landing pass. Source inspection alone is not visual proof.
-- After `npm run build` and `npm run typecheck` pass, call `business_render_landing_preflight`. Do not start Vite, Chromium, or agent-browser with Bash: this bounded tool starts one loopback-only Vite preview, invokes Chromium directly, captures `/` at BOTH 1440x900 desktop and 390x844 mobile, and stops every child process before returning.
+- After the final `npm run build` and `npm run typecheck` pass, call `business_render_landing_preflight` exactly once. Do not start Vite, Chromium, or agent-browser with Bash: this bounded tool starts one loopback-only Vite preview, invokes Chromium directly, captures `/` at BOTH 1440x900 desktop and 390x844 mobile, and stops every child process before returning.
 - The tool returns `/workspace/.takyon-preflight/landing-desktop.png` and `/workspace/.takyon-preflight/landing-mobile.png`. Read each image with the Read tool and inspect the actual first viewport. The header + hero must form one deliberate first-screen composition: headline, support, and primary CTA visible; no accidental early next-section intrusion; no clipped or empty composition. A deliberately visible continuation is allowed only when the Design Read explains it and the first screen still reads complete.
-- If either render fails visual review, edit the landing, repeat build/typecheck, and use the tool's one remaining call to render both viewports again. The tool is capped at two calls for this Taste session. Do not claim visual inspection without reading both screenshots.
+- The tool is single-use for this Taste session. A missing browser, failed screenshot, or failed visual review is a precise blocker; do not repeat the same preflight or claim visual inspection without reading both screenshots.
 - Leave the screenshots available until you have Read them; the SDK and parent remove `.takyon-preflight/` before durable workspace sync. A missing tool/browser executable, failed screenshot, unread screenshot, or unverified viewport is BLOCKED, not success.
 - Use only local loopback URLs. Browser rendering is verification, never provider access, deployment, or an external network call.
 """
@@ -5596,6 +5596,8 @@ def _docker_claude_worker_binary_mounts(*, docker_exe: str, repo_root: Path) -> 
 _CLAUDE_AGENT_BROKER_ENV = "TAKYON_CLAUDE_AGENT_BROKER"
 _CLAUDE_AGENT_BROKER_URL_ENV = "TAKYON_CLAUDE_AGENT_BROKER_URL"
 _CLAUDE_AGENT_BROKER_NETWORK_ENV = "TAKYON_CLAUDE_AGENT_BROKER_NETWORK"
+_CLAUDE_AGENT_DOCKER_IMAGE_ENV = "TAKYON_CLAUDE_AGENT_DOCKER_IMAGE"
+_DEFAULT_CLAUDE_AGENT_DOCKER_IMAGE = "takyon/claude-worker:node20-chromium-v1"
 _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV = "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"
 # Per-CALL cost ceiling bound into the coding-worker's minted operator.session token. The safebox proxy
 # ENFORCES it as a per-CALL cap AND meters each brokered call against the operator's control-plane budget
@@ -5675,6 +5677,18 @@ def _claude_agent_broker_network() -> str:
     hardening, keyless is the must-have.
     """
     return str(os.getenv(_CLAUDE_AGENT_BROKER_NETWORK_ENV, "") or "").strip()
+
+
+def _claude_agent_docker_image() -> str:
+    """Resolve the isolated product-worker image from its dedicated rail only.
+
+    ``TERMINAL_DOCKER_IMAGE`` configures generic terminal sandboxes and historically points at the
+    Chromium-free base image. Letting it fall through here made Mac preflight prove the tracked
+    worker but launch the generic image. The production wrapper mirrors its validated choice into
+    both variables for old launchers; this resolver intentionally trusts only the dedicated one.
+    """
+    configured = str(os.getenv(_CLAUDE_AGENT_DOCKER_IMAGE_ENV, "") or "").strip()
+    return configured or _DEFAULT_CLAUDE_AGENT_DOCKER_IMAGE
 
 
 def _mint_claude_agent_operator_session_token(business: str, operator_user_id: str) -> str:
@@ -6206,11 +6220,7 @@ def _run_claude_agent_task_in_docker(
         site_image_bridge_dir or payload.get("_siteImageBridgeHostDir") or ""
     ).strip()
     bridge_host_dir = Path(bridge_host_value).resolve() if bridge_host_value else None
-    image = str(
-        os.getenv("TAKYON_CLAUDE_AGENT_DOCKER_IMAGE")
-        or os.getenv("TERMINAL_DOCKER_IMAGE")
-        or "takyon/claude-worker:node20-chromium-v1"
-    ).strip()
+    image = _claude_agent_docker_image()
     worker_model = _resolve_claude_agent_model(payload.get("model"))
     payload = {
         **{key: value for key, value in payload.items() if key != "_siteImageBridgeHostDir"},

@@ -457,6 +457,66 @@ def test_prod_worker_preflight_proves_runtime_checkout_is_docker_bindable():
     assert "test -d /takyon-runtime/agent" in preflight
     assert "move or create the checkout under a Docker Desktop shared path" in preflight
     assert 'export TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="$worker_image"' in preflight
+    assert 'export TERMINAL_DOCKER_IMAGE="$worker_image"' in preflight
+    assert "test -x /usr/bin/chromium" in preflight
+
+
+def test_prod_worker_preflight_propagates_one_validated_image_to_every_launcher(tmp_path):
+    script = _script_source()
+    require_docker = script[
+        script.index("require_docker_for_worker() {") : script.index("\nworker_preflight_wait_seconds() {")
+    ]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >>\"$DOCKER_LOG\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    harness = tmp_path / "docker-image-propagation.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + "die() { echo \"$*\" >&2; exit 1; }\n"
+        + require_docker
+        + "\nrequire_docker_for_worker\n"
+        + "printf '%s\\n' \"$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE\" \"$TERMINAL_DOCKER_IMAGE\"\n",
+        encoding="utf-8",
+    )
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key != "TAKYON_CLAUDE_AGENT_DOCKER_IMAGE"
+    }
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "ROOT": str(ROOT),
+            "RUNTIME_DIR": str(ROOT / "hermes-agent-main"),
+            # Product/site remains Docker-isolated in auto mode even when generic terminal work is local.
+            "TERMINAL_ENV": "local",
+            "TERMINAL_DOCKER_IMAGE": "nikolaik/python-nodejs:python3.11-nodejs20",
+            "DOCKER_LOG": str(tmp_path / "docker.log"),
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(harness)],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=5,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    tracked = "takyon/claude-worker:node20-chromium-v1"
+    assert result.stdout.splitlines() == [tracked, tracked]
+    docker_log = (tmp_path / "docker.log").read_text(encoding="utf-8")
+    assert tracked in docker_log
+    assert "nikolaik/python-nodejs:python3.11-nodejs20" not in docker_log
 
 
 def test_docker_unshared_checkout_fails_before_worker_start(tmp_path):
@@ -470,7 +530,9 @@ def test_docker_unshared_checkout_fails_before_worker_start(tmp_path):
     fake_docker.write_text(
         "#!/bin/sh\n"
         "if [ \"${1:-}\" = version ]; then exit 0; fi\n"
-        "if [ \"${1:-}\" = run ]; then exit 125; fi\n"
+        "if [ \"${1:-}\" = run ]; then\n"
+        "  case \"$*\" in *takyon-runtime*) exit 125 ;; *) exit 0 ;; esac\n"
+        "fi\n"
         "exit 2\n",
         encoding="utf-8",
     )

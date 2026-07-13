@@ -1411,6 +1411,35 @@ def _patch_docker_for_lockdown(tmp_path, monkeypatch):
     monkeypatch.setattr(takyon_core, "_runtime_env", lambda extra=None: dict(extra or {}))
 
 
+def test_product_worker_image_never_falls_back_to_generic_terminal_image(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _patch_docker_for_lockdown(tmp_path, monkeypatch)
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_DOCKER_IMAGE", raising=False)
+    monkeypatch.setenv(
+        "TERMINAL_DOCKER_IMAGE",
+        "nikolaik/python-nodejs:python3.11-nodejs20",
+    )
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
+    monkeypatch.setattr(
+        takyon_core,
+        "_mint_claude_agent_operator_session_token",
+        lambda business, operator_user_id: "cap-worker-image",
+    )
+
+    run_cmd, _payload, _worker_cwd, _worker_env = takyon_core._run_claude_agent_task_in_docker(
+        payload={"business": "image-proof", "workspace": "product/site", "instruction": "x"},
+        workspace_path=workspace,
+        timeout_ms=30_000,
+        business="image-proof",
+        operator_user_id="owner-1",
+    )
+
+    assert "takyon/claude-worker:node20-chromium-v1" in run_cmd
+    assert "nikolaik/python-nodejs:python3.11-nodejs20" not in run_cmd
+
+
 def test_run_claude_agent_task_in_docker_lockdown_drops_raw_key_and_confines_network(tmp_path, monkeypatch):
     """STEP D: with the broker lockdown ON the container gets NO raw provider key, is pointed at the
     safebox broker with a minted capability token, and is --network-confined to the safebox only."""
@@ -2661,11 +2690,12 @@ def test_claude_agent_task_registers_bounded_direct_chromium_taste_preflight():
     text = script.read_text(encoding="utf-8")
 
     # The same Taste-only MCP server owns both the image and rendered-viewport tools. The renderer
-    # is explicit in the SDK allowlist and cannot be called more than twice in one SDK session.
+    # is explicit in the SDK allowlist and cannot be called more than once in one SDK session.
     assert '"business_render_landing_preflight"' in text
     assert '"mcp__takyon_site_image__business_render_landing_preflight"' in text
-    assert "const TASTE_PREFLIGHT_MAX_CALLS = 2;" in text
+    assert "const TASTE_PREFLIGHT_MAX_CALLS = 1;" in text
     assert "preflightCalls > TASTE_PREFLIGHT_MAX_CALLS" in text
+    assert "Maximum two calls" not in text
 
     # Rendering is deterministic and owned by the tool: fixed output paths and dimensions, a
     # loopback-only strict-port Vite preview, and Chromium invoked directly without the daemon CLI.
@@ -2689,7 +2719,7 @@ def test_claude_agent_task_registers_bounded_direct_chromium_taste_preflight():
     assert 'HOME: "/tmp"' in text
     assert "env: { ...process.env" not in text
     assert "env: process.env" not in text
-    assert "const result = await renderTasteLandingPreflight(cwd);" in text
+    assert "const result = await renderLandingPreflight(cwd);" in text
     assert "isManualTastePreflightCommand(rawCommand)" in text
     assert "Taste landing preview/browser commands are disabled" in text
 

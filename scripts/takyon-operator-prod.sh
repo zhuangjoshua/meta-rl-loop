@@ -1497,8 +1497,12 @@ start_worker_tunnel_guard() {
 }
 
 require_docker_for_worker() {
+  # Product/site isolation is a dedicated rail: in auto/forced mode it uses Docker even when the
+  # generic terminal backend is local. Skip Docker only when both rails explicitly avoid it.
   if [[ "${TERMINAL_ENV:-docker}" != "docker" ]]; then
-    return 0
+    case "${TAKYON_CLAUDE_AGENT_DOCKER:-auto}" in
+      0|false|no|off) return 0 ;;
+    esac
   fi
   if ! command -v docker >/dev/null 2>&1; then
     die "Docker CLI is not installed or not on PATH; local worker compute needs Docker Desktop running"
@@ -1508,20 +1512,23 @@ require_docker_for_worker() {
   fi
   local tracked_worker_image="takyon/claude-worker:node20-chromium-v1"
   local worker_image="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-$tracked_worker_image}"
-  # The product worker resolves TAKYON_CLAUDE_AGENT_DOCKER_IMAGE before the legacy
-  # TERMINAL_DOCKER_IMAGE. Export the image we just proved so the child worker cannot silently
-  # fall back to an inherited generic image that lacks Chromium and agent-browser.
-  export TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="$worker_image"
   if [[ "$worker_image" == "$tracked_worker_image" ]]; then
     local worker_dockerfile="$ROOT/deploy/argon-alpha-14/takyon-claude-worker.Dockerfile"
     [[ -f "$worker_dockerfile" ]] || die "tracked Claude worker Dockerfile is missing: $worker_dockerfile"
     docker build --tag "$worker_image" - < "$worker_dockerfile" \
       || die "failed to build tracked Claude worker image: $worker_image"
-    if ! docker run --rm "$worker_image" sh -lc \
-      'agent-browser --version >/dev/null && chromium --version >/dev/null'; then
-      die "tracked Claude worker image lacks the Chromium visual-preflight rail: $worker_image"
-    fi
   fi
+  # Prove the exact image selected for product work, including operator overrides. The renderer
+  # invokes this absolute Chromium path, so a generic Node image is not an acceptable substitute.
+  if ! docker run --rm --entrypoint /bin/sh "$worker_image" -lc \
+    'command -v agent-browser >/dev/null && test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null'; then
+    die "Claude worker image lacks the Chromium visual-preflight rail: $worker_image"
+  fi
+  # One validated image owns both the dedicated product-worker variable and the legacy terminal
+  # fallback inherited by older/nested launch paths. This prevents preflighting one image and
+  # launching another.
+  export TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="$worker_image"
+  export TERMINAL_DOCKER_IMAGE="$worker_image"
   if ! docker run --rm \
     --entrypoint /bin/sh \
     --mount "type=bind,src=$RUNTIME_DIR,dst=/takyon-runtime,readonly" \

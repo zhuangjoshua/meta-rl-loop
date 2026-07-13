@@ -71,7 +71,7 @@ function preflightChildEnv({ browserNone = false } = {}) {
 }
 
 const SITE_IMAGE_BRIDGE_TIMEOUT_MS = 240_000;
-const TASTE_PREFLIGHT_MAX_CALLS = 2;
+const TASTE_PREFLIGHT_MAX_CALLS = 1;
 const TASTE_PREFLIGHT_CHROMIUM = "/usr/bin/chromium";
 const TASTE_PREFLIGHT_PREVIEW_TIMEOUT_MS = 20_000;
 const TASTE_PREFLIGHT_CHROMIUM_TIMEOUT_MS = 45_000;
@@ -383,7 +383,14 @@ async function renderTasteLandingPreflight(cwd) {
   }
 }
 
-function createSiteImageMcpServer({ createSdkMcpServer, tool, z, bridgeDir, cwd }) {
+function createSiteImageMcpServer({
+  createSdkMcpServer,
+  tool,
+  z,
+  bridgeDir,
+  cwd,
+  renderLandingPreflight = renderTasteLandingPreflight,
+}) {
   if (!bridgeDir) return null;
   let preflightCalls = 0;
   return createSdkMcpServer({
@@ -395,8 +402,8 @@ function createSiteImageMcpServer({ createSdkMcpServer, tool, z, bridgeDir, cwd 
       "distinct page-role assets: one hero and one supporting image. Use every returned public_path " +
       "in an <img data-takyon-landing-asset=\"hero|supporting\">. The image tool is capped and " +
       "money-gated. After build and typecheck pass, call business_render_landing_preflight instead " +
-      "of starting agent-browser or a preview daemon yourself. Read both returned screenshots, fix " +
-      "the source if needed, rebuild, and use the one remaining preflight call for the final render.",
+      "of starting agent-browser or a preview daemon yourself. Call it exactly once after the final " +
+      "green build, then Read both returned screenshots. A render failure is a blocker, not a retry.",
     tools: [
       tool(
         "business_generate_site_image",
@@ -426,8 +433,8 @@ function createSiteImageMcpServer({ createSdkMcpServer, tool, z, bridgeDir, cwd 
         "business_render_landing_preflight",
         "Deterministically render the built landing at desktop 1440x900 and mobile 390x844. " +
           "Starts and stops one loopback-only Vite preview, invokes /usr/bin/chromium directly, " +
-          "and writes /workspace/.takyon-preflight/landing-{desktop,mobile}.png. Maximum two calls " +
-          "for this Taste session. Call only after npm run build and npm run typecheck pass; then " +
+          "and writes /workspace/.takyon-preflight/landing-{desktop,mobile}.png. Exactly one call " +
+          "is allowed for this Taste session. Call only after the final green build and typecheck; then " +
           "Read both returned PNGs and inspect them visually.",
         {},
         async () => {
@@ -437,12 +444,12 @@ function createSiteImageMcpServer({ createSdkMcpServer, tool, z, bridgeDir, cwd 
               isError: true,
               content: [{
                 type: "text",
-                text: `Taste landing render preflight is capped at ${TASTE_PREFLIGHT_MAX_CALLS} calls`,
+                text: "Taste landing render preflight is single-use (cap: 1 call)",
               }],
             };
           }
           try {
-            const result = await renderTasteLandingPreflight(cwd);
+            const result = await renderLandingPreflight(cwd);
             return {
               content: [{
                 type: "text",
@@ -1034,6 +1041,7 @@ async function main() {
 export {
   apiRetryFailureFromSdkMessage,
   buildPrompt,
+  createSiteImageMcpServer,
   progressEventFromSdkMessage,
   renderTasteLandingPreflight,
 };
