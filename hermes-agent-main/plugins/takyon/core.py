@@ -24072,13 +24072,18 @@ def handle_business_upsert_business(args: dict, **_: Any) -> str:
         # Fail before constructing a write when the target is missing or inaccessible. The
         # require_existing flag below repeats the existence check transactionally at commit time.
         active_store.enforce_operator_business_access(business)
+        requested_work_focus = args.get("work_focus") or args.get("focus")
+        # A fresh bootstrap must write the idea-only strategy brief before it builds the product.
+        # Do not let a model-supplied product-only update make that required next step illegal.
+        if str(_ACTIVE_OPERATOR_TASK_KIND.get() or "").strip().lower() == "ceo_bootstrap":
+            requested_work_focus = "all"
         operation = {
             "action": "business.upsert",
             "business": business,
             "name": args.get("name") or business,
             "goal": args.get("goal") or "",
             "mode": args.get("mode"),
-            "work_focus": args.get("work_focus") or args.get("focus"),
+            "work_focus": requested_work_focus,
             "metadata": args.get("metadata") or {},
             # The model-facing tool is update-only. Explicit business creation funnels through
             # the CLI/dashboard create chokepoint, which owns identity, balance, slug, bootstrap,

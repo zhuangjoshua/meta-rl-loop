@@ -58,6 +58,28 @@ def test_model_facing_business_upsert_is_transactionally_update_only(monkeypatch
     assert store.commits[0]["operations"][0]["require_existing"] is True
 
 
+def test_bootstrap_business_upsert_cannot_narrow_required_strategy_work(monkeypatch):
+    store = _Store({"fieldbrief"})
+    monkeypatch.setattr(core, "_store", lambda: store)
+    token = core._ACTIVE_OPERATOR_TASK_KIND.set("ceo_bootstrap")
+    try:
+        result = json.loads(
+            core.handle_business_upsert_business(
+                {
+                    "business": "fieldbrief",
+                    "name": "Field Brief",
+                    "work_focus": "product",
+                    "idempotency_key": "bootstrap-fieldbrief",
+                }
+            )
+        )
+    finally:
+        core._ACTIVE_OPERATOR_TASK_KIND.reset(token)
+
+    assert result["success"] is True
+    assert store.commits[0]["operations"][0]["work_focus"] == "all"
+
+
 def test_model_facing_business_upsert_cannot_cross_current_scope(monkeypatch):
     store = _Store({"ching", "other"})
     monkeypatch.setattr(core, "_store", lambda: store)
