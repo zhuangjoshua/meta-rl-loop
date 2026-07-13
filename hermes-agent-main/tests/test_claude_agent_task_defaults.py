@@ -578,6 +578,8 @@ def test_claude_agent_task_includes_visual_craft_contract_for_product_site(tmp_p
     assert "Never use emoji as UI iconography" in instruction
     assert "lucide-react" in instruction
     assert "framer-motion" in instruction
+    assert "`MOTION_INTENSITY` 1-3 means NO automatic animation" in instruction
+    assert "`whileInView`" in instruction
     assert "prefers-reduced-motion" in instruction
 
     # Every npm package the visual contract names MUST be pinned in the scaffold's own
@@ -2708,6 +2710,7 @@ def test_claude_agent_task_registers_bounded_direct_chromium_taste_preflight():
     assert '"--strictPort"' in text
     assert 'const TASTE_PREFLIGHT_CHROMIUM = "/usr/bin/chromium";' in text
     assert "TASTE_PREFLIGHT_CHROMIUM," in text
+    assert text.count('"--force-prefers-reduced-motion"') == 1
     assert "`--screenshot=${outputPath}`" in text
     assert 'spawn("agent-browser"' not in text
 
