@@ -3254,14 +3254,16 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             + ("\n\n" if final_response.strip() else "")
             + "Signed-in live action execution verification is pending: "
             + verification_blocker
-            + ". Full browser workflow E2E remains required: save, exact-ref reopen, revise, copy, export, and delete."
+            + ". Full browser workflow E2E remains required for the requested product workflow: "
+            + "save and exact-ref reopen, plus each requested revise, copy, export, or delete step."
         )
     elif workflow_requested:
         final_response = (
             final_response.rstrip()
             + ("\n\n" if final_response.strip() else "")
             + "Signed-in live action execution is action-verified for the current build. "
-            + "Full browser workflow E2E remains required: save, exact-ref reopen, revise, copy, export, and delete."
+            + "Full browser workflow E2E remains required for the requested product workflow: "
+            + "save and exact-ref reopen, plus each requested revise, copy, export, or delete step."
         )
 
     wake_result: dict[str, object] | None = None

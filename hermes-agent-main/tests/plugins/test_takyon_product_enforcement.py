@@ -667,7 +667,7 @@ def test_requested_record_mutations_require_ref_update_and_confirmed_delete(tmp_
         "async function saveAndReopen() { await client.saveRecord({ record_type: 'brief', data: {} }); return client.listRecords({ type: 'brief' }); }\n"
         "async function updateAndDelete(record, data) {\n"
         "  const payload = { ref: record.ref, data };\n"
-        "  await client.saveRecord(payload);\n"
+        "  const result = await client.saveRecord(payload);\n"
         "  await client.deleteRecord(record.ref);\n"
         "}\n",
         encoding="utf-8",
@@ -681,11 +681,133 @@ def test_requested_record_mutations_require_ref_update_and_confirmed_delete(tmp_
     site_home.write_text(
         site_home.read_text(encoding="utf-8").replace(
             "await client.deleteRecord(record.ref);",
-            "if (window.confirm('Delete this brief?')) await client.deleteRecord(record.ref);",
+            "onUpdated(result.record ?? result);\n"
+            "  if (window.confirm('Delete this brief?')) await client.deleteRecord(record.ref);",
         ),
         encoding="utf-8",
     )
 
+    assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
+
+
+def test_requested_record_revision_rejects_stale_detail_after_successful_update(
+    tmp_path, monkeypatch
+):
+    from plugins.takyon import core as takyon_core
+
+    scaffold = tmp_path / "scaffold"
+    site = tmp_path / "product" / "site"
+    scaffold_home = scaffold / "src" / "screens" / "app-home.tsx"
+    site_home = site / "src" / "screens" / "app-home.tsx"
+    action = site / "actions" / "generate-brief.ts"
+    scaffold_home.parent.mkdir(parents=True)
+    site_home.parent.mkdir(parents=True)
+    action.parent.mkdir(parents=True)
+    scaffold_home.write_text(
+        "export const AppHomeScreen = () => <main>Starter</main>;\n",
+        encoding="utf-8",
+    )
+    stale_source = (
+        'const runner = useActionRunner("generate-brief");\n'
+        "async function createAndList() { const created = await client.saveRecord({ record_type: 'brief', data: { external: { ref: 'not-a-record-update' } } }); setBrief(created); return client.listRecords({ type: 'brief' }); }\n"
+        "async function revise(record, edited) {\n"
+        "  const result = await client.saveRecord({ ref: record.ref, data: edited });\n"
+        "  const updated = result.record ?? result;\n"
+        "  setEditing(false);\n"
+        "  setEdited(workOrderFromRecord(updated));\n"
+        "}\n"
+    )
+    site_home.write_text(stale_source, encoding="utf-8")
+    action.write_text(
+        "export default async function generateBrief(payload, ctx) {\n"
+        "  return ctx.generate({ messages: [{ role: 'user', content: String(payload) }] });\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(takyon_core, "_subuser_app_scaffold_source_dir", lambda: scaffold)
+    surface = {
+        "metadata": {
+            "workflow_completion_required": True,
+            "product_workflow": {
+                "primary_job": "Generate, save, reopen, and revise client briefs.",
+                "actions": [{"name": "generate-brief", "trigger": "http"}],
+            },
+        }
+    }
+
+    stale_markers = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any("visible selected-record/list state" in marker["snippet"] for marker in stale_markers)
+
+    # Re-applying the old prop is still stale and must not satisfy the gate.
+    site_home.write_text(
+        stale_source.replace(
+            "setEditing(false);",
+            "setSelectedRecord(record);\n  setEditing(false);",
+        ),
+        encoding="utf-8",
+    )
+    old_prop_markers = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any("visible selected-record/list state" in marker["snippet"] for marker in old_prop_markers)
+
+    site_home.write_text(
+        stale_source.replace(
+            "setEditing(false);",
+            "setToast(result);\n  onSuccess(result);\n"
+            "  await client.refreshBilling();\n  setEditing(false);",
+        ),
+        encoding="utf-8",
+    )
+    presentation_markers = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any(
+        "visible selected-record/list state" in marker["snippet"]
+        for marker in presentation_markers
+    )
+
+    site_home.write_text(
+        stale_source.replace(
+            "setEditing(false);",
+            "setLastSavedAt(result.updatedAt);\n"
+            "  const version = result.version;\n  setVersion(version);\n"
+            "  setEditing(false);",
+        ),
+        encoding="utf-8",
+    )
+    scalar_projection_markers = takyon_core._requested_workflow_completeness_markers(
+        site, surface
+    )
+    assert any(
+        "visible selected-record/list state" in marker["snippet"]
+        for marker in scalar_projection_markers
+    )
+
+    site_home.write_text(
+        stale_source
+        + "function unrelatedLater(result) { setBrief(result); }\n",
+        encoding="utf-8",
+    )
+    cross_function_markers = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any(
+        "visible selected-record/list state" in marker["snippet"]
+        for marker in cross_function_markers
+    )
+
+    site_home.write_text(
+        stale_source.replace(
+            "setEditing(false);",
+            "setModel(updated);\n  setEditing(false);",
+        ),
+        encoding="utf-8",
+    )
+    assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
+
+    site_home.write_text(
+        stale_source.replace(
+            "const updated = result.record ?? result;\n  setEditing(false);",
+            "const refreshed = await client.listRecords({ type: 'brief' });\n"
+            "  setBriefs(refreshed.records);\n  setEditing(false);",
+        ),
+        encoding="utf-8",
+    )
     assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
 
 

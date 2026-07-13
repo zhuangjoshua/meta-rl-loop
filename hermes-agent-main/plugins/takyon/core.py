@@ -8998,6 +8998,341 @@ def _mobile_appkit_subscription_cancellation_markers(root: Path) -> list[dict[st
     return markers
 
 
+def _typescript_balanced_end(
+    source: str,
+    open_index: int,
+    opening: str,
+    closing: str,
+) -> int:
+    """Return a balanced delimiter's closing index, ignoring strings and comments."""
+    depth = 0
+    quote = ""
+    escaped = False
+    line_comment = False
+    block_comment = False
+    index = open_index
+    while index < len(source):
+        char = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            index += 1
+            continue
+        if block_comment:
+            if char == "*" and following == "/":
+                block_comment = False
+                index += 2
+                continue
+            index += 1
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char == "/" and following == "/":
+            line_comment = True
+            index += 2
+            continue
+        if char == "/" and following == "*":
+            block_comment = True
+            index += 2
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            index += 1
+            continue
+        if char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
+
+
+def _typescript_call_arguments(source: str, call_match: re.Match[str]) -> str:
+    """Return one call's balanced argument text, ignoring strings and comments."""
+    open_index = source.find("(", call_match.start(), call_match.end() + 1)
+    if open_index < 0:
+        return ""
+    close_index = _typescript_balanced_end(source, open_index, "(", ")")
+    return source[open_index + 1 : close_index] if close_index >= 0 else ""
+
+
+def _typescript_enclosing_block(source: str, position: int) -> tuple[int, int]:
+    """Return the innermost brace block containing position."""
+    stack: list[int] = []
+    quote = ""
+    escaped = False
+    line_comment = False
+    block_comment = False
+    index = 0
+    while index < min(position, len(source)):
+        char = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            index += 1
+            continue
+        if block_comment:
+            if char == "*" and following == "/":
+                block_comment = False
+                index += 2
+                continue
+            index += 1
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char == "/" and following == "/":
+            line_comment = True
+            index += 2
+            continue
+        if char == "/" and following == "*":
+            block_comment = True
+            index += 2
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+        elif char == "{":
+            stack.append(index)
+        elif char == "}" and stack:
+            stack.pop()
+        index += 1
+    if not stack:
+        return 0, len(source)
+    block_start = stack[-1]
+    block_end = _typescript_balanced_end(source, block_start, "{", "}")
+    return block_start + 1, block_end if block_end >= 0 else len(source)
+
+
+def _typescript_top_level_object_fields(object_text: str) -> list[str]:
+    """Split a TypeScript object literal into top-level fields."""
+    text = object_text.strip()
+    if not text.startswith("{"):
+        return []
+    close_index = _typescript_balanced_end(text, 0, "{", "}")
+    if close_index < 0:
+        return []
+    body = text[1:close_index]
+    fields: list[str] = []
+    start = 0
+    braces = brackets = parentheses = 0
+    quote = ""
+    escaped = False
+    line_comment = False
+    block_comment = False
+    index = 0
+    while index < len(body):
+        char = body[index]
+        following = body[index + 1] if index + 1 < len(body) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            index += 1
+            continue
+        if block_comment:
+            if char == "*" and following == "/":
+                block_comment = False
+                index += 2
+                continue
+            index += 1
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char == "/" and following == "/":
+            line_comment = True
+            index += 2
+            continue
+        if char == "/" and following == "*":
+            block_comment = True
+            index += 2
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+        elif char == "{":
+            braces += 1
+        elif char == "}":
+            braces = max(0, braces - 1)
+        elif char == "[":
+            brackets += 1
+        elif char == "]":
+            brackets = max(0, brackets - 1)
+        elif char == "(":
+            parentheses += 1
+        elif char == ")":
+            parentheses = max(0, parentheses - 1)
+        elif char == "," and braces == brackets == parentheses == 0:
+            fields.append(body[start:index].strip())
+            start = index + 1
+        index += 1
+    fields.append(body[start:].strip())
+    return [field for field in fields if field]
+
+
+def _object_literal_has_top_level_record_ref(object_text: str) -> bool:
+    for field in _typescript_top_level_object_fields(object_text):
+        if re.match(r"^(?:ref|recordRef|record_ref)\s*(?::|$)", field):
+            return True
+    return False
+
+
+def _expression_uses_whole_record_value(expression: str, name: str) -> bool:
+    """True when expression consumes a record/result, not an unrelated scalar projection."""
+    for match in re.finditer(rf"\b{re.escape(name)}\b", expression):
+        suffix = expression[match.end() :]
+        property_access = re.match(
+            r"\s*\??\s*\.\s*([A-Za-z_$][\w$]*)", suffix
+        )
+        if property_access and property_access.group(1) not in {"record", "records"}:
+            continue
+        return True
+    return False
+
+
+def _save_call_updates_by_ref(source: str, save_match: re.Match[str]) -> bool:
+    arguments = _typescript_call_arguments(source, save_match)
+    if _object_literal_has_top_level_record_ref(arguments):
+        return True
+    variable = re.match(r"\s*([A-Za-z_$][\w$]*)\b", arguments)
+    if not variable:
+        return False
+    prefix = source[max(0, save_match.start() - 1800) : save_match.start()]
+    declarations = list(
+        re.finditer(
+            rf"\b(?:const|let|var)\s+{re.escape(variable.group(1))}\s*=\s*\{{",
+            prefix,
+        )
+    )
+    if not declarations:
+        return False
+    declaration_tail = "{" + prefix[declarations[-1].end() :]
+    return _object_literal_has_top_level_record_ref(declaration_tail)
+
+
+def _record_update_reconciles_visible_state(
+    source: str,
+    save_match: re.Match[str],
+) -> bool:
+    """Best-effort static proof that an update result reaches rendered state.
+
+    The publish gate cannot execute arbitrary product UI, but it can reject the common stale-detail
+    failure where ``saveRecord({ ref, ... })`` succeeds and only edit-form state is updated.  Track
+    the save result (and simple aliases) into a domain/selection/list setter or callback, or accept
+    an awaited refresh helper.  Editing/draft/form setters do not count as visible reconciliation.
+    """
+    block_start, block_end = _typescript_enclosing_block(source, save_match.start())
+    prefix = source[max(block_start, save_match.start() - 220) : save_match.start()]
+    after_save = source[save_match.end() : block_end]
+    returned_names: set[str] = set()
+    assigned_save = re.search(
+        r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*"
+        r"(?::[^=]{1,180})?=\s*await\s+"
+        r"(?:[A-Za-z_$][\w$]*\s*\.\s*)?$",
+        prefix,
+    )
+    if assigned_save:
+        returned_names.add(assigned_save.group(1))
+
+    # A direct records re-read is also a reconciliation source when its payload is put into state.
+    for refreshed in re.finditer(
+        r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+"
+        r"(?:[A-Za-z_$][\w$]*\s*\.\s*)?(?:listRecords|getRecord|readRecord)\s*\(",
+        after_save,
+    ):
+        returned_names.add(refreshed.group(1))
+
+    # Follow straightforward aliases such as `updated = result.record ?? result` and
+    # `reconciled = normalize(updated)` without pretending to be a TypeScript parser.
+    assignments = list(
+        re.finditer(
+            r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]{1,600})",
+            after_save,
+        )
+    )
+    for _ in range(4):
+        changed = False
+        for assignment in assignments:
+            alias, expression = assignment.group(1), assignment.group(2)
+            if alias in returned_names:
+                continue
+            if any(
+                _expression_uses_whole_record_value(expression, name)
+                for name in returned_names
+            ):
+                returned_names.add(alias)
+                changed = True
+        if not changed:
+            break
+
+    stale_state_roots = {
+        "edit", "draft", "form", "input", "field", "saving", "loading", "error",
+        "confirm", "pending", "mode", "toast", "success", "message", "notice",
+        "notification", "status", "alert", "banner", "snack", "flash", "response",
+        "result", "feedback",
+    }
+    if returned_names:
+        for state_call in re.finditer(
+            r"\b((?:set|on)[A-Z][A-Za-z0-9_$]*)\s*\(([^;]{0,1200})",
+            after_save,
+            re.DOTALL,
+        ):
+            call_name, arguments = state_call.group(1), state_call.group(2)
+            state_name = re.sub(r"^(?:set|on)", "", call_name)
+            state_tokens = [
+                token.lower()
+                for token in re.findall(
+                    r"[A-Z]+(?=[A-Z][a-z]|$)|[A-Z]?[a-z]+|\d+", state_name
+                )
+            ]
+            if any(
+                token in stale_state_roots
+                or any(
+                    token.startswith(root)
+                    for root in {"edit", "draft", "confirm", "notif", "snack"}
+                )
+                for token in state_tokens
+            ):
+                continue
+            if any(
+                _expression_uses_whole_record_value(arguments, name)
+                for name in returned_names
+            ):
+                return True
+
+    # Only invoked record/list refresh helpers count. Unrelated work such as refreshBilling or a
+    # bare awaited variable must not make a stale detail look reconciled.
+    return re.search(
+        r"\bawait\s+(?:[A-Za-z_$][\w$]*\s*\.\s*)?(?:"
+        r"(?:load|reload|refresh|reopen)[A-Za-z0-9_$]*(?:Record|Records|Item|Items|List)|"
+        r"[A-Za-z_$][\w$]*(?:Record|Records|Item|Items|List)"
+        r"[A-Za-z0-9_$]*(?:load|reload|refresh|reopen))\s*\(",
+        after_save,
+        re.IGNORECASE,
+    ) is not None
+
+
 def _requested_workflow_completeness_markers(
     root: Path,
     surface: dict[str, Any] | None,
@@ -9092,6 +9427,26 @@ def _requested_workflow_completeness_markers(
                     "back to saveRecord(...) for an in-place update",
                 )
             )
+        if requires_update and has_ref_update:
+            ref_update_calls = [
+                save_match
+                for save_match in re.finditer(r"\bsaveRecord\s*\(", app_home_text)
+                if _save_call_updates_by_ref(app_home_text, save_match)
+            ]
+            has_visible_reconciliation = False
+            for save_match in ref_update_calls:
+                if _record_update_reconciles_visible_state(app_home_text, save_match):
+                    has_visible_reconciliation = True
+                    break
+            if not ref_update_calls or not has_visible_reconciliation:
+                gaps.append(
+                    (
+                        "src/screens/app-home.tsx",
+                        "requested revise/update workflow saves by exact record.ref but does not "
+                        "reconcile the returned record into the visible selected-record/list state "
+                        "or await a records refresh; the detail view can show stale pre-update data",
+                    )
+                )
         has_delete = re.search(r"\bdeleteRecord\s*\(", app_home_text) is not None
         has_delete_confirmation = re.search(
             r"\b(?:window\s*\.\s*)?confirm\s*\(|"

@@ -674,8 +674,9 @@ def _format_cli_value(value: Any) -> str:
                 return (
                     f"Create build completed for business:{slug}{took_suffix}; signed-in live "
                     f"action execution verification is {action_label}.{blocker_suffix} Full browser "
-                    f"workflow E2E remains REQUIRED (save, exact-ref reopen, revise, copy, export, "
-                    f"delete).{job_suffix}"
+                    f"workflow E2E remains REQUIRED for the requested product workflow: save and "
+                    f"exact-ref reopen, plus each requested revise, copy, export, or delete step."
+                    f"{job_suffix}"
                 )
             if status == "completed":
                 job_suffix = f" Bootstrap job: {job_id}." if job_id else ""

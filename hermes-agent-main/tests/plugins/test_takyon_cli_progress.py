@@ -1908,6 +1908,7 @@ def test_format_cli_value_surfaces_pending_live_action_execution_without_claimin
     assert "live action execution verification is PENDING" in rendered
     assert "Full browser workflow E2E remains REQUIRED" in rendered
     assert "exact-ref reopen" in rendered
+    assert "each requested revise, copy, export, or delete step" in rendered
     assert "build-current" in rendered
     assert "Bootstrap job: job-verify" in rendered
 
@@ -1934,6 +1935,7 @@ def test_format_cli_value_action_verified_still_requires_full_browser_e2e():
 
     assert "live action execution verification is ACTION-VERIFIED" in rendered
     assert "Full browser workflow E2E remains REQUIRED" in rendered
+    assert "for the requested product workflow" in rendered
     assert "Create completed" not in rendered
 
 
