@@ -24,11 +24,13 @@ remaining route we pin the hard invariants:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
 import pytest
 from starlette.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 from plugins.takyon import safebox_app, safebox_provider_proxy
 from plugins.takyon.safebox_capability import CapabilityScope, mint_capability
@@ -142,6 +144,22 @@ class _FakeStream:
     def iter_bytes(self):
         for chunk in self._chunks:
             yield chunk
+
+
+class _FailingStream(_FakeStream):
+    def __init__(self, exc, *, open_failure=False, chunks=()):
+        super().__init__(200, chunks)
+        self.exc = exc
+        self.open_failure = open_failure
+
+    def __enter__(self):
+        if self.open_failure:
+            raise self.exc
+        return self
+
+    def iter_bytes(self):
+        yield from super().iter_bytes()
+        raise self.exc
 
 
 class _FakeClient:
@@ -458,11 +476,169 @@ def test_anthropic_stream_upstream_error_releases_hold(client, monkeypatch):
             "stream": True,
         },
     )
-    assert resp.status_code == 200  # SSE always 200; the error rides inside the stream body
-    assert "event: error" in resp.text
+    assert resp.status_code == 429
+    assert resp.json()["detail"] == {"error": "provider_error", "upstream_status": 429}
     _assert_no_key(resp)
     # Upstream rejected -> the hold is RELEASED, never settled.
     assert len(_reserves()) == 1 and len(_releases()) == 1 and _settles() == []
+
+
+def test_anthropic_stream_open_transport_failure_is_502_and_releases(client, monkeypatch, caplog):
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_estimate_microusd", lambda p: 6000)
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)
+    from plugins.takyon import ai_provider
+
+    monkeypatch.setattr(ai_provider, "anthropic_payload", lambda b: ({}, "claude-sonnet-4-6", 10))
+    _patch_httpx(monkeypatch)
+    request = safebox_provider_proxy.httpx.Request(
+        "POST", safebox_provider_proxy._ANTHROPIC_MESSAGES_URL
+    )
+    _FakeClient.stream_response = _FailingStream(
+        safebox_provider_proxy.httpx.ConnectError(f"connect failed {_REAL_KEY}", request=request),
+        open_failure=True,
+    )
+    with caplog.at_level("WARNING", logger="takyon.safebox_provider_proxy"):
+        resp = client.post(
+            "/v1/messages",
+            headers=_cap_headers(_session_cap()),
+            json={
+                "model": "claude-sonnet-4-6",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "provider_unreachable"
+    assert len(_reserves()) == 1 and len(_releases()) == 1 and _settles() == []
+    assert "ConnectError" in caplog.text and "phase=open" in caplog.text
+    assert _REAL_KEY not in caplog.text and _REAL_KEY not in resp.text
+
+
+def test_anthropic_midstream_failure_releases_and_logs_sanitized(client, monkeypatch, caplog):
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_estimate_microusd", lambda p: 6000)
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)
+    from plugins.takyon import ai_provider
+
+    monkeypatch.setattr(ai_provider, "anthropic_payload", lambda b: ({}, "claude-sonnet-4-6", 10))
+    _patch_httpx(monkeypatch)
+    request = safebox_provider_proxy.httpx.Request(
+        "POST", safebox_provider_proxy._ANTHROPIC_MESSAGES_URL
+    )
+    _FakeClient.stream_response = _FailingStream(
+        safebox_provider_proxy.httpx.ReadError(
+            f"socket reset {_REAL_KEY} body={{\"private\":\"customer-data\"}}",
+            request=request,
+        ),
+        chunks=(b'event: message_start\ndata: {"type":"message_start"}\n\n',),
+    )
+    local_client = TestClient(safebox_app.build_safebox_app(), raise_server_exceptions=False)
+    with caplog.at_level("WARNING", logger="takyon.safebox_provider_proxy"):
+        resp = local_client.post(
+            "/v1/messages",
+            headers=_cap_headers(_session_cap()),
+            json={
+                "model": "claude-sonnet-4-6",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+    assert resp.status_code == 200  # headers were validly committed after upstream opened
+    assert "event: error" in resp.text
+    assert '"type":"api_error"' in resp.text
+    assert "Upstream provider stream interrupted" in resp.text
+    assert len(_reserves()) == 1 and _releases() == []
+    assert _settles() == [("settle", "r0", 6000)]
+    assert "ReadError" in caplog.text and "phase=body" in caplog.text
+    assert _REAL_KEY not in caplog.text
+    assert "customer-data" not in caplog.text
+
+
+class _OwnedTestContext:
+    def __init__(self):
+        self.exits = 0
+
+    def __exit__(self, *args):
+        self.exits += 1
+
+
+class _OwnedTestClient:
+    def __init__(self):
+        self.closes = 0
+
+    def close(self):
+        self.closes += 1
+
+
+def _owned_response(chunks):
+    context = _OwnedTestContext()
+    http_client = _OwnedTestClient()
+    owner = safebox_provider_proxy._OpenedProviderStream(
+        client=http_client,
+        stream_context=context,
+        ledger=_FakeBudget(),
+        reservation={"id": "r0"},
+        usage=pytest.fail,
+        estimate_microusd=6000,
+        provider="anthropic",
+        secret=_REAL_KEY,
+    )
+    return (
+        safebox_provider_proxy._OwnedStreamingResponse(
+            chunks, media_type="text/event-stream", owner=owner
+        ),
+        context,
+        http_client,
+    )
+
+
+def test_opened_stream_client_disconnect_settles_estimate_once():
+    def chunks():
+        yield b"first"
+        yield b"second"
+
+    response, context, http_client = _owned_response(chunks())
+
+    async def send(message):
+        if message["type"] == "http.response.body":
+            raise OSError("client disconnected")
+
+    async def receive():
+        return {"type": "http.request"}
+
+    with pytest.raises(ClientDisconnect):
+        asyncio.run(
+            response(
+                {"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send
+            )
+        )
+    assert _settles() == [("settle", "r0", 6000)] and _releases() == []
+    assert context.exits == 1 and http_client.closes == 1
+
+
+def test_opened_stream_close_before_first_next_still_closes_and_settles():
+    iterated = []
+
+    def chunks():
+        iterated.append(True)
+        yield b"never"
+
+    response, context, http_client = _owned_response(chunks())
+
+    async def send(_message):
+        raise OSError("closed before response body")
+
+    async def receive():
+        return {"type": "http.request"}
+
+    with pytest.raises(ClientDisconnect):
+        asyncio.run(
+            response(
+                {"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send
+            )
+        )
+    assert iterated == []
+    assert _settles() == [("settle", "r0", 6000)] and _releases() == []
+    assert context.exits == 1 and http_client.closes == 1
 
 
 def test_session_capability_is_reusable_across_more_than_one_call(client, monkeypatch):

@@ -54,12 +54,17 @@ Hard invariants for every route here:
 from __future__ import annotations
 
 import json as _json
+import logging
+import re
+import threading
 import time as _time
 from typing import Any, Iterator
 
+import anyio
 import httpx
 from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 # Upstream provider hosts. Kept here (not in the business runtime) because only the safebox forwards.
 _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
@@ -69,6 +74,144 @@ _ANTHROPIC_VERSION = "2023-06-01"  # match ai_provider.ANTHROPIC_VERSION / call_
 # Generous upstream timeout: provider calls (Anthropic / image gen) routinely exceed the 10s env-read
 # timeout. Streaming uses no read timeout (the stream stays open for the life of the response).
 _UPSTREAM_TIMEOUT_S = 180.0
+_log = logging.getLogger("takyon.safebox_provider_proxy")
+
+
+def _sanitized_stream_exception(exc: BaseException, *, secrets: tuple[str, ...] = ()) -> tuple[str, str]:
+    """Return diagnostic exception metadata without credentials or response/request bodies."""
+    class_name = re.sub(r"[^A-Za-z0-9_.-]", "_", type(exc).__name__)[:80] or "Exception"
+    message = str(exc or "")
+    for secret in secrets:
+        if secret:
+            message = message.replace(secret, "[redacted]")
+    message = re.sub(
+        r"(?i)\b(authorization|x-api-key|api[_ -]?key|bearer|token)\b\s*[:=]?\s*\S+",
+        r"\1=[redacted]",
+        message,
+    )
+    # Transport diagnostics do not need provider request/response bodies. Remove JSON-looking tails
+    # entirely instead of trying to redact arbitrary customer content field-by-field.
+    body_start = min((i for i in (message.find("{"), message.find("[")) if i >= 0), default=-1)
+    if body_start >= 0:
+        message = message[:body_start].rstrip() + " [redacted-body]"
+    message = " ".join(message.split())[:300] or "upstream stream failure"
+    return class_name, message
+
+
+def _log_stream_failure(
+    *, provider: str, phase: str, exc: BaseException, secrets: tuple[str, ...] = ()
+) -> None:
+    class_name, message = _sanitized_stream_exception(exc, secrets=secrets)
+    _log.warning(
+        "provider stream failure provider=%s phase=%s exception_class=%s message=%s",
+        provider,
+        phase,
+        class_name,
+        message,
+    )
+
+
+class _OpenedProviderStream:
+    """Own an opened upstream stream, its reservation, and exactly-once cleanup/settlement."""
+
+    def __init__(
+        self,
+        *,
+        client,
+        stream_context,
+        ledger,
+        reservation,
+        usage,
+        estimate_microusd: int,
+        provider: str,
+        secret: str,
+    ) -> None:
+        self.client = client
+        self.stream_context = stream_context
+        self.ledger = ledger
+        self.reservation = reservation
+        self.usage = usage
+        self.estimate_microusd = int(estimate_microusd)
+        self.provider = provider
+        self.secret = secret
+        self._finished = False
+        self._lock = threading.Lock()
+
+    def finish(
+        self, *, completed: bool, failure: BaseException | None = None
+    ) -> BaseException | None:
+        """Close once and settle. An opened 2xx may already have spent, so failure settles estimate."""
+        with self._lock:
+            if self._finished:
+                return failure
+            self._finished = True
+            effective_failure = failure
+            exit_args = (
+                (type(failure), failure, failure.__traceback__)
+                if failure is not None
+                else (None, None, None)
+            )
+            try:
+                self.stream_context.__exit__(*exit_args)
+            except BaseException as exc:
+                effective_failure = effective_failure or exc
+            try:
+                self.client.close()
+            except BaseException as exc:
+                effective_failure = effective_failure or exc
+
+            actual = self.estimate_microusd
+            if completed and effective_failure is None:
+                try:
+                    actual = self.usage.billed_microusd(
+                        fallback_microusd=self.estimate_microusd
+                    )
+                except BaseException as exc:
+                    effective_failure = exc
+                    actual = self.estimate_microusd
+            _settle(self.ledger, self.reservation, actual)
+
+            if effective_failure is not None:
+                _log_stream_failure(
+                    provider=self.provider,
+                    phase="body",
+                    exc=effective_failure,
+                    secrets=(self.secret,),
+                )
+            elif not completed:
+                _log_stream_failure(
+                    provider=self.provider,
+                    phase="body",
+                    exc=RuntimeError("downstream stream did not complete"),
+                    secrets=(self.secret,),
+                )
+            return effective_failure
+
+
+class _OwnedStreamingResponse(StreamingResponse):
+    """Guarantee cleanup even when ASGI cancels before the body iterator's first ``next``."""
+
+    def __init__(self, *args, owner: _OpenedProviderStream, **kwargs) -> None:
+        self._owner = owner
+        super().__init__(*args, **kwargs)
+
+    async def __call__(self, scope, receive, send) -> None:
+        failure: BaseException | None = None
+        try:
+            await super().__call__(scope, receive, send)
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            # Closing a provider stream and settling its authoritative hold are synchronous I/O.
+            # Shield the cleanup from the disconnect cancellation and keep it off the Safebox event
+            # loop so one broken client cannot freeze every authority route.
+            with anyio.CancelScope(shield=True):
+                await run_in_threadpool(
+                    self._owner.finish,
+                    completed=False,
+                    failure=failure or RuntimeError("downstream stream did not complete"),
+                )
 
 
 def _as_json_object(body: Any) -> dict[str, Any]:
@@ -542,52 +685,92 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
                 model = str((payload or {}).get("model") or "")
             usage = _AnthropicStreamUsage(model)
 
-            def _sse_bytes() -> Iterator[bytes]:
-                settled = {"done": False}
-
-                def _finish_settle() -> None:
-                    if settled["done"]:
-                        return
-                    settled["done"] = True
-                    actual = usage.billed_microusd(fallback_microusd=estimate)
-                    _settle(ledger, reservation, actual)
-
+            # Open the upstream response before constructing StreamingResponse. Starlette sends the
+            # downstream status as soon as it starts iterating the body, so opening inside the iterator
+            # incorrectly turned connection failures into HTTP 200 responses and SDK retry loops.
+            client = None
+            stream_context = None
+            try:
                 client = httpx.Client(timeout=httpx.Timeout(_UPSTREAM_TIMEOUT_S, read=None))
+                stream_context = client.stream("POST", target_url, headers=headers, json=payload)
+                upstream = stream_context.__enter__()
+            except httpx.HTTPError as exc:
+                _release(ledger, reservation)
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                _log_stream_failure(
+                    provider="deepseek" if deepseek else "anthropic",
+                    phase="open",
+                    exc=exc,
+                    secrets=(key,),
+                )
+                raise HTTPException(status_code=502, detail="provider_unreachable") from exc
+            except BaseException:
+                _release(ledger, reservation)
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                raise
+
+            if upstream.status_code >= 400:
+                status_code = int(upstream.status_code)
                 try:
-                    with client.stream(
-                        "POST", target_url, headers=headers, json=payload
-                    ) as upstream:
-                        if upstream.status_code >= 400:
-                            # Upstream rejected: no provider spend realized -> RELEASE the hold and emit a
-                            # sanitized error event (no key).
-                            _ = upstream.read()
-                            _release(ledger, reservation)
-                            settled["done"] = True
-                            yield (
-                                f"event: error\ndata: "
-                                f'{{"upstream_status": {int(upstream.status_code)}, '
-                                f'"error": "provider_error"}}\n\n'
-                            ).encode("utf-8")
-                            return
-                        for chunk in upstream.iter_bytes():
-                            if chunk:
-                                usage.feed(chunk)
-                                yield chunk
-                    # Stream completed cleanly: settle the ACTUAL parsed usage (release/refund the diff).
-                    _finish_settle()
-                except Exception:  # noqa: BLE001 — a mid-stream failure releases the hold (no settle).
-                    if not settled["done"]:
-                        settled["done"] = True
-                        _release(ledger, reservation)
-                    raise
+                    stream_context.__exit__(None, None, None)
                 finally:
                     client.close()
-                    # Defensive: if we somehow exited without settling or releasing, settle the estimate
-                    # so a hold is never orphaned.
-                    if not settled["done"]:
-                        _finish_settle()
+                    _release(ledger, reservation)
+                raise HTTPException(
+                    status_code=status_code,
+                    detail={"error": "provider_error", "upstream_status": status_code},
+                )
 
-            return StreamingResponse(_sse_bytes(), media_type="text/event-stream")
+            owner = _OpenedProviderStream(
+                client=client,
+                stream_context=stream_context,
+                ledger=ledger,
+                reservation=reservation,
+                usage=usage,
+                estimate_microusd=estimate,
+                provider="deepseek" if deepseek else "anthropic",
+                secret=key,
+            )
+
+            def _sse_bytes() -> Iterator[bytes]:
+                try:
+                    for chunk in upstream.iter_bytes():
+                        if chunk:
+                            usage.feed(chunk)
+                            yield chunk
+                except BaseException as exc:  # includes disconnect-driven GeneratorExit/cancellation
+                    owner.finish(completed=False, failure=exc)
+                    # Once downstream headers are committed, finish with Anthropic's documented SSE
+                    # error shape instead of resetting the connection. This exposes one deterministic
+                    # provider error to the SDK; it does not replay the paid call.
+                    if isinstance(exc, Exception):
+                        yield (
+                            'event: error\ndata: {"type":"error","error":'
+                            '{"type":"api_error","message":"Upstream provider stream interrupted"}}\n\n'
+                        ).encode("utf-8")
+                        return
+                    raise
+                close_failure = owner.finish(completed=True)
+                if close_failure is not None:
+                    if isinstance(close_failure, Exception):
+                        yield (
+                            'event: error\ndata: {"type":"error","error":'
+                            '{"type":"api_error","message":"Upstream provider stream interrupted"}}\n\n'
+                        ).encode("utf-8")
+                        return
+                    raise close_failure
+
+            return _OwnedStreamingResponse(
+                _sse_bytes(), media_type="text/event-stream", owner=owner
+            )
 
         # Non-streaming: call -> settle actual from the response usage. Release on transport failure.
         try:
