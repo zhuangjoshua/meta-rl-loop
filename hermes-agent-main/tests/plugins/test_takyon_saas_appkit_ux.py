@@ -149,8 +149,8 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     assert "guidance_skills" not in landing_pass
     assert "native `design-taste-frontend` skill" in landing_pass
     assert "Safebox-gated image generation" in landing_pass
-    assert "bounded rendered-viewport preflight" in landing_pass
-    assert "durable `DESIGN.md` handoff" in landing_pass
+    assert "images, DESIGN.md, screenshots, and visual audits are optional" in landing_pass
+    assert "never publication conditions" in landing_pass
     assert "max_turns: 60" in landing_pass
     assert "effort: medium" in landing_pass
     assert "timeout_ms: 900000" in landing_pass
@@ -174,17 +174,17 @@ def test_bootstrap_uses_native_taste_without_prompt_body_guidance_injection():
     )[0]
     assert "guidance_skills" not in prompt
     assert "native `design-taste-frontend` skill" in product_pass
-    assert "read the durable `DESIGN.md`, landing source, tokens, and existing assets" in product_pass
+    assert "inspect the existing product before editing" in product_pass
     assert "Honor the skill's own scope boundary" in product_pass
     assert "do not apply marketing-page layout rules to the multi-step `/app` product UI" in product_pass
-    assert "Preserve the published landing direction" in product_pass
-    assert "not a requirement to spend or regenerate assets on every pass" in product_pass
+    assert "preserve useful landing-page direction" in product_pass
+    assert "available image tool is optional" in product_pass
     assert "`effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`" in product_pass
     assert "intentionally separate from the Taste landing's medium/60/900 bounds" in product_pass
     assert "#### 3a. Upgrade landing proof" not in prompt
 
 
-def test_new_landing_requires_real_assets_and_keeps_logo_after_publish():
+def test_new_landing_offers_optional_assets_and_keeps_logo_after_publish():
     prompt = turn_runtime._business_bootstrap_instruction(
         "taste-assets-test",
         "Build a SaaS where customers generate and save account briefs",
@@ -198,11 +198,12 @@ def test_new_landing_requires_real_assets_and_keeps_logo_after_publish():
     )[0]
     landing_lower = landing_pass.lower()
 
-    assert "real, used generated assets" in landing_lower
+    assert "available when original imagery improves the product" in landing_lower
     assert "safebox-gated image generation" in landing_lower
+    assert "images" in landing_lower and "never publication conditions" in landing_lower
 
-    # Image generation is part of the continuous Taste-owned 2a call. The distinct logo workflow
-    # remains after the first landing has published and is not a substitute for those site images.
+    # Optional site imagery stays inside the Taste-owned 2a call. The distinct logo workflow
+    # remains after the first landing has published and does not make site images mandatory.
     assert prompt.index(landing_heading) < prompt.index(logo_heading)
     logo_pass = prompt.split(logo_heading, 1)[1].split(
         "#### 2c. Workflow verification gate", 1
@@ -211,7 +212,7 @@ def test_new_landing_requires_real_assets_and_keeps_logo_after_publish():
     assert "business_generate_logo" in logo_pass
 
 
-def test_opted_in_animation_complements_generated_imagery_instead_of_replacing_it():
+def test_opted_in_animation_remains_guidance_without_requiring_generated_imagery():
     prompt = turn_runtime._business_bootstrap_instruction(
         "taste-animation-test",
         "Build an animated analytics SaaS",
@@ -224,7 +225,7 @@ def test_opted_in_animation_complements_generated_imagery_instead_of_replacing_i
     )[0]
     assert "explicitly requested continuous landing animation" in landing_pass
     assert "reduced-motion-safe" in landing_pass
-    assert "without replacing the required generated assets" in landing_pass
+    assert "required generated assets" not in landing_pass
 
 
 def test_bootstrap_keeps_named_cancellation_policy_out_of_worker_authored_copy():
