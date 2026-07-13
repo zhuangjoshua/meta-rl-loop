@@ -12,6 +12,7 @@ from plugins.takyon import core, creative_provider_registry
 
 def test_site_image_tool_writes_key_free_public_asset(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    call_order: list[str] = []
 
     class FakeStore:
         @contextmanager
@@ -26,9 +27,11 @@ def test_site_image_tool_writes_key_free_public_asset(tmp_path, monkeypatch):
             return Path(tmp_path) / "businesses" / business / relative
 
         def commit(self, **_kwargs):
+            call_order.append("event")
             return {"success": True}
 
         def _sync_business_workspace_remote(self, _business):
+            call_order.append("workspace")
             return None
 
     store = FakeStore()
@@ -90,6 +93,7 @@ def test_site_image_tool_writes_key_free_public_asset(tmp_path, monkeypatch):
         / "hero-atmosphere.json"
     )
     assert json.loads(receipt.read_text(encoding="utf-8"))["credits_charged"] == 2
+    assert call_order == ["workspace", "event"]
 
 
 def test_site_image_tool_is_authority_only():
