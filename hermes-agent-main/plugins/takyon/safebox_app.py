@@ -1104,8 +1104,9 @@ class _OperatorBudgetAdapter:
     convert the microUSD estimate to cents (ceiling), take a REAL hold on ``billing.reserve`` (which
     locks the single ``billing_accounts`` row FOR UPDATE, draws the operator allowance, and raises
     ``InsufficientBalance`` when the allowance can no longer cover the estimate — so the gate is
-    cumulative and fails CLOSED), then ``billing.settle`` the clamped actual on success / ``billing.refund``
-    the whole hold on failure. ``billing.reserve`` is idempotent on its reservation_key, so the broker can
+    cumulative and fails CLOSED), then ``billing.settle`` the clamped actual on success /
+    ``billing.release_reservation`` on failure. ``billing.reserve`` is idempotent on its
+    reservation_key, so the broker can
     pass the same key safely. All of this runs INSIDE the safebox process on the safebox's own DB
     connection, so the gate is AUTHORITATIVE on the safebox — no client may reserve/settle the operator
     rail.
@@ -1183,7 +1184,7 @@ class _OperatorBudgetAdapter:
 
         with _safebox_db_conn() as conn:
             # Return the whole operator billing hold to the authority (no spend recorded). Idempotent.
-            billing.refund(conn, reservation["reservation_key"])
+            billing.release_reservation(conn, reservation["reservation_key"])
 
 
 class OperatorBudgetExceeded(Exception):
@@ -1480,7 +1481,7 @@ class _BillingSettleBody(BaseModel):
     actual_cents: int
 
 
-class _BillingRefundBody(BaseModel):
+class _BillingReservationReleaseBody(BaseModel):
     reservation_key: str
 
 
@@ -3484,10 +3485,10 @@ def build_safebox_app() -> FastAPI:
             ) from exc
         return {"ok": True}
 
-    @app.post("/v1/billing/refund")
-    def refund_billing(
+    @app.post("/v1/billing/reservations/release")
+    def release_billing_reservation(
         request: Request,
-        body: _BillingRefundBody,
+        body: _BillingReservationReleaseBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, bool]:
         _require_internal_token(authorization)
@@ -3496,7 +3497,7 @@ def build_safebox_app() -> FastAPI:
 
         try:
             with _safebox_db_conn() as conn:
-                billing.refund(conn, body.reservation_key)
+                billing.release_reservation(conn, body.reservation_key)
         except billing.UnknownReservation as exc:
             raise HTTPException(
                 status_code=404,

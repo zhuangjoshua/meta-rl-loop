@@ -248,13 +248,13 @@ class BusinessBudgetSpendMeter:
                         # The per-business pool cap (if an operator set one) refused — release the
                         # billing hold we just took so it does not leak, then fail closed.
                         if billing_reserved_cents:
-                            billing.refund(raw, key)
+                            billing.release_reservation(raw, key)
                         raise web_spend_meter.SpendBlocked(
                             f"business {business!r} is out of AI budget; {op} blocked"
                         )
                     except usage_leaf.AppBudgetInactive:
                         if billing_reserved_cents:
-                            billing.refund(raw, key)
+                            billing.release_reservation(raw, key)
                         raise web_spend_meter.SpendBlocked(
                             f"business {business!r} AI budget is inactive; {op} blocked"
                         )
@@ -321,9 +321,9 @@ class BusinessBudgetSpendMeter:
                         error=(str(error)[:500] if error else None),
                     )
                 # Return the whole operator billing hold to the authority (no spend recorded).
-                # Idempotent: a replayed/already-finalized refund is a no-op.
+                # Idempotent: a replayed/already-finalized release is a no-op.
                 if handle.owner_user_id and handle.billing_reserved_cents:
-                    billing.refund(raw, handle.reservation_key)
+                    billing.release_reservation(raw, handle.reservation_key)
             _emit_web_spend_event(conn, handle, status="error", cost_microusd=0, error=error)
 
 

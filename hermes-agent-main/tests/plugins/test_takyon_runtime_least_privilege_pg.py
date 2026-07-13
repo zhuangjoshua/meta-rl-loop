@@ -223,7 +223,7 @@ def test_safebox_billing_function_acls_are_authority_only(pg_conn):
         "safebox_billing_grant_allowance(uuid,bigint,text,timestamp with time zone,timestamp with time zone)",
         "safebox_billing_reserve(uuid,bigint,text,text,text)",
         "safebox_billing_settle(text,bigint)",
-        "safebox_billing_refund(text)",
+        "safebox_billing_release_reservation(text)",
     )
     for signature in signatures:
         authority, operator, app, legacy_runtime, app_role, legacy_safebox = pg_conn.execute(

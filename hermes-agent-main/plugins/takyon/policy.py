@@ -19,7 +19,7 @@ Inputs it reads:
 
 The monthly sub-cap is a guardrail, NOT a second wallet: the real balance is always
 the flow-A ledger, and the cap only ever tightens the effective budget. Per-business
-spend is netted via reservation_key because billing's settle/refund entries carry
+spend is netted via reservation_key because billing's settle/release entries carry
 business_slug=NULL (only the reserve is tagged) — see `_business_period_spend_cents`.
 
 House style (matches billing.py / custody.py): pure leaf, takes a psycopg
@@ -443,8 +443,8 @@ def _current_period_start() -> datetime:
 
 def _business_period_spend_cents(conn, business_slug: str) -> int:
     """Net cents this business has committed in the current monthly period: the sum of
-    its reservations less everything later released (Σreserve − Σrefund over the
-    business's reservation_keys). billing's settle/refund entries carry
+    its reservations less everything later released (Σreserve − Σrelease over the
+    business's reservation_keys). billing's settle/release entries carry
     business_slug=NULL — only the reserve is tagged — so we net via the reservation_key
     set rather than filtering every kind by business_slug. The result is outstanding
     holds + settled actuals, which is exactly what the monthly sub-cap should measure."""
@@ -452,7 +452,7 @@ def _business_period_spend_cents(conn, business_slug: str) -> int:
     row = conn.execute(
         "select"
         " coalesce(sum(amount_cents) filter (where kind = 'reserve'), 0)"
-        " - coalesce(sum(amount_cents) filter (where kind = 'refund'), 0)"
+        " - coalesce(sum(amount_cents) filter (where kind = 'release'), 0)"
         " from billing_entries where reservation_key in ("
         "   select distinct reservation_key from billing_entries"
         "   where business_slug = %(slug)s and kind = 'reserve'"

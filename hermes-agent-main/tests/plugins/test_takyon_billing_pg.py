@@ -1,6 +1,6 @@
 """Postgres integration tests for the billing ledger — flow A (user → platform).
 
-Phase 2 acceptance: a costly action writes correct reserve/settle/refund entries;
+Phase 2 acceptance: a costly action writes correct reserve/settle/release entries;
 spend draws on the metered allowance bucket (the à-la-carte topup overflow bucket
 was removed 2026-06-18 — allowance is the only flow-A bucket); double-charge is
 impossible under real concurrency; cached balances always reconcile with the
@@ -203,11 +203,11 @@ def test_partial_settle_within_allowance_releases_remainder(pg_conn):
     assert billing.reconcile_billing(pg_conn, uid)["ok"] is True
 
 
-def test_refund_releases_whole_reservation(pg_conn):
+def test_release_releases_whole_reservation(pg_conn):
     uid = _user(pg_conn)
     billing.grant_allowance(pg_conn, uid, 1000, "g")
     billing.reserve(pg_conn, uid, 800, "r1")
-    billing.refund(pg_conn, "r1")
+    billing.release_reservation(pg_conn, "r1")
     bal = billing.get_billing_balances(pg_conn, uid)
     assert bal.allowance_used_cents == 0  # fully restored
     assert bal.allowance_remaining_cents == 1000
@@ -238,12 +238,12 @@ def test_settle_is_idempotent(pg_conn):
     assert bal.reserved_cents == 0
 
 
-def test_refund_after_settle_is_noop(pg_conn):
+def test_release_after_settle_is_noop(pg_conn):
     uid = _user(pg_conn)
     billing.grant_allowance(pg_conn, uid, 1000, "g")
     billing.reserve(pg_conn, uid, 400, "r1")
     billing.settle(pg_conn, "r1", 400)
-    billing.refund(pg_conn, "r1")  # already finalized → no-op
+    billing.release_reservation(pg_conn, "r1")  # already finalized → no-op
     bal = billing.get_billing_balances(pg_conn, uid)
     assert bal.allowance_used_cents == 400
     assert bal.allowance_remaining_cents == 600

@@ -376,8 +376,8 @@ def test_double_reserve_same_key_holds_once(pg_conn, monkeypatch):
         r2 = billing.reserve(pg_conn, owner, 3, key, business_slug=slug)  # replay
         assert r1.total_cents == r2.total_cents == 3
         assert _billing_remaining_cents(pg_conn, owner) == start - 3  # held ONCE, not twice
-        billing.refund(pg_conn, key)
-        billing.refund(pg_conn, key)  # double refund is a no-op (first finalizer wins)
+        billing.release_reservation(pg_conn, key)
+        billing.release_reservation(pg_conn, key)  # replay is a no-op (first finalizer wins)
         assert _billing_remaining_cents(pg_conn, owner) == start
     finally:
         web_spend_meter.register_spend_meter(None)

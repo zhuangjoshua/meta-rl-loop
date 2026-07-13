@@ -6,9 +6,9 @@ metering unit. Stored in cents for accounting only; it is NEVER money and must n
 be surfaced as dollars. (The à-la-carte "topup" overflow bucket was removed 2026-06-18,
 operator decision: operator funding comes solely from the subscription allowance.)
 
-Costly work is wrapped in reserve → settle/refund:
+Costly work is wrapped in reserve → settle/release:
   reserve(estimate) holds allowance; on success settle(actual) records the real spend
-  and releases (estimate − actual); on failure refund() releases the whole reservation.
+  and releases (estimate − actual); on failure release_reservation() releases the whole hold.
   Allowance not covering the estimate raises InsufficientBalance (the caller maps that
   to a 402 / blocked job).
 
@@ -94,7 +94,7 @@ class NoBillingAccount(BillingError):
 
 
 class UnknownReservation(BillingError):
-    """settle/refund referenced a reservation_key that was never reserved."""
+    """settle/release referenced a reservation_key that was never reserved."""
 
 
 class InsufficientBalance(BillingError):
@@ -118,7 +118,7 @@ class InsufficientBalance(BillingError):
 @dataclass(frozen=True)
 class Reservation:
     """The outcome of a reserve: the allowance held. `key` is the reservation_key
-    threaded into settle/refund."""
+    threaded into settle/release."""
 
     key: str
     allowance_cents: int
@@ -263,7 +263,7 @@ def reserve(
     # when its weekly allowance is exhausted. We do NOT bypass the ledger — reserve → settle still
     # records every hold — we ONLY stop the gate from *refusing*. On an insufficient-balance refusal,
     # re-hold what the allowance can still cover (clamped to the available cents the gate just
-    # reported); the SQL function accepts that, so a real reserve row is written, settle/refund stay
+    # reported); the SQL function accepts that, so a real reserve row is written, settle/release stay
     # well-defined, and balances never go negative or oversell (used stays ≤ included, so reconcile
     # never drifts). A concurrent drain that makes even the clamped hold refuse falls back to a zero
     # anchor, which the gate always accepts — so the operator agent is never blocked. Only
@@ -288,7 +288,7 @@ def reserve(
 
 def settle(conn, reservation_key: str, actual_cents: int) -> None:
     """Finalize a reservation at `actual_cents` (≤ reserved): record the real spend
-    and release the unused remainder. Idempotent — a second settle/refund on the same
+    and release the unused remainder. Idempotent — a second settle/release on the same
     reservation is a no-op (first finalizer wins)."""
     if actual_cents < 0:
         raise ValueError("actual_cents must be >= 0")
@@ -313,7 +313,7 @@ def settle(conn, reservation_key: str, actual_cents: int) -> None:
         raise ValueError(f"actual {actual_cents} exceeds reserved {a_resv}")
     # Row ops in the migration-0038 SECURITY DEFINER function safebox_billing_settle (verbatim port):
     # re-look up the reserve, lock the account row, already-finalized → no-op (first finalizer wins),
-    # else record the actual ('settle') and release the unused remainder ('refund').
+    # else record the actual ('settle') and release the unused remainder ('release').
     row = gate_fetchone(
         conn,
         "select * from safebox_billing_settle(%s, %s)",
@@ -322,21 +322,23 @@ def settle(conn, reservation_key: str, actual_cents: int) -> None:
     _raise_for_billing_refusal(row, reservation_key=rk)
 
 
-def refund(conn, reservation_key: str) -> None:
-    """Release a whole reservation (the failure path). Idempotent — a no-op if the
-    reservation was already settled or refunded."""
+def release_reservation(conn, reservation_key: str) -> None:
+    """Release a whole internal allowance reservation.
+
+    This is the idempotent failure/retry finalizer for an operator-compute hold. It is not a
+    product-customer payment refund and exposes no Stripe refund capability.
+    """
     rk = reservation_key
     if _remote_safebox_enabled():
         from . import safebox
 
-        safebox.billing_refund(conn, rk)
+        safebox.billing_release_reservation(conn, rk)
         return
-    # Row ops in the migration-0038 SECURITY DEFINER function safebox_billing_refund (verbatim port):
-    # look up the reserve (UnknownReservation when absent), lock the account row, already-finalized →
-    # no-op, else release the whole held reservation back to the allowance.
+    # The Safebox-only SECURITY DEFINER gate looks up the reserve (UnknownReservation when absent),
+    # locks the account row, and makes an already-finalized release a no-op.
     row = gate_fetchone(
         conn,
-        "select * from safebox_billing_refund(%s)",
+        "select * from safebox_billing_release_reservation(%s)",
         (rk,),
     )
     _raise_for_billing_refusal(row, reservation_key=rk)
@@ -344,7 +346,7 @@ def refund(conn, reservation_key: str) -> None:
 
 def get_billing_balances(conn, user_id: str) -> BillingBalances:
     """Read the cached balances plus derived allowance remaining and outstanding
-    reserved (Σreserve − Σsettle − Σrefund). Allowance figures are metering units —
+    reserved (Σreserve − Σsettle − Σrelease). Allowance figures are metering units —
     callers must not render them as money."""
     if _remote_safebox_enabled():
         from . import safebox
@@ -373,7 +375,7 @@ def get_billing_balances(conn, user_id: str) -> BillingBalances:
     reserved = conn.execute(
         "select coalesce(sum(amount_cents) filter (where kind = 'reserve'), 0) "
         "- coalesce(sum(amount_cents) filter (where kind = 'settle'), 0) "
-        "- coalesce(sum(amount_cents) filter (where kind = 'refund'), 0) "
+        "- coalesce(sum(amount_cents) filter (where kind = 'release'), 0) "
         "from billing_entries where user_id = %s",
         (user_id,),
     ).fetchone()[0]
@@ -406,7 +408,7 @@ def reconcile_billing(conn, user_id: str) -> dict:
         "select "
         " coalesce(sum(amount_cents) filter (where bucket='allowance' and kind='reserve' and (%(ps)s::timestamptz is null or created_at >= %(ps)s::timestamptz)), 0),"
         " coalesce(sum(amount_cents) filter (where bucket='allowance' and kind='settle'  and (%(ps)s::timestamptz is null or created_at >= %(ps)s::timestamptz)), 0),"
-        " coalesce(sum(amount_cents) filter (where bucket='allowance' and kind='refund'  and (%(ps)s::timestamptz is null or created_at >= %(ps)s::timestamptz)), 0)"
+        " coalesce(sum(amount_cents) filter (where bucket='allowance' and kind='release' and (%(ps)s::timestamptz is null or created_at >= %(ps)s::timestamptz)), 0)"
         " from billing_entries where user_id = %(uid)s",
         {"ps": period_start, "uid": user_id},
     ).fetchone()

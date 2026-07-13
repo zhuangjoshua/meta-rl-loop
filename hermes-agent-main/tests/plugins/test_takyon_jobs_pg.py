@@ -11,7 +11,7 @@ Proves the contract end-to-end on real Postgres (mediationplan.md > Worker Plane
     seam, settles the TRUE cost and completes — the ledger actually moves;
   * an exhausted budget BLOCKS with a reason and runs nothing (invariant #8: never a fabricated
     completion), and nothing is held;
-  * a handler error refunds the whole hold and fails/retries; retries are BOUNDED by max_attempts
+  * a handler error releases the whole hold and fails/retries; retries are BOUNDED by max_attempts
     (an exhausted budget or a permanently-failing job stops, never loops), and every attempt's hold is
     released so no reservation leaks;
   * a crashed worker's 'running' job is recovered by ``requeue_stale`` (or blocked at max attempts),
@@ -406,7 +406,7 @@ def test_run_one_blocks_unknown_kind(pg_conn):
     assert billing.get_billing_balances(pg_conn, uid).reserved_cents == 0
 
 
-def test_handler_error_refunds_hold_and_fails(pg_conn):
+def test_handler_error_releases_hold_and_fails(pg_conn):
     # The work was attempted and raised: the hold is released and (no attempts left) the job fails.
     slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
     jobs.enqueue(
@@ -460,29 +460,29 @@ def test_bootstrap_timeout_requeues_and_releases_running_claim(pg_conn):
     assert bal.allowance_used_cents == 0
 
 
-def test_handler_error_still_terminalizes_job_when_first_refund_raises(pg_conn, monkeypatch):
+def test_handler_error_still_terminalizes_job_when_first_release_raises(pg_conn, monkeypatch):
     slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
     jobs.enqueue(
         pg_conn, slug, "ceo_wake", idempotency_key="j",
         payload={"estimate_cents": 500}, max_attempts=1,
     )
     handler = _RecordingHandler(raises=RuntimeError("boom"))
-    refund_calls: list[str] = []
-    original_refund = billing.refund
+    release_calls: list[str] = []
+    original_release = billing.release_reservation
 
-    def _flaky_refund(conn, reservation_key: str) -> None:
-        refund_calls.append(reservation_key)
-        if len(refund_calls) == 1:
+    def _flaky_release(conn, reservation_key: str) -> None:
+        release_calls.append(reservation_key)
+        if len(release_calls) == 1:
             raise RuntimeError("safebox timeout")
-        original_refund(conn, reservation_key)
+        original_release(conn, reservation_key)
 
-    monkeypatch.setattr(billing, "refund", _flaky_refund)
+    monkeypatch.setattr(billing, "release_reservation", _flaky_release)
 
     outcome = jobs.run_one(pg_conn, worker_id="w1", handlers={"ceo_wake": handler})
 
     assert outcome.status == "failed"
     assert len(handler.calls) == 1
-    assert len(refund_calls) == 2
+    assert len(release_calls) == 2
 
     job = jobs.get_job(pg_conn, outcome.job_id)
     assert job.status == "failed"
@@ -1077,7 +1077,7 @@ def test_product_writer_acquires_business_lease_before_budget_reserve(pg_conn, m
 
     monkeypatch.setattr(jobs.billing, "reserve", reserve)
     monkeypatch.setattr(jobs.billing, "settle", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(jobs.billing, "refund", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(jobs.billing, "release_reservation", lambda *_args, **_kwargs: None)
 
     outcome = jobs.run_one(
         pg_conn,

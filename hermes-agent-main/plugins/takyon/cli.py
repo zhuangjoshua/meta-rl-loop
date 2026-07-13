@@ -1824,11 +1824,11 @@ def _operator_create_balance_finalize(
     *,
     settle: bool,
 ) -> None:
-    """Settle or refund a deferred company-create reservation.
+    """Settle or release a deferred company-create reservation.
 
     The create chokepoint reserves before writing the businesses row, so an unfunded operator still
     cannot create. It settles only once that row is durably visible; if the row write itself fails,
-    the reservation is refunded so a transient create failure does not strand allowance.
+    the reservation is released so a transient create failure does not strand allowance.
     """
     if not create_charge:
         return
@@ -1847,7 +1847,7 @@ def _operator_create_balance_finalize(
             charge_cents = int(create_charge.get("charge_cents") or 0)
             billing.settle(conn, reservation_key, max(0, charge_cents))
         else:
-            billing.refund(conn, reservation_key)
+            billing.release_reservation(conn, reservation_key)
     finally:
         conn.close()
 
@@ -1995,7 +1995,7 @@ def _operator_budget_finalize(
     try:
         actual = max(0, int(actual_cents or 0))
         if actual <= 0:
-            billing.refund(conn, reservation_key)
+            billing.release_reservation(conn, reservation_key)
             return ""
         if actual <= reserved_cents:
             billing.settle(conn, reservation_key, actual)
@@ -5569,7 +5569,7 @@ def run_takyon_command(
         # operator's plan-funded allowance to be STRICTLY above 3% remaining and CONSUMES 3% of the
         # period allowance on create through the billing rail. The reserve happens before the
         # business.upsert commit, but settlement is deferred until the business row is durably
-        # visible; if create fails in between, the hold is refunded so the operator is not stranded.
+        # visible; if create fails in between, the hold is released so the operator is not stranded.
         # Fails CLOSED for an operator under the floor regardless of --test/--no-auto (a create still
         # needs balance authority), and is idempotent on the slug so a retried create never
         # double-charges.

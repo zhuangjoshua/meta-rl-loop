@@ -1830,7 +1830,7 @@ def _reservation_age_seconds(created_at: Any) -> float | None:
 
 
 def _release_stale_operator_reservations(conn, user_id: str) -> int:
-    """Refund orphaned operator holds before rendering the billing snapshot.
+    """Release orphaned operator holds before rendering the billing snapshot.
 
     This keeps the operator account honest across the known reservation families:
     live TUI turns, queued/running jobs, and bounded Claude/create-name inline tasks.
@@ -1852,7 +1852,7 @@ def _release_stale_operator_reservations(conn, user_id: str) -> int:
         "  and not exists ("
         "    select 1 from billing_entries f "
         "    where f.reservation_key = r.reservation_key "
-        "      and f.kind in ('settle', 'refund')"
+        "      and f.kind in ('settle', 'release')"
         "  ) "
         "group by r.reservation_key",
         (operator_user_id,),
@@ -1893,7 +1893,7 @@ def _release_stale_operator_reservations(conn, user_id: str) -> int:
         if keep:
             continue
         try:
-            billing.refund(conn, key)
+            billing.release_reservation(conn, key)
             released += 1
         except billing.UnknownReservation:
             continue
@@ -1901,9 +1901,9 @@ def _release_stale_operator_reservations(conn, user_id: str) -> int:
 
 
 def _release_stale_tui_turn_reservations(conn, user_id: str) -> int:
-    """Refund orphaned dashboard-turn holds for this operator.
+    """Release orphaned dashboard-turn holds for this operator.
 
-    A healthy TUI turn settles/refunds its `tui-turn:<sid>:...` reservation in the
+    A healthy TUI turn settles/releases its `tui-turn:<sid>:...` reservation in the
     turn thread's `finally`. If the dashboard process dies mid-turn, that finalizer
     never runs and the operator budget can show a permanent hold. The live gateway
     session table is the canonical liveness signal for these reservations: if a
@@ -1926,7 +1926,7 @@ def _release_stale_tui_turn_reservations(conn, user_id: str) -> int:
         "  and not exists ("
         "    select 1 from billing_entries f "
         "    where f.reservation_key = r.reservation_key "
-        "      and f.kind in ('settle', 'refund')"
+        "      and f.kind in ('settle', 'release')"
         "  )",
         (operator_user_id,),
     ).fetchall()
@@ -1937,7 +1937,7 @@ def _release_stale_tui_turn_reservations(conn, user_id: str) -> int:
         if not session_id or session_id in running_session_ids:
             continue
         try:
-            billing.refund(conn, key)
+            billing.release_reservation(conn, key)
             released += 1
         except billing.UnknownReservation:
             continue

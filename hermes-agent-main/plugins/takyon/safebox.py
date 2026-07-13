@@ -224,8 +224,8 @@ _OPERATOR_AUTH_EXACT_PATHS = frozenset(
     {
         "/v1/billing/accounts/open",
         "/v1/billing/balances",
-        "/v1/billing/refund",
         "/v1/billing/reserve",
+        "/v1/billing/reservations/release",
         "/v1/billing/settle",
         "/v1/billing/starter-allowance",
         "/v1/billing/operator-subscription/sync",
@@ -2139,14 +2139,18 @@ def billing_settle(conn, reservation_key: str, actual_cents: int) -> None:
     billing.settle(conn, key, actual)
 
 
-def billing_refund(conn, reservation_key: str) -> None:
-    """Release an operator billing reservation through Safebox."""
+def billing_release_reservation(conn, reservation_key: str) -> None:
+    """Release an internal operator-compute reservation through Safebox."""
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("missing reservation_key")
     if _remote_enabled() and not _local_authority_enabled():
         try:
-            _remote_json("POST", "/v1/billing/refund", {"reservation_key": key})
+            _remote_json(
+                "POST",
+                "/v1/billing/reservations/release",
+                {"reservation_key": key},
+            )
             return
         except RemoteSafeboxError as exc:
             from . import billing
@@ -2157,7 +2161,7 @@ def billing_refund(conn, reservation_key: str) -> None:
             raise
     from . import billing
 
-    billing.refund(conn, key)
+    billing.release_reservation(conn, key)
 
 
 def billing_balances(conn, user_id: str) -> dict[str, Any]:

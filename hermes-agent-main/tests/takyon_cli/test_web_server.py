@@ -739,7 +739,7 @@ def test_local_dashboard_principal_falls_back_to_platform_owner(monkeypatch):
     assert resolved is principal
 
 
-def test_release_stale_tui_turn_reservations_refunds_orphaned_hold(monkeypatch):
+def test_release_stale_tui_turn_reservations_releases_orphaned_hold(monkeypatch):
     import plugins.takyon.billing as billing
     import takyon_cli.web_server as web_server
     from tui_gateway import server as tui_server
@@ -759,7 +759,9 @@ def test_release_stale_tui_turn_reservations_refunds_orphaned_hold(monkeypatch):
     released: list[str] = []
 
     monkeypatch.setattr(tui_server, "_sessions", {}, raising=False)
-    monkeypatch.setattr(billing, "refund", lambda _conn, key: released.append(key))
+    monkeypatch.setattr(
+        billing, "release_reservation", lambda _conn, key: released.append(key)
+    )
 
     count = web_server._release_stale_tui_turn_reservations(_Conn(), "user-123")
 
@@ -792,7 +794,9 @@ def test_release_stale_tui_turn_reservations_keeps_live_hold(monkeypatch):
         {"live-sid": {"running": True}},
         raising=False,
     )
-    monkeypatch.setattr(billing, "refund", lambda _conn, key: released.append(key))
+    monkeypatch.setattr(
+        billing, "release_reservation", lambda _conn, key: released.append(key)
+    )
 
     count = web_server._release_stale_tui_turn_reservations(_Conn(), "user-123")
 

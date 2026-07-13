@@ -19,7 +19,7 @@ Grounding (every symbol below was confirmed by reading the real source before th
 test was written):
   * ``billing.settle`` refuses ``actual_cents > a_resv`` (the reserved allowance) with a
     ValueError, and is a no-op on replay via ``_finalized``.
-  * ``billing.refund`` is a no-op on replay via ``_finalized``.
+  * ``billing.release_reservation`` is a no-op on replay via ``_finalized``.
   * ``billing.reconcile_billing`` proves cached == ledger and flags
     ``allowance_oversold`` / ``reserved_allowance_negative`` / ``allowance_used`` drift.
     (The à-la-carte topup bucket was removed 2026-06-18; the rail is allowance-only.)
@@ -126,6 +126,15 @@ def _runtime_least_priv_sql() -> str:
     return _RUNTIME_LEAST_PRIV_SQL.read_text(encoding="utf-8")
 
 
+_BILLING_RELEASE_SQL = _RUNTIME_LEAST_PRIV_SQL.with_name(
+    "0088_billing_reservation_release.sql"
+)
+
+
+def _billing_release_sql() -> str:
+    return _BILLING_RELEASE_SQL.read_text(encoding="utf-8")
+
+
 def _raises_valueerror_nodes(tree: ast.AST) -> list[ast.Raise]:
     out: list[ast.Raise] = []
     for node in ast.walk(tree):
@@ -146,11 +155,17 @@ def _raises_valueerror_nodes(tree: ast.AST) -> list[ast.Raise]:
 # --------------------------------------------------------------------------------------
 
 def test_all_three_ledger_rails_expose_reserve_finalize_api():
-    """Every money rail must expose the reserve -> (settle|commit | release|refund)
+    """Every money rail must expose the reserve -> (settle|commit|release)
     envelope. A missing finalizer is a tampering surface (spend with no way to record
     actual / release the hold)."""
-    # billing: reserve -> settle | refund (+ reconcile, grant_allowance for the flow-A credit)
-    for name in ("reserve", "settle", "refund", "reconcile_billing", "grant_allowance"):
+    # billing: reserve -> settle | release (+ reconcile, grant_allowance for the flow-A credit)
+    for name in (
+        "reserve",
+        "settle",
+        "release_reservation",
+        "reconcile_billing",
+        "grant_allowance",
+    ):
         assert callable(getattr(billing, name)), f"billing.{name} missing"
     # app_usage: reserve -> settle | release
     for name in ("reserve_usage", "settle_usage", "release_usage"):
@@ -238,14 +253,14 @@ def test_app_usage_settle_is_money_truth_not_a_silent_cap_recheck():
 # 3. Idempotency — replaying a finalizer is a no-op (no double-charge / double-refund).
 # --------------------------------------------------------------------------------------
 
-def test_billing_settle_and_refund_guard_on_prior_finalization_in_source():
-    """A replayed settle/refund on a finalized reservation must be a no-op (first finalizer wins).
-    Post-0038 the billing settle/refund row ops are the ``safebox_billing_settle`` /
-    ``safebox_billing_refund`` SECURITY DEFINER functions, so the replay guard lives THERE: each
-    computes ``v_finalized`` (a prior settle/refund entry exists) and returns the row WITHOUT writing.
+def test_billing_settle_and_release_guard_on_prior_finalization_in_source():
+    """A replayed settle/release on a finalized reservation is a first-finalizer no-op.
+
+    Migration 0088 owns the current ``safebox_billing_settle`` and
+    ``safebox_billing_release_reservation`` SECURITY DEFINER bodies.
     The live-DB no-op proof is the billing pg-suite."""
-    sql = _runtime_least_priv_sql()
-    for fn_name in ("safebox_billing_settle", "safebox_billing_refund"):
+    sql = _billing_release_sql()
+    for fn_name in ("safebox_billing_settle", "safebox_billing_release_reservation"):
         body = _sql_function_body(sql, fn_name)
         assert "v_finalized" in body, f"{fn_name} lost its finalized replay guard"
         assert "if v_finalized then" in body, f"{fn_name} no longer branches on prior finalization"

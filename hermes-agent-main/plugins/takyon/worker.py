@@ -9,7 +9,7 @@ each loop tick:
      running this worker needs no external scheduler to fire recurring wakes;
   2. reclaims stale claims left by a crashed prior worker (``jobs.requeue_stale``);
   3. drains the queue one job at a time through ``jobs.run_one`` — which keeps the FULL contract:
-     ``FOR UPDATE SKIP LOCKED`` claim → flow-A reserve → handler → settle/refund, at-least-once, and
+     ``FOR UPDATE SKIP LOCKED`` claim → flow-A reserve → handler → settle/release, at-least-once, and
      never a fake ``completed`` (a partial/failed turn is ``blocked``/``failed``, invariant #8);
   4. dispatches each job KIND to its handler. Today the active handlers are ``ceo_wake`` — a
      scheduled CEO turn, the Postgres-native replacement for the legacy file-cron
@@ -150,12 +150,13 @@ def _best_effort_terminalize_owned_timeout(job: Job, *, error: str) -> str | Non
         conn = _open_operator_lifecycle_conn()
         if estimate_cents > 0:
             try:
-                billing.refund(conn, reservation_key)
-            except Exception as refund_exc:  # noqa: BLE001 - row finalization outranks refund hiccups
+                billing.release_reservation(conn, reservation_key)
+            except Exception as release_exc:  # noqa: BLE001 - row finalization outranks release hiccups
                 _log.warning(
-                    "worker: refund failed during timeout finalization for job %s (non-fatal): %s",
+                    "worker: reservation release failed during timeout finalization for job %s "
+                    "(non-fatal): %s",
                     job_id,
-                    refund_exc,
+                    release_exc,
                 )
         return jobs.fail_if_still_owned(
             conn,
@@ -1233,7 +1234,7 @@ def _run_ceo_turn(
     no interactive operator-envelope wrapping, a daemon-grade inactivity timeout (mirrors
     ``cron/scheduler.py``), and the turn's true cost extracted for billing settlement.
 
-    Raises on a failed/aborted turn (so ``jobs.run_one`` refunds the reservation and fails/requeues
+    Raises on a failed/aborted turn (so ``jobs.run_one`` releases the reservation and fails/requeues
     rather than recording a fake completion)."""
     import concurrent.futures
     import contextvars
@@ -1645,7 +1646,7 @@ def _run_ceo_turn(
             f"business:{slug}"
         )
     # A turn that reported failure must NOT be billed or marked completed — raise so run_one
-    # refunds and fails/requeues (invariant #8). BUT exhausting the iteration budget is NOT a
+    # releases and fails/requeues (invariant #8). BUT exhausting the iteration budget is NOT a
     # failure: at the cap the loop force-summarizes (turn_exit_reason='max_iterations_reached'),
     # so completed=False there means "ran out of calls", not "the work failed". Surface that via
     # the returned `turn_completed` so a done-gated caller (bootstrap) can judge real success by
@@ -3394,7 +3395,7 @@ def channel_publish_outreach_handler(job: Job, channel: "ChannelPublisher") -> J
     channel is one ``ChannelPublisher`` — this envelope is never forked.
 
     Money-safety invariant (unchanged from the two originals): reserve once; on success commit; on a
-    failure after a real side effect commit-partial (never refund a shipped post); on a failure with
+    failure after a real side effect commit-partial (never release a shipped post's hold); on a failure with
     no side effect release; a finalization failure re-raises with both errors. Provider/receipt/marker
     calls resolve through this ``worker`` module + ``core`` so existing monkeypatches still apply."""
     from . import business_credits as takyon_business_credits
@@ -3565,7 +3566,7 @@ def channel_publish_outreach_handler(job: Job, channel: "ChannelPublisher") -> J
         finalization_error: Exception | None = None
         # Recover partial progress: on a publish failure ``outcome`` is None but the body may have
         # shipped side effects (X thread segments), tracked on ``ctx.partial`` — so commit-partial
-        # (never refund a shipped post), exactly as the originals' ``if thread_posts:`` did.
+        # (never release a shipped post's hold), exactly as the originals' ``if thread_posts:`` did.
         effective_outcome = outcome if outcome is not None else ctx.partial
         posted = bool(effective_outcome is not None and effective_outcome.posted)
         if reservation is not None and not finalized:

@@ -650,7 +650,7 @@ def test_remote_safebox_operator_billing_ledger_delegates_to_service(monkeypatch
         job_id="job-1",
     ) == {"reservation_key": "rk-1", "allowance_cents": 25}
     safebox.billing_settle(None, "rk-1", 20)
-    safebox.billing_refund(None, "rk-2")
+    safebox.billing_release_reservation(None, "rk-2")
     assert safebox.billing_balances(None, "user-1")["allowance_remaining_cents"] == 75
 
     assert calls == [
@@ -666,7 +666,7 @@ def test_remote_safebox_operator_billing_ledger_delegates_to_service(monkeypatch
             },
         ),
         ("POST", "/v1/billing/settle", {"reservation_key": "rk-1", "actual_cents": 20}),
-        ("POST", "/v1/billing/refund", {"reservation_key": "rk-2"}),
+        ("POST", "/v1/billing/reservations/release", {"reservation_key": "rk-2"}),
         ("POST", "/v1/billing/balances", {"user_id": "user-1"}),
     ]
 

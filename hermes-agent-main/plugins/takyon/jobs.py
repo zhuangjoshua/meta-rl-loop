@@ -13,7 +13,7 @@ The contract (mediationplan.md > Worker Plane):
     replay returns the SAME job, never a second effect.
   * Budget-gated — before running, :func:`run_one` reserves the job's estimate on the OWNER's flow-A
     billing account (``billing.reserve`` — the same engine top-ups and inline spend use). On success
-    it settles the true cost and releases the remainder; on failure it refunds the whole hold. A
+    it settles the true cost and releases the remainder; on failure it releases the whole hold. A
     reserve that the buckets cannot cover ⇒ the job is **blocked** with a reason and NOTHING runs
     (invariant #8: partial = blocked/failed, never a fabricated completion).
   * Retries re-check budget — each attempt reserves under a fresh key, so an exhausted budget blocks
@@ -46,8 +46,8 @@ from . import billing
 _log = logging.getLogger("takyon.jobs")
 
 # A handler runs one job's actual work and returns its result + the TRUE cost to settle. A handler
-# that spends nothing returns actual_cost_cents=0 (then no settle/refund moves money). Raising signals
-# failure: run_one refunds the hold and fails/retries the job.
+# that spends nothing returns actual_cost_cents=0 (then no settle/release moves allowance). Raising
+# signals failure: run_one releases the hold and fails/retries the job.
 Handler = Callable[["Job"], "JobRunResult"]
 
 
@@ -1041,10 +1041,10 @@ def run_one(
       2. handler lookup — no handler for the kind ⇒ blocked('no_handler'); nothing reserved.
       3. writer lease   — product jobs take only their business's DB advisory lane; other businesses
                           and non-product jobs remain parallel.
-      4. reserve        — release any stale hold from a crashed prior attempt (idempotent refund),
+      4. reserve        — release any stale hold from a crashed prior attempt (idempotent release),
                           then reserve estimate_cents on the OWNER's flow-A account under a per-attempt
                           key. InsufficientBalance ⇒ blocked('budget_exhausted'); nothing runs.
-      5. run            — handler(job). Raises ⇒ refund the hold, then fail/requeue.
+      5. run            — handler(job). Raises ⇒ release the hold, then fail/requeue.
       6. settle         — clamp actual ≤ reserved, settle (releases the remainder), complete.
     """
     job = claim_one(
@@ -1206,7 +1206,7 @@ def run_one(
                     job.reserved_billing_entry_id
                     and job.reserved_billing_entry_id != reservation_key
                 ):
-                    billing.refund(conn, job.reserved_billing_entry_id)
+                    billing.release_reservation(conn, job.reserved_billing_entry_id)
                 _set_reserved_key(conn, job.id, reservation_key)
                 try:
                     res = billing.reserve(
@@ -1305,19 +1305,19 @@ def run_one(
         assert run_result is not None
     except Exception as exc:  # handler failed: release the hold, then fail/requeue
         lifecycle_conn, close_lifecycle = _lifecycle_conn()
-        refund_exc: Exception | None = None
+        release_exc: Exception | None = None
         try:
             if estimate_cents > 0:
                 try:
-                    billing.refund(lifecycle_conn, reservation_key)
-                except Exception as refund_err:  # noqa: BLE001 - terminal job transition outranks refund hiccups
-                    refund_exc = refund_err
+                    billing.release_reservation(lifecycle_conn, reservation_key)
+                except Exception as release_err:  # noqa: BLE001 - terminal transition outranks release hiccups
+                    release_exc = release_err
                     _log.warning(
-                        "jobs: refund failed after handler error for job %s (kind=%s); "
+                        "jobs: reservation release failed after handler error for job %s (kind=%s); "
                         "continuing to fail/requeue the job so it does not stay running: %s",
                         job.id,
                         job.kind,
-                        refund_err,
+                        release_err,
                     )
                     if heartbeat_conn_factory is not None:
                         _reset_lifecycle_conn()
@@ -1349,12 +1349,13 @@ def run_one(
                     f" ({repaired_status})" if repaired_status else "",
                 )
                 status = repaired_status or "failed"
-            if refund_exc is not None and estimate_cents > 0:
+            if release_exc is not None and estimate_cents > 0:
                 try:
-                    billing.refund(lifecycle_conn, reservation_key)
+                    billing.release_reservation(lifecycle_conn, reservation_key)
                 except Exception as retry_exc:  # noqa: BLE001 - row is terminal; avoid wedging on cleanup
                     _log.warning(
-                        "jobs: refund retry still failed after terminalizing job %s (kind=%s): %s",
+                        "jobs: reservation release retry still failed after terminalizing job %s "
+                        "(kind=%s): %s",
                         job.id,
                         job.kind,
                         retry_exc,
@@ -1394,7 +1395,7 @@ def run_one(
         # the newer row and never claim completion; release this attempt's hold idempotently.
         if estimate_cents > 0:
             try:
-                billing.refund(lifecycle_conn, reservation_key)
+                billing.release_reservation(lifecycle_conn, reservation_key)
             except Exception:  # noqa: BLE001 — best-effort; the sibling attempt reconciles the hold too
                 pass
         claim_guard.mark_lost("terminal completion transition rejected stale claim")

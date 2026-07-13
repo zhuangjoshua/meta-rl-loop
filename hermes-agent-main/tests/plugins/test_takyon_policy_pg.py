@@ -5,10 +5,10 @@ pressure instead of hard-failing — it runs inline, downgrades to a cheaper tie
 routes to a background job, or blocks with a precise reason. The decision is advisory;
 billing.reserve stays the atomic money gate, so a decision must move no money.
 
-The sharp correctness detail is per-business spend: billing's settle/refund entries
+The sharp correctness detail is per-business spend: billing's settle/release entries
 carry business_slug=NULL (only the reserve is tagged), so the monthly sub-cap must net
 spend via the reservation_key set, not a direct business_slug filter. The cap /
-refund / settle tests below pin that down on real Postgres.
+release / settle tests below pin that down on real Postgres.
 
 Real engine on real Postgres (never mocks). Skips unless psycopg is importable and
 TAKYON_TEST_PG_DSN is set; the env-knob unit test runs whenever psycopg is importable.
@@ -230,13 +230,13 @@ def test_business_cap_blocks_before_flow_a_runs_out(pg_conn):
     assert d.detail["business_cap_headroom_cents"] == 0
 
 
-def test_refund_restores_cap_headroom(pg_conn):
+def test_release_restores_cap_headroom(pg_conn):
     uid = _user(pg_conn)
     slug = _business(pg_conn, uid)
     billing.grant_allowance(pg_conn, uid, 100000, "tu")
     policy.upsert_execution_policy(pg_conn, slug, monthly_app_budget_cents=500)
     billing.reserve(pg_conn, uid, 500, "r-ref", business_slug=slug)
-    billing.refund(pg_conn, "r-ref")  # released — must NOT keep counting against the cap
+    billing.release_reservation(pg_conn, "r-ref")  # must NOT keep counting against the cap
     d = policy.decide_execution(pg_conn, business_slug=slug, estimate_cents=100)
     assert d.detail["business_period_spend_cents"] == 0  # netted via reservation_key
     assert d.outcome == "inline"
@@ -250,7 +250,7 @@ def test_settled_actual_counts_toward_cap_not_the_reservation(pg_conn):
     billing.reserve(pg_conn, uid, 800, "r-settle", business_slug=slug)
     billing.settle(pg_conn, "r-settle", 300)  # spent 300, released 500 (business_slug NULL)
     d = policy.decide_execution(pg_conn, business_slug=slug, estimate_cents=1)
-    # netting = Σreserve(800) − Σrefund(500 release) = 300 actual spend, not 800 or 0
+    # netting = Σreserve(800) − Σrelease(500) = 300 actual spend, not 800 or 0
     assert d.detail["business_period_spend_cents"] == 300
 
 

@@ -30976,7 +30976,7 @@ def _finalize_operator_task_budget(
                     status = "settled_estimate"
                     charged_cents = reserved
             else:
-                billing.refund(raw, reservation_key)
+                billing.release_reservation(raw, reservation_key)
                 status = "released"
                 charged_cents = 0
             balances = billing.get_billing_balances(raw, user_id)
