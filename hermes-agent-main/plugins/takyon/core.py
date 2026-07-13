@@ -25208,11 +25208,11 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
     store = _store()
     try:
         _refuse_on_autonomous_wake("product publishes")
-        if _blocks_session_bound_authority_op():
-            raise TakyonError("trusted product surface refresh is available only on the authority tool surface")
         deferred = _defer_product_surface_refresh_to_worker(args)
         if deferred is not None:
             return deferred
+        if _blocks_session_bound_authority_op():
+            raise TakyonError("trusted product surface refresh is available only on the authority tool surface")
         business = _resolved_business_slug(args, required=True)
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
@@ -36986,8 +36986,6 @@ def _defer_product_surface_refresh_to_worker(args: dict) -> str | None:
     """Route business_refresh_product_surface through the worker plane when enabled; None ⇒ inline."""
     if not _operator_tasks_via_worker_enabled():
         return None
-    if _session_business_slug():
-        raise TakyonError("trusted product surface refresh is available only on the authority tool surface")
     store = _store()
     business = _resolved_business_slug(args, required=True)
     idempotency_key = str(args.get("idempotency_key") or "").strip()

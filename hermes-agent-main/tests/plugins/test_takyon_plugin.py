@@ -8555,18 +8555,61 @@ def test_defer_claude_agent_task_allows_business_session_canonical_workspace(mon
     assert store.commits[0]["operations"][0]["payload"]["args"]["refresh_surface"] is True
 
 
-def test_defer_product_surface_refresh_rejects_session_bound_call(monkeypatch):
+def test_defer_product_surface_refresh_routes_session_bound_call_to_worker(monkeypatch):
     monkeypatch.setenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", "1")
     monkeypatch.delenv("TAKYON_WORKER_PROCESS", raising=False)
+    store = _DeferralStoreStub()
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
     monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "acme")
+    monkeypatch.setattr(
+        takyon_core,
+        "_read_work_request_run",
+        lambda _store, _run_id: (
+            "completed",
+            {"result": {"success": True, "surface_refresh": {"status": "passed"}}},
+        ),
+    )
+    monkeypatch.setattr(takyon_core, "_WORKER_DEFERRAL_POLL_SECONDS", 0.0)
 
-    with pytest.raises(TakyonError, match="authority tool surface"):
-        takyon_core._defer_product_surface_refresh_to_worker(
-            {
-                "business": "acme",
-                "idempotency_key": "surface-1",
-            }
-        )
+    raw = takyon_core._defer_product_surface_refresh_to_worker(
+        {
+            "business": "acme",
+            "idempotency_key": "surface-1",
+        }
+    )
+
+    result = json.loads(raw)
+    assert result["success"] is True
+    assert result["surface_refresh"]["status"] == "passed"
+    operation = store.commits[0]["operations"][0]
+    assert operation["action"] == "work_request.enqueue"
+    assert operation["payload"]["kind"] == "product.surface_refresh"
+
+
+def test_surface_refresh_handler_defers_before_session_authority_guard(monkeypatch):
+    monkeypatch.setattr(takyon_core, "_store", lambda: object())
+    monkeypatch.setattr(takyon_core, "_refuse_on_autonomous_wake", lambda _action: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_defer_product_surface_refresh_to_worker",
+        lambda _args: '{"success": true, "status": "queued"}',
+    )
+    monkeypatch.setattr(takyon_core, "_blocks_session_bound_authority_op", lambda: True)
+
+    assert json.loads(
+        takyon_core.handle_business_refresh_product_surface({"business": "acme"})
+    ) == {"success": True, "status": "queued"}
+
+    monkeypatch.setattr(
+        takyon_core,
+        "_defer_product_surface_refresh_to_worker",
+        lambda _args: None,
+    )
+    blocked = json.loads(
+        takyon_core.handle_business_refresh_product_surface({"business": "acme"})
+    )
+    assert blocked["success"] is False
+    assert "authority tool surface" in blocked["error"]
 
 
 def test_defer_claude_agent_task_fails_if_worker_never_picks_up(monkeypatch):
