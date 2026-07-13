@@ -685,7 +685,50 @@ def test_requested_workflow_gate_requires_strict_decoded_action_runner(tmp_path,
         encoding="utf-8",
     )
     unvalidated = takyon_core._requested_workflow_completeness_markers(site, surface)
-    assert any("does not tag a real decoder" in item["snippet"] for item in unvalidated)
+    assert any("neither inline decodeActionResult" in item["snippet"] for item in unvalidated)
+
+    site_home.write_text(
+        "function decodeProposal(value: unknown): { ok: false } | { ok: true; value: Proposal } {\n"
+        "  if (typeof value !== 'object') throw new Error('invalid');\n"
+        "  return { ok: true, value: value as Proposal };\n"
+        "}\n"
+        'const runner = useDecodedActionRunner("generate-proposal", decodeProposal);\n'
+        "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
+        encoding="utf-8",
+    )
+    unvalidated = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any("neither inline decodeActionResult" in item["snippet"] for item in unvalidated)
+
+    decoder = site / "src" / "lib" / "proposal-decoder.ts"
+    decoder.parent.mkdir(parents=True)
+    decoder.write_text(
+        "export function decodeProposal(\n"
+        "  value: { candidate?: unknown } | unknown,\n"
+        "): { ok: false } | { ok: true; value: Proposal } {\n"
+        "  if (!value || typeof value !== 'object') return { ok: false };\n"
+        "  return isProposal(value) ? { ok: true, value } : { ok: false };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    site_home.write_text(
+        "import { decodeProposal } from '../lib/proposal-decoder';\n"
+        "const runner = useDecodedActionRunner(\n"
+        '  "generate-proposal",\n'
+        "  decodeProposal,\n"
+        ");\n"
+        "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
+        encoding="utf-8",
+    )
+    assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
+
+    decoder.write_text(
+        "export const decodeProposal = (value: unknown): DecodedActionResult<Proposal> =>\n"
+        "  value && typeof value === 'object' && isProposal(value)\n"
+        "    ? { ok: true, value }\n"
+        "    : { ok: false };\n",
+        encoding="utf-8",
+    )
+    assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
 
     site_home.write_text(
         '// Never call client.invokeAction("comment-only", {}).\n'

@@ -114,11 +114,12 @@ def test_action_result_schema_drift_becomes_a_visible_runner_error():
     assert "src/components/action-error-announcer.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "generation prompt, action-boundary validator/normalizer" in contract
     assert "identical field types" in contract
-    assert "`useDecodedActionRunner(name, value => decodeActionResult(value, decoder))`" in contract
+    assert "`useDecodedActionRunner(name, taggedDecoder)`" in contract
+    assert "named `DecodedActionResult<T>` decoder" in contract
     assert "global `invalid_result` alert" in contract
     assert "one explicit JSON result schema" in prompt
-    assert "`useDecodedActionRunner(name, value => decodeActionResult(value, decoder))`" in prompt
-    assert "including boolean values" in prompt
+    assert "`useDecodedActionRunner(name, taggedDecoder)`" in prompt
+    assert "including for boolean values" in prompt
     assert "Never silently discard a successful action payload" in prompt
 
 

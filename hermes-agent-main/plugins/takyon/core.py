@@ -441,7 +441,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
             "The pinned Vite SPA forbids product-side server entrypoints: no `express`/`fastify`/`hono`/`koa`, no `src/app/**/route.ts`, no `pages/api/*`, and no `next.config.*`; backend logic lives only in product/site/actions/<name>.ts.",
             "Client code must not call `/generate` directly; browser AI flows call createActionRunner/invokeAction, and the named action reaches the generate rail over ctx.base_url + ctx.session_token.",
             "Drive customer-triggered actions through the shared runtime client's createActionRunner(name): disable the trigger while the runner is pending, render the truthful error message by kind, and on budget errors offer the upgrade path via the provided checkoutUrl; never retry-loop a 402, never hide it, and never fake or simulate an action result client-side.",
-            "For every action result consumed by UI, define one explicit JSON schema and keep the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer on identical field types. Use useDecodedActionRunner(name, value => decodeActionResult(value, decoder)); the decoder returns the normalized typed value or null/throws on mismatch. AppKit always renders a global invalid_result alert; also render the runner error contextually. Never silently discard a successful action payload.",
+            "For every action result consumed by UI, define one explicit JSON schema and keep the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer on identical field types. Use useDecodedActionRunner(name, taggedDecoder). Either pass value => decodeActionResult(value, valueDecoder), where valueDecoder returns the normalized value or null/throws, or pass a named DecodedActionResult<T> decoder that validates and returns both ok:false and ok:true outcomes. AppKit always renders a global invalid_result alert; also render the runner error contextually. Never silently discard a successful action payload.",
             "Schedule-triggered actions persist their output through the records rail; show customers what happened since they left by reading existing records (listRecords), not by polling or fabricating an activity feed.",
         ],
     },
@@ -4215,10 +4215,10 @@ def _subuser_app_worker_contract_block(
             "- Do not invent product-side server code in this scaffold.",
             "- Treat `product/site/actions/*.ts` as the product backend registry: real backend behavior lives in `product/site/actions/<name>.ts`, not `src/actions/`.",
             "- Each real action file must default-export async `(payload, ctx) => result`; do not leave doc stubs, placeholder registries, or browser wrappers in `product/site/actions/`.",
-            "- Browser code reaches backend behavior through the shared `useDecodedActionRunner(name, value => decodeActionResult(value, decoder))` hook, which wraps the runtime client's action runner; do not call legacy `useActionRunner`, `invokeAction`, or `createActionRunner` directly in a requested customer workflow or invent a second backend path.",
+            "- Browser code reaches backend behavior through the shared `useDecodedActionRunner(name, taggedDecoder)` hook, which wraps the runtime client's action runner; do not call legacy `useActionRunner`, `invokeAction`, or `createActionRunner` directly in a requested customer workflow or invent a second backend path.",
             "- Inside a product action, ctx IS the runtime client (same API as the browser): call ctx.generate(...)/ctx.invokeAction(...)/ctx.saveRecord(...)/ctx.listRecords(...) like the browser; copy product/site/actions/_example-generate.ts (it calls `const data = await ctx.generate({ max_tokens, system, messages }); return { reply: data.text };`). No filesystem write, no shell, no provider credentials in product source.",
             "- Never fake or simulate an action result client-side just to keep the UI moving; if the backend action is missing or blocked, surface the exact blocker truthfully.",
-            "- For every UI-consumed action, define one explicit JSON result schema and use identical field types in the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer. Call `useDecodedActionRunner(name, value => decodeActionResult(value, decoder))`; the decoder returns the normalized value or null/throws on mismatch. AppKit always renders a global `invalid_result` alert; also render the runner error contextually. Never silently discard a successful action payload.",
+            "- For every UI-consumed action, define one explicit JSON result schema and use identical field types in the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer. Call `useDecodedActionRunner(name, taggedDecoder)`. Either use `value => decodeActionResult(value, valueDecoder)`, where valueDecoder returns the normalized value or null/throws, or a named `DecodedActionResult<T>` decoder that validates and returns both `ok: false` and `ok: true` outcomes. AppKit always renders a global `invalid_result` alert; also render the runner error contextually. Never silently discard a successful action payload.",
             "- Schedule-only actions self-declare in the action file with `export const trigger = \"schedule\"` and `export const schedule = \"<cron>\"`; HTTP is the default when no trigger is exported.",
             "",
         ]
@@ -4272,7 +4272,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Mutation UX must have one effective action per state. A revision result gets one update control wired to `saveRecord({ ref: existing.ref, data: completeUpdatedData })`; never render the create-save control inside that revision result. After update/delete, reconcile the returned record or await the records refresh before showing success, so the visible detail cannot revert to stale data. Every delete requires an explicit customer confirmation before `deleteRecord(ref)`.",
         "- Use the bundled runtime-client TypeScript signatures directly. Never cast `saveRecord`, `getRecord`, or `deleteRecord` through `any`/`unknown` to bypass the create-vs-update RecordRef contract.",
         "- Backend actions compile in the server action environment, not the browser environment. Type every handler as `(payload: TakyonActionPayload, ctx: TakyonActionContext)`; do not annotate either parameter as `any`, and do not use DOM/WebWorker globals that the action type environment does not provide.",
-        "- Every action result consumed by UI has one explicit JSON schema. Keep the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer on identical field types. Call `useDecodedActionRunner(name, value => decodeActionResult(value, decoder))`; the decoder returns the normalized typed value or null/throws on mismatch. AppKit always renders a global `invalid_result` alert; also render the runner error contextually. Never silently discard a successful action payload.",
+        "- Every action result consumed by UI has one explicit JSON schema. Keep the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer on identical field types. Call `useDecodedActionRunner(name, taggedDecoder)`. Either use `value => decodeActionResult(value, valueDecoder)`, where valueDecoder returns the normalized value or null/throws, or a named `DecodedActionResult<T>` decoder that validates and returns both `ok: false` and `ok: true` outcomes. AppKit always renders a global `invalid_result` alert; also render the runner error contextually. Never silently discard a successful action payload.",
         "- Scaffold-owned and force-rewritten from the bundled scaffold on EVERY product build/kit materialize — never edit these; any change to them is silently reverted before the build: "
         + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
         + ". If a screen needs a helper these files do not export, add it to a NEW worker-owned module under `src/lib/` (different filename) or define it in the screen itself.",
@@ -9513,11 +9513,155 @@ def _requested_workflow_completeness_markers(
             r"[a-z][a-z0-9_-]{0,63}\1",
             re.IGNORECASE,
         )
+
         checked_source_entries: list[tuple[str, str]] = []
         for relative_path, source_text in authored_source_entries:
             checked_source = re.sub(r"/\*.*?\*/", "", source_text, flags=re.DOTALL)
             checked_source = re.sub(r"//.*$", "", checked_source, flags=re.MULTILINE)
             checked_source_entries.append((relative_path, checked_source))
+
+        def function_body_start(source_text: str, definition: re.Match[str]) -> int:
+            parameter_start = source_text.find(
+                "(", definition.start(), definition.end() + 1
+            )
+            if parameter_start < 0:
+                return -1
+            parameter_end = _typescript_balanced_end(
+                source_text, parameter_start, "(", ")"
+            )
+            if parameter_end < 0:
+                return -1
+            cursor = parameter_end + 1
+            while cursor < len(source_text) and source_text[cursor].isspace():
+                cursor += 1
+            if cursor >= len(source_text):
+                return -1
+            if source_text[cursor] != ":":
+                return cursor if source_text[cursor] == "{" else -1
+
+            # Skip the optional return type.  A top-level object type is a type operand;
+            # a brace after a complete type expression opens the function body.
+            cursor += 1
+            expecting_type_operand = True
+            angle_depth = 0
+            paren_depth = 0
+            bracket_depth = 0
+            while cursor < len(source_text):
+                char = source_text[cursor]
+                following = source_text[cursor + 1] if cursor + 1 < len(source_text) else ""
+                if char.isspace():
+                    cursor += 1
+                    continue
+                if char == "<":
+                    angle_depth += 1
+                    expecting_type_operand = True
+                elif char == ">" and angle_depth:
+                    angle_depth -= 1
+                    expecting_type_operand = False
+                elif char == "(":
+                    paren_depth += 1
+                    expecting_type_operand = True
+                elif char == ")" and paren_depth:
+                    paren_depth -= 1
+                    expecting_type_operand = False
+                elif char == "[":
+                    bracket_depth += 1
+                elif char == "]" and bracket_depth:
+                    bracket_depth -= 1
+                    expecting_type_operand = False
+                elif char == "{" and not angle_depth and not paren_depth and not bracket_depth:
+                    if not expecting_type_operand:
+                        return cursor
+                    object_type_end = _typescript_balanced_end(
+                        source_text, cursor, "{", "}"
+                    )
+                    if object_type_end < 0:
+                        return -1
+                    cursor = object_type_end
+                    expecting_type_operand = False
+                elif char in {"|", "&"} and not angle_depth and not paren_depth and not bracket_depth:
+                    expecting_type_operand = True
+                elif char == "=" and following == ">":
+                    expecting_type_operand = True
+                    cursor += 1
+                elif char not in {",", ":", "?"}:
+                    expecting_type_operand = False
+                cursor += 1
+            return -1
+
+        def named_tagged_decoder_is_validated(call_arguments: str) -> bool:
+            decoder_match = re.fullmatch(
+                r"\s*(['\"])[a-z][a-z0-9_-]{0,63}\1\s*,\s*"
+                r"(?P<decoder>[A-Za-z_$][A-Za-z0-9_$]*)\s*,?\s*",
+                call_arguments,
+                re.IGNORECASE,
+            )
+            if not decoder_match:
+                return False
+            decoder_name = decoder_match.group("decoder")
+            for _relative_path, source_text in checked_source_entries:
+                definition = re.search(
+                    rf"\bfunction\s+{re.escape(decoder_name)}(?:\s*<[^>]+>)?\s*\(",
+                    source_text,
+                )
+                decoder_source = ""
+                if definition:
+                    block_start = function_body_start(source_text, definition)
+                    block_end = (
+                        _typescript_balanced_end(
+                            source_text, block_start, "{", "}"
+                        )
+                        if block_start >= 0
+                        else -1
+                    )
+                    if block_end >= 0:
+                        decoder_source = source_text[block_start : block_end + 1]
+                if not decoder_source:
+                    assignment = re.search(
+                        rf"\b(?:const|let)\s+{re.escape(decoder_name)}\b[^;=\n]{{0,1000}}=\s*",
+                        source_text,
+                    )
+                    if assignment:
+                        arrow = source_text.find("=>", assignment.end())
+                        if arrow >= 0:
+                            expression_start = arrow + 2
+                            while (
+                                expression_start < len(source_text)
+                                and source_text[expression_start].isspace()
+                            ):
+                                expression_start += 1
+                            if (
+                                expression_start < len(source_text)
+                                and source_text[expression_start] == "{"
+                            ):
+                                block_end = _typescript_balanced_end(
+                                    source_text, expression_start, "{", "}"
+                                )
+                                if block_end >= 0:
+                                    decoder_source = source_text[
+                                        expression_start : block_end + 1
+                                    ]
+                            else:
+                                semicolon = source_text.find(";", expression_start)
+                                if semicolon >= 0:
+                                    decoder_source = source_text[
+                                        expression_start : semicolon + 1
+                                    ]
+                if re.search(r"\bdecodeActionResult\s*\(", decoder_source):
+                    return True
+                has_reject = re.search(r"\bok\s*:\s*false\b", decoder_source) is not None
+                has_accept = re.search(r"\bok\s*:\s*true\b", decoder_source) is not None
+                has_validation = re.search(
+                    r"\btypeof\b|\binstanceof\b|\bArray\s*\.\s*isArray\s*\(|"
+                    r"\b(?:is|validate|guard)[A-Z_$][A-Za-z0-9_$]*\s*\(|"
+                    r"\.\s*(?:safeParse|parse)\s*\(",
+                    decoder_source,
+                ) is not None
+                if has_reject and has_accept and has_validation:
+                    return True
+            return False
+
+        for relative_path, checked_source in checked_source_entries:
             if direct_action_pattern.search(checked_source):
                 gaps.append(
                     (
@@ -9545,13 +9689,15 @@ def _requested_workflow_completeness_markers(
                 )
             for strict_match in strict_runner_pattern.finditer(checked_source):
                 strict_arguments = _typescript_call_arguments(checked_source, strict_match)
-                if not re.search(r"\bdecodeActionResult\s*\(", strict_arguments):
+                if not re.search(
+                    r"\bdecodeActionResult\s*\(", strict_arguments
+                ) and not named_tagged_decoder_is_validated(strict_arguments):
                     gaps.append(
                         (
                             relative_path,
-                            "useDecodedActionRunner(...) does not tag a real decoder through "
-                            "decodeActionResult(...); raw casts or unconditional ok results do not "
-                            "prove producer/consumer schema parity",
+                            "useDecodedActionRunner(...) has neither inline decodeActionResult(...) "
+                            "nor a named tagged decoder with explicit validation and both ok:false/ok:true "
+                            "outcomes; raw casts or unconditional ok results do not prove schema parity",
                         )
                     )
         if referenced_actions and not any(
