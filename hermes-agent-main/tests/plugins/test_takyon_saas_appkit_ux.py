@@ -15,13 +15,8 @@ SCAFFOLD = Path(takyon_core.__file__).resolve().parent / "subuser_app_kit" / "sc
 MOBILE_SCAFFOLD = Path(takyon_core.__file__).resolve().parent / "mobile_app_kit" / "scaffold"
 HERMES_ROOT = Path(takyon_core.__file__).resolve().parents[2]
 TASTE_SKILL = HERMES_ROOT / "skills" / "creative" / "taste-frontend" / "SKILL.md"
-CLAUDE_DESIGN_SKILL = HERMES_ROOT / "skills" / "creative" / "claude-design" / "SKILL.md"
 PRODUCT_SKILL = HERMES_ROOT / "skills" / "takyon" / "takyon-product" / "SKILL.md"
 DESIGN_COMMAND = HERMES_ROOT / "plugins" / "takyon" / "harness" / "commands" / "design.md"
-OPTIONAL_STYLE_SKILLS = tuple(
-    HERMES_ROOT / "skills" / "creative" / f"claude-design-{name}" / "SKILL.md"
-    for name in ("stripe", "openai", "doodle", "brutalist", "superhuman")
-)
 
 
 def read(rel: str) -> str:
@@ -35,7 +30,7 @@ def test_public_shell_separates_login_signup_and_redirects_signed_in_viewers():
 
     assert "signUpWithGoogle" in auth
     assert "setSubscribeAfterAuth(true)" not in auth  # the boolean comes from startGoogleAuth's argument
-    assert "startGoogleAuth(true)" in auth
+    assert auth.count("startGoogleAuth(true)") == 2
     assert "shouldSubscribeAfterAuth" in read("src/lib/hooks.ts")
     assert 'if (access.loading) return <LandingLoading />' in landing
     assert '<Navigate to="/app" replace />' in landing
@@ -64,6 +59,10 @@ def test_app_layout_is_canonical_direct_full_width_gate():
     assert "!access.authenticated" in layout
     assert "!access.entitled" in layout
     assert "!access.entitled && !accountRoute" in layout
+    assert "const autoCheckout" in layout
+    assert "useSubscribeIntent(access, searchParams.get(\"intent\"), autoCheckout)" in layout
+    assert "Opening secure checkout" in layout
+    assert "Complete your subscription" not in layout
     assert 'location.pathname.replace(/\\/+$/, "") === "/app/profile"' in layout
     assert "<Outlet />" in layout
     assert 'className="w-full px-4 py-6 sm:px-6 lg:px-8"' in layout
@@ -107,13 +106,13 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     assert 'guidance_skills: pass exactly ONE — "taste-frontend"' in landing_pass
     assert '"claude-design" or any "claude-design-*"' in landing_pass
     assert "emit its one-line Design Read" in landing_pass
-    assert "finish every applicable item in Taste's full upstream preflight" in landing_pass
+    assert "complete Taste's full preflight" in landing_pass
     assert "`DESIGN_VARIANCE`, `MOTION_INTENSITY`, and `VISUAL_DENSITY`" in landing_pass
     assert "persist that one-line Design Read" in landing_pass
     assert "`product/site/DESIGN.md` as the canonical design source" in landing_pass
-    assert "verify responsive breakpoint/collapse and reduced-motion behavior in the source" in landing_pass
-    assert "live responsive browser QA belongs to the post-publish acceptance review" in landing_pass
-    assert "run the build/typecheck and responsive visual inspection" not in landing_pass
+    assert "agent-browser + Chromium" in landing_pass
+    assert "1440x900 and 390x844" in landing_pass
+    assert "no accidental early next-section intrusion" in landing_pass
     assert "max_turns: 60" in landing_pass
     assert "effort: medium" in landing_pass
     assert "timeout_ms: 900000" in landing_pass
@@ -138,8 +137,9 @@ def test_bootstrap_uses_taste_once_then_inherits_brand_for_product_work():
     product_pass = prompt.split("Then finish the access shell and account page", 1)[1].split(
         "#### 2c. Workflow verification gate", 1
     )[0]
-    assert 'guidance_skills: pass exactly ONE — "claude-design"' in product_pass
-    assert 'Do NOT pass "taste-frontend"' in product_pass
+    assert "guidance_skills: pass exactly `[]`" in product_pass
+    assert "Do NOT pass Taste again" in product_pass
+    assert "do not use any Open Design template" in product_pass
     assert "FIRST read the canonical `DESIGN.md` written by 2a" in product_pass
     assert "then inspect `src/tokens.css`, the landing source, and existing assets" in product_pass
     assert "Preserve the exact Design Read, three dial values" in product_pass
@@ -181,13 +181,18 @@ def test_taste_skill_is_byte_exact_pinned_upstream_implementation():
     assert "byte-identical" in provenance
 
 
-def test_product_design_method_supports_brand_inheriting_continuations_without_taste():
-    method = CLAUDE_DESIGN_SKILL.read_text(encoding="utf-8")
-    assert "used standalone for dense product continuations that inherit an established brand" in method
-    assert "The canonical initial public-landing call uses the" in method
-    assert "full Taste skill alone" in method
-    assert "only when the caller explicitly selected it" in method
-    assert "Choose one coherent visual direction from the available style packs before building" not in method
+def test_taste_landing_worker_has_real_desktop_and_mobile_render_preflight():
+    contract = takyon_core.TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT
+    assert "Source inspection alone is not visual proof" in contract
+    assert "1440x900" in contract
+    assert "390x844" in contract
+    assert "read each image with the Read tool" in contract
+    assert "no accidental early next-section intrusion" in contract
+    dockerfile = (
+        HERMES_ROOT.parent / "deploy" / "argon-alpha-14" / "takyon-claude-worker.Dockerfile"
+    ).read_text(encoding="utf-8")
+    assert "chromium" in dockerfile
+    assert "agent-browser@0.26.0" in dockerfile
 
 
 def test_product_owner_and_design_command_route_taste_only_to_the_initial_landing():
@@ -200,24 +205,28 @@ def test_product_owner_and_design_command_route_taste_only_to_the_initial_landin
         assert "`max_turns: 60`" in text
         assert "`timeout_ms: 900000`" in text
         assert "`guidance_skills: []`" in text
-        assert "defaults to `claude-design` only" in text
+        assert "DESIGN.md" in text
 
-    assert 'guidance_skills: ["claude-design"]' in product
-    assert "Do not pass Taste" in product
+    assert 'guidance_skills: ["claude-design"]' not in product
+    assert "do not use an Open Design template" in product
     assert "`effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`" in product
     assert "For every `product/site` design pass" not in command
 
 
-def test_optional_style_references_are_explicit_and_cannot_override_an_existing_brand():
-    for skill_file in OPTIONAL_STYLE_SKILLS:
-        text = skill_file.read_text(encoding="utf-8")
-        normalized = " ".join(text.split())
-        assert "only when the caller explicitly selects" in normalized
-        assert "never auto-add it beneath Taste or Claude Design" in normalized
-        assert "`product/site/DESIGN.md`, existing tokens, and existing assets are authoritative" in normalized
-        assert "must not override or reinterpret the established brand" in normalized
-        assert "Layer beneath taste-frontend and claude-design" not in text
-        assert "Layer this beneath `taste-frontend` and `claude-design`" not in text
+def test_open_design_templates_and_dependencies_are_removed():
+    creative = HERMES_ROOT / "skills" / "creative"
+    assert not any(path.is_file() for path in (creative / "claude-design").rglob("*"))
+    for name in ("stripe", "openai", "doodle", "brutalist", "superhuman"):
+        assert not any(
+            path.is_file() for path in (creative / f"claude-design-{name}").rglob("*")
+        )
+    source = Path(takyon_core.__file__).read_text(encoding="utf-8")
+    assert '"/tmp:rw,exec,size=384m"' in source
+    assert '"claude-design-openai"' not in source
+    assert '"claude-design-stripe"' not in source
+    assert '"claude-design-superhuman"' not in source
+    assert '"claude-design-doodle"' not in source
+    assert '"claude-design-brutalist"' not in source
 
 
 def test_navigation_component_is_force_refreshed_with_appkit_rails():
@@ -585,7 +594,7 @@ def test_surface_context_reads_identity_name_label(tmp_path):
 
 def test_subscription_gate_uses_canonical_product_name():
     layout = read("src/screens/app-layout.tsx")
-    assert "One secure checkout unlocks {productName}." in layout
+    assert "continue to {productName}." in layout
     assert "unlocks the complete product" not in layout
 
 

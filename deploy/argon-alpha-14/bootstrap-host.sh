@@ -7,6 +7,7 @@ WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
 ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
 ENSURE_CADDY_RATELIMIT_SCRIPT="$ROOT_DIR/deploy/shared/ensure-caddy-ratelimit.sh"
+WORKER_DOCKERFILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-claude-worker.Dockerfile"
 
 TARGET_HOST="${TAKYON_VPS_HOST:-root@137.184.75.57}"
 TARGET_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -14,7 +15,8 @@ REMOTE_ROOT="${TAKYON_REMOTE_ROOT:-/opt/takyon}"
 REMOTE_HOME="${TAKYON_REMOTE_HOME:-$REMOTE_ROOT/.takyon}"
 REMOTE_SECRETS="${TAKYON_REMOTE_SECRETS:-$REMOTE_ROOT/secrets}"
 REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-$REMOTE_ROOT/hermes-agent-main}"
-REMOTE_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
+TRACKED_WORKER_IMAGE="takyon/claude-worker:node20-chromium-v1"
+REMOTE_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-$TRACKED_WORKER_IMAGE}"
 TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
 
 target_ssh=(-i "$TARGET_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
@@ -46,6 +48,11 @@ fi
 
 if [[ ! -f "$ENSURE_CADDY_RATELIMIT_SCRIPT" ]]; then
   echo "caddy rate-limit bootstrap helper not found: $ENSURE_CADDY_RATELIMIT_SCRIPT" >&2
+  exit 1
+fi
+
+if [[ ! -f "$WORKER_DOCKERFILE" ]]; then
+  echo "Claude worker Dockerfile not found: $WORKER_DOCKERFILE" >&2
   exit 1
 fi
 
@@ -102,11 +109,19 @@ EOF
   systemctl start docker
   systemctl is-active --quiet docker
   docker version >/dev/null
-  if ! docker image inspect '$REMOTE_DOCKER_IMAGE' >/dev/null 2>&1; then
-    docker pull '$REMOTE_DOCKER_IMAGE'
-  fi
   install -d '$REMOTE_RUNTIME'
 "
+
+if [[ "$REMOTE_DOCKER_IMAGE" == "$TRACKED_WORKER_IMAGE" ]]; then
+  echo "Building the tracked Claude worker image with Chromium visual preflight"
+  ssh "${target_ssh[@]}" "$TARGET_HOST" \
+    "docker build --tag '$REMOTE_DOCKER_IMAGE' -" < "$WORKER_DOCKERFILE"
+else
+  ssh "${target_ssh[@]}" "$TARGET_HOST" \
+    "docker image inspect '$REMOTE_DOCKER_IMAGE' >/dev/null 2>&1 || docker pull '$REMOTE_DOCKER_IMAGE'"
+fi
+ssh "${target_ssh[@]}" "$TARGET_HOST" \
+  "docker run --rm '$REMOTE_DOCKER_IMAGE' sh -lc 'agent-browser --version && chromium --version'"
 
 # Provision the rate_limit module into the Caddy binary so the tracked Caddyfile
 # (edge DDoS controls) validates and reloads. Idempotent; runs on every host.

@@ -1598,21 +1598,16 @@ def test_business_refresh_product_surface_uses_longer_default_timeout(monkeypatc
     assert captured["timeout_seconds"] == 300
 
 
-def test_bundled_claude_design_guidance_skills_exist():
+def test_bundled_design_skills_use_taste_without_open_design_templates():
     skills_root = Path(__file__).resolve().parents[2] / "skills" / "creative"
     expected = {
-        "claude-design",
-        "claude-design-openai",
-        "claude-design-stripe",
-        "claude-design-superhuman",
-        "claude-design-doodle",
-        "claude-design-brutalist",
         "claude-refresh-audit",
         "taste-frontend",
         "taste-imagegen-web",
     }
     found = {path.parent.name for path in skills_root.glob("*/SKILL.md")}
     assert expected.issubset(found)
+    assert not any(name == "claude-design" or name.startswith("claude-design-") for name in found)
 
 
 def test_business_refresh_product_surface_treats_null_install_as_default_true(monkeypatch):
@@ -3275,8 +3270,8 @@ Use this skill for strong product UI work.
     assert "[Design guidance hierarchy]" not in instruction
     assert "[Hermes guidance skill: taste-frontend]" not in instruction
     assert "[Hermes guidance skill: claude-design]" in instruction
-    assert "## Workflow" in instruction
-    assert "Build the artifact with intentional hierarchy." in instruction
+    assert "Follow this guidance when it improves the artifact quality or UX." in instruction
+    assert "## Workflow" not in instruction
     assert "current working directory is already the requested business workspace: product/site" in instruction
 
 
@@ -3411,11 +3406,11 @@ Playful shared design system.
     assert "[Hermes guidance skill: taste-frontend]" not in instruction
     assert "[Hermes guidance skill: claude-design]" in instruction
     assert "[Hermes guidance skill: claude-design-doodle]" in instruction
-    assert "[Hermes design reference: claude-design-doodle / DESIGN.md]" in instruction
-    assert "required design contract" in instruction
-    assert "Pick one coherent style skill." in instruction
-    assert "playful still has to ship" in instruction
-    assert "right rail should feel visually substantial" in instruction
+    assert "[Hermes design reference: claude-design-doodle / DESIGN.md]" not in instruction
+    assert "required design contract" not in instruction
+    assert "Pick one coherent style skill." not in instruction
+    assert "playful still has to ship" not in instruction
+    assert "right rail should feel visually substantial" not in instruction
 
 
 def test_claude_agent_task_publishes_verified_product_surface(tmp_path, monkeypatch):

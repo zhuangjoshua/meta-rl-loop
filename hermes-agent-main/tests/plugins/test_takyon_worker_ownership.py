@@ -491,12 +491,11 @@ def test_pinned_upstream_taste_body_is_injected_once_without_excerpt_truncation(
     assert "...[truncated]" not in guidance
 
 
-def test_standalone_claude_design_prompt_does_not_presume_taste():
-    names, guidance = core._compose_worker_guidance_block(["claude-design"])
+def test_product_design_default_adds_no_legacy_template():
+    names, reason = core._resolve_worker_guidance_skills({}, "product/site")
 
-    assert names == ["claude-design"]
-    assert "[Design guidance hierarchy]" not in guidance
-    assert "otherwise do not invent or wait for a Taste layer" in guidance
+    assert names == []
+    assert reason == "preserved the established Taste DESIGN.md without extra design guidance"
 
 
 def test_taste_design_contract_requires_all_dials_in_range(tmp_path):

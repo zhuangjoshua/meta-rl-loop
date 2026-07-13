@@ -208,7 +208,9 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function signInWithGoogle() {
-    await startGoogleAuth(false);
+    // Paid SaaS login and signup share the same conversion destination: after auth, the
+    // canonical AppKit opens Stripe immediately unless the viewer is already entitled.
+    await startGoogleAuth(true);
   }
 
   async function signUpWithGoogle() {

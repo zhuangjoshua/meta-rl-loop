@@ -1,6 +1,6 @@
 ---
 name: claude-refresh-audit
-description: Audit-first method for upgrading an EXISTING product surface to premium quality without breaking functionality. Pass alongside claude-design on UI-refresh passes.
+description: Audit-first method for upgrading an EXISTING product surface without breaking functionality while preserving the Taste-authored DESIGN.md.
 version: 1.0.0
 author: Four Manifold
 license: MIT
@@ -10,7 +10,7 @@ tags: [design, redesign, audit, refresh, frontend]
 
 # Claude Refresh Audit
 
-Use this when the task is improving an EXISTING surface, not building a new one. It provides the audit method; the visual direction still comes from `claude-design` plus the business's chosen style pack.
+Use this when the task is improving an EXISTING surface, not building a new one. It provides the audit method; the visual direction comes only from the business's Taste-authored `DESIGN.md`, tokens, and assets.
 
 ## When To Use
 
@@ -18,7 +18,7 @@ Use this when the task is improving an EXISTING surface, not building a new one.
 - "make it look better / more premium" requests against shipped pages
 - de-slopping a surface that reads as generic AI output
 
-Do not use for first builds; `claude-design` and the style pack own those.
+Do not use for first builds; the full Taste landing pass owns those.
 
 ## Audit Method
 
@@ -81,7 +81,7 @@ Code quality:
 - Work with the existing stack; check the dependency file before using anything.
 - Never break functionality for aesthetics; behavior-preserving diffs only.
 - Keep changes small and reviewable; no wholesale rewrites.
-- The chosen style pack wins conflicts: its tokens, fonts, and posture override any suggestion here.
+- The existing `DESIGN.md`, tokens, fonts, assets, and posture override any suggestion here.
 
 ## Local Sources
 

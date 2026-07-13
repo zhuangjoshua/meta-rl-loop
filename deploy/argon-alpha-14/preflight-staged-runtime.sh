@@ -64,6 +64,8 @@ if ! docker image inspect "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" >/dev/null 2>&1; t
   docker pull "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE"
 fi
 docker run --rm --entrypoint node "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" --version >/dev/null
+docker run --rm "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" sh -lc \
+  'agent-browser --version >/dev/null && chromium --version >/dev/null'
 
 if grep -F -- 'TAKYON_STORAGE_BACKEND=supabase_s3' "$TAKYON_DASHBOARD_UNIT_CANDIDATE" >/dev/null \
   || grep -F -- 'TAKYON_STORAGE_BACKEND=supabase_s3' "$TAKYON_WORKER_UNIT_CANDIDATE" >/dev/null; then

@@ -56,7 +56,9 @@ SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "ro
 case "$ROLE" in subuser|safebox|operator) ;; *) echo "role must be subuser|safebox|operator" >&2; exit 1;; esac
 # For the operator role VPC_IP is the DEV SAFEBOX private VPC IP (the dashboard/worker resolve
 # provider secrets from http://$VPC_IP:8000). The claude-agent build image is overridable.
-DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
+TRACKED_WORKER_IMAGE="takyon/claude-worker:node20-chromium-v1"
+DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-$TRACKED_WORKER_IMAGE}"
+WORKER_DOCKERFILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-claude-worker.Dockerfile"
 
 store_get() { grep -m1 "^$1=" "$STORE" | cut -d= -f2- || true; }
 
@@ -95,9 +97,15 @@ if [[ "$ROLE" == "operator" ]]; then
     systemctl start docker
     systemctl is-active --quiet docker
     docker version >/dev/null
-    docker image inspect '$DOCKER_IMAGE' >/dev/null 2>&1 || docker pull '$DOCKER_IMAGE'
     echo \"operator host prep OK: takyon uid=\$takyon_uid docker=\$(systemctl is-active docker)\"
   "
+  if [[ "$DOCKER_IMAGE" == "$TRACKED_WORKER_IMAGE" ]]; then
+    [[ -f "$WORKER_DOCKERFILE" ]] || { echo "worker Dockerfile not found: $WORKER_DOCKERFILE" >&2; exit 1; }
+    "${SSH[@]}" "docker build --tag '$DOCKER_IMAGE' -" < "$WORKER_DOCKERFILE"
+  else
+    "${SSH[@]}" "docker image inspect '$DOCKER_IMAGE' >/dev/null 2>&1 || docker pull '$DOCKER_IMAGE'"
+  fi
+  "${SSH[@]}" "docker run --rm '$DOCKER_IMAGE' sh -lc 'agent-browser --version && chromium --version'"
 fi
 
 echo "→ [$NODE_NAME] rsync runtime tree"

@@ -254,6 +254,14 @@ PRODUCT_BUILD_GATE_CONTRACT = """Customer-facing product build gate (HARD):
 - `tsc --noEmit` rejects unused variables/imports and type errors; remove them. Do not leave the workspace with a failing build or typecheck.
 - If you cannot land BOTH green within this pass, do NOT report success. Your FINAL line MUST start with `BLOCKED:` followed by the exact remaining build/typecheck error and the file(s) involved, so Takyon hand-patches instead of cold re-delegating. A plain "I inspected the workspace" or a diagnosis without a green build is a failure, not a success.
 """
+TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT = """Taste landing rendered-viewport preflight (HARD):
+- This is the initial public landing pass. Source inspection alone is not visual proof.
+- After `npm run build` and `npm run typecheck` pass, serve the built app locally and use the installed `agent-browser --executable-path /usr/bin/chromium --args '--no-sandbox,--disable-dev-shm-usage'` rail to render `/` at BOTH 1440x900 desktop and 390x844 mobile.
+- Save each screenshot to the absolute paths `/workspace/.takyon-preflight/landing-desktop.png` and `/workspace/.takyon-preflight/landing-mobile.png` (relative paths resolve inside the browser daemon's temp directory), read each image with the Read tool, and inspect the actual first viewport. The header + hero must form one deliberate first-screen composition: headline, support, and primary CTA visible; no accidental early next-section intrusion; no clipped or empty composition. A deliberately visible continuation is allowed only when the Design Read explains it and the first screen still reads complete.
+- If either render fails, edit the landing and repeat build/typecheck plus both rendered checks. Do not claim visual inspection without reading both screenshots.
+- Stop the local server, close the browser session, and remove `.takyon-preflight/` before finishing. A missing browser executable, failed screenshot, unread screenshot, or unverified viewport is BLOCKED, not success.
+- Use only local loopback URLs. Browser rendering is verification, never provider access, deployment, or an external network call.
+"""
 MOBILE_APP_BUILD_GATE_CONTRACT = """Mobile app build gate (HARD):
 - This is a customer-facing iOS app workspace (Expo SDK 54, managed). Diagnosing an error is NOT done; only a green verify is done.
 - Before you finish, you MUST run and confirm green, yourself, with Bash — do not assume:
@@ -282,23 +290,6 @@ WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - If an instruction mentions the workspace path, interpret it as the current working directory unless it explicitly asks for a different business-relative path.
 """
 _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
-    "claude-design": (
-        "When To Use",
-        "Shared Style Selection",
-        "Workflow",
-        "Layout and Width",
-        "Layout Discipline",
-        "Anti-Slop Tells",
-        "Marketing Surfaces",
-        "Product Surfaces",
-        "Self Review Loop",
-        "Hard Rules",
-    ),
-    "claude-design-openai": ("When To Use", "Visual Direction", "Typography", "Layout and Width", "Color and Tokens", "Components", "Hard Rules"),
-    "claude-design-stripe": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
-    "claude-design-superhuman": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
-    "claude-design-doodle": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
-    "claude-design-brutalist": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-refresh-audit": ("When To Use", "Audit Method", "Design Audit", "Fix Priority", "Rules"),
     "taste-frontend": (
         "Design Read",
@@ -320,39 +311,7 @@ _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
     ),
 }
 _TASTE_GUIDANCE_SKILL_NAMES = frozenset({"taste-frontend", "design-taste-frontend"})
-_WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS: dict[str, tuple[str, ...]] = {
-    "claude-design-openai": (
-        "Visual Theme & Atmosphere",
-        "Typography Rules",
-        "Spacing & Layout",
-        "Do's and Don'ts",
-    ),
-    "claude-design-stripe": (
-        "Visual Theme & Atmosphere",
-        "Typography Rules",
-        "Spacing & Layout",
-        "Do's and Don'ts",
-    ),
-    "claude-design-superhuman": (
-        "Visual Theme & Atmosphere",
-        "Typography Rules",
-        "Layout Principles",
-        "Do's and Don'ts",
-    ),
-    "claude-design-doodle": (
-        "Visual Theme & Atmosphere",
-        "Typography",
-        "Spacing & Grid",
-        "Layout & Composition",
-        "Anti-patterns",
-    ),
-    "claude-design-brutalist": (
-        "Visual Theme & Atmosphere",
-        "Typography Rules",
-        "Spacing & Layout",
-        "Do's and Don'ts",
-    ),
-}
+_WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS: dict[str, tuple[str, ...]] = {}
 _PUBLIC_ASSET_MEDIA_TYPES: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -2005,27 +1964,14 @@ def _normalize_guidance_skills(raw: Any) -> list[str]:
     return normalized
 
 
-# Default for an unspecified customer-facing product task is the dense-product-safe Claude Design
-# method.  Full Taste is an explicit landing/editorial implementation skill; bootstrap 2a opts into
-# it, while 2b and later app work must not silently inherit it outside upstream's declared scope.
-_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS: tuple[str, ...] = (
-    "claude-design",
-)
+# Initial public landings opt explicitly into full Taste. Later product work inherits the durable
+# Taste-authored DESIGN.md without injecting a second design template or reopening art direction.
+_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS: tuple[str, ...] = ()
 
 
 def _layer_product_design_guidance(skills: list[str]) -> list[str]:
-    """Canonicalize an EXPLICIT design list without adding skills the caller did not request."""
-    selected_taste = [
-        skill for skill in skills if skill.lower() in _TASTE_GUIDANCE_SKILL_NAMES
-    ][:1]
-    shared_design = [skill for skill in skills if skill.lower() == "claude-design"][:1]
-    layered = [*selected_taste, *shared_design]
-    layered.extend(
-        skill
-        for skill in skills
-        if skill.lower() not in {*_TASTE_GUIDANCE_SKILL_NAMES, "claude-design"}
-    )
-    return layered
+    """Preserve an explicit list; no legacy design template is auto-added or reordered."""
+    return list(skills)
 
 
 def _resolve_worker_guidance_skills(
@@ -2050,7 +1996,7 @@ def _resolve_worker_guidance_skills(
     if is_product_surface:
         return (
             list(_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS),
-            "defaulted to dense-product-safe Claude Design guidance",
+            "preserved the established Taste DESIGN.md without extra design guidance",
         )
     return [], ""
 
@@ -4207,7 +4153,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
         + ". If a screen needs a helper these files do not export, add it to a NEW worker-owned module under `src/lib/` (different filename) or define it in the screen itself.",
         "- Use the canonical `PublicSiteHeader` from `src/components/site-navigation.tsx` on the landing and every public support page. It owns the stable signed-out Home/Pricing/FAQ/Privacy/Terms nav, distinct Log in and Sign up actions, the signed-in App/Account nav, and loading-state stability; do not replace it with page-specific nav variants.",
-        "- Landing and pricing CTAs must derive from real runtime session/account state through the shared helpers: the public landing has distinct Log in and Sign up actions, never a price-first Subscribe/Open app button. Log in calls `signInWithGoogle()`; Sign up calls `signUpWithGoogle()`, which preserves the intent through OAuth and proceeds directly to checkout. Pricing uses the resolved access state.",
+        "- Landing and pricing CTAs must derive from real runtime session/account state through the shared helpers: the public landing has distinct Log in and Sign up actions, never a price-first Subscribe/Open app button. Both `signInWithGoogle()` and `signUpWithGoogle()` preserve checkout intent through OAuth; an authenticated unentitled viewer proceeds directly to Stripe with no intermediate Complete subscription screen. Already-entitled viewers open the app. Pricing uses the resolved access state.",
         "- Authenticated viewers visiting `/` go directly to `/app`. The canonical `/app` layout owns the sign-in/subscription gate and renders the product immediately for entitled viewers; never add another landing, welcome, enter-product, or self-linking Open app screen inside `src/screens/app-home.tsx`.",
         "- Public nested pages such as FAQ, privacy, terms, articles, and guides must not show Open app or Subscribe CTAs. Use `BackButton` on nested pages; the only public conversion surfaces are the landing's Log in/Sign up actions and the pricing page.",
         "- Treat the signed-in product as a full-width application workspace. Do not wrap the primary `/app` workflow in a narrow centered marketing container or a single small card; use the available viewport for the real workflow while preserving readable inner regions.",
@@ -5822,7 +5768,7 @@ def _run_claude_agent_task_in_docker(
     image = str(
         os.getenv("TAKYON_CLAUDE_AGENT_DOCKER_IMAGE")
         or os.getenv("TERMINAL_DOCKER_IMAGE")
-        or "nikolaik/python-nodejs:python3.11-nodejs20"
+        or "takyon/claude-worker:node20-chromium-v1"
     ).strip()
     worker_model = _resolve_claude_agent_model(payload.get("model"))
     payload = {
@@ -5974,6 +5920,8 @@ def _run_claude_agent_task_in_docker(
         "/root:rw,exec,size=512m",
         "--tmpfs",
         "/home:rw,exec,size=512m",
+        "--tmpfs",
+        "/tmp:rw,exec,size=384m",
         *sdk_mount_args,
         *identity_mount_args,
         *npm_cache_mount_args,
@@ -6180,12 +6128,6 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
                 "section and explicit `DESIGN_VARIANCE: N`, `MOTION_INTENSITY: N`, and "
                 "`VISUAL_DENSITY: N` values (each 1-10); this is the durable handoff to later workers."
             )
-        elif skill_name.lower() == "claude-design" or skill_name.lower().startswith("claude-design-"):
-            preamble = (
-                "Use this as standalone-safe product implementation guidance and follow its craft rules. "
-                "If Taste is also explicitly supplied, apply this as the implementation method beneath "
-                "Taste; otherwise do not invent or wait for a Taste layer."
-            )
         else:
             preamble = (
                 "Follow this guidance when it improves the artifact quality or UX. "
@@ -6200,31 +6142,6 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
         design_reference = _excerpt_guidance_design_reference(skill_file, skill_name)
         if design_reference:
             blocks.append(design_reference)
-    lower_design_names = [name for name in resolved_names if name.lower() == "claude-design" or name.lower().startswith("claude-design-")]
-    concrete_style_names = [name for name in resolved_names if name.lower().startswith("claude-design-")]
-    if (
-        _TASTE_GUIDANCE_SKILL_NAMES.intersection(name.lower() for name in resolved_names)
-        and lower_design_names
-    ):
-        blocks.insert(
-            0,
-            (
-                "[Design guidance hierarchy]\n"
-                "Taste is the top-level brief interpretation and quality-control layer. Claude Design is the "
-                "implementation method beneath it, and any single claude-design-* skill is a concrete visual "
-                "system beneath both. Apply all layers in that order: Taste adapts the system to this business; "
-                "it does not replace the system, and the system does not override the brief."
-            ),
-        )
-    if len(concrete_style_names) >= 2:
-        blocks.insert(
-            1 if blocks and blocks[0].startswith("[Design guidance hierarchy]") else 0,
-            (
-                "[Design system selection]\n"
-                "Multiple concrete style systems were supplied. Choose exactly ONE from the business brief and "
-                "use the others only as contrast references; never blend their house aesthetics."
-            ),
-        )
     return resolved_names, "\n\n".join(blocks).strip()
 
 
@@ -36427,6 +36344,8 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                     worker_instruction_parts.append(
                         MOBILE_APP_BUILD_GATE_CONTRACT if mobile_app_workspace else PRODUCT_BUILD_GATE_CONTRACT
                     )
+                if taste_guidance_active and _workspace_needs_runtime_ui_contract(workspace_rel):
+                    worker_instruction_parts.append(TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT)
                 if mobile_app_workspace:
                     worker_instruction_parts.append(MOBILE_APP_WORKER_CONTRACT)
                     worker_instruction_parts.append(
@@ -39196,7 +39115,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "workspace": {"type": "string", "description": "Business-relative workspace directory under one of product/, distribution/, research/, metrics/ (default 'product/site'). Edits product/site source with file/code tools; NOT for market research (research runs inline via takyon-market-research)."},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
-                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to inject into the worker instruction exactly as requested. Use full design-taste-frontend for landing/editorial implementation, claude-design for dense product UI, and at most one fitting claude-design-* visual system. The injected App Kit behavior contract remains authoritative."},
+                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to inject exactly as requested. Use full design-taste-frontend for the initial landing. Later product work should omit guidance and inherit the Taste-authored DESIGN.md without reopening art direction. The injected App Kit behavior contract remains authoritative."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 60 for product/site work and 12 otherwise"},

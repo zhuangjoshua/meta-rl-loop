@@ -1506,7 +1506,18 @@ require_docker_for_worker() {
   if ! docker version >/dev/null 2>&1; then
     die "Docker is not reachable; start Docker Desktop before running the local worker pool"
   fi
-  local worker_image="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
+  local tracked_worker_image="takyon/claude-worker:node20-chromium-v1"
+  local worker_image="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-$tracked_worker_image}"
+  if [[ "$worker_image" == "$tracked_worker_image" ]]; then
+    local worker_dockerfile="$ROOT/deploy/argon-alpha-14/takyon-claude-worker.Dockerfile"
+    [[ -f "$worker_dockerfile" ]] || die "tracked Claude worker Dockerfile is missing: $worker_dockerfile"
+    docker build --tag "$worker_image" - < "$worker_dockerfile" \
+      || die "failed to build tracked Claude worker image: $worker_image"
+    if ! docker run --rm "$worker_image" sh -lc \
+      'agent-browser --version >/dev/null && chromium --version >/dev/null'; then
+      die "tracked Claude worker image lacks the Chromium visual-preflight rail: $worker_image"
+    fi
+  fi
   if ! docker run --rm \
     --entrypoint /bin/sh \
     --mount "type=bind,src=$RUNTIME_DIR,dst=/takyon-runtime,readonly" \

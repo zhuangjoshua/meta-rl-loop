@@ -44,7 +44,18 @@ def test_subscribe_intent_is_reactive_to_the_intent_param():
     hooks = (_SCAFFOLD / "src" / "lib" / "hooks.ts").read_text(encoding="utf-8")
     assert "export function useSubscribeIntent(" in hooks
     assert "intent: string | null" in hooks
-    assert "[intent, access.authenticated, access.entitled, access.loading]" in hooks
+    assert "autoStart = false" in hooks
+    assert "autoStart || intent === \"subscribe\"" in hooks
+    assert "[autoStart, intent, access.authenticated, access.entitled, access.loading]" in hooks
+
+
+def test_login_and_signup_both_continue_directly_to_checkout():
+    auth = (_SCAFFOLD / "src" / "lib" / "product-auth.tsx").read_text(encoding="utf-8")
+    layout = (_SCAFFOLD / "src" / "screens" / "app-layout.tsx").read_text(encoding="utf-8")
+    assert auth.count("startGoogleAuth(true)") == 2
+    assert "const autoCheckout" in layout
+    assert "Complete your subscription" not in layout
+    assert "Checkout didn&apos;t open" in layout
 
 
 def test_appkit_access_gate_uses_entitlements_not_legacy_account_flags():

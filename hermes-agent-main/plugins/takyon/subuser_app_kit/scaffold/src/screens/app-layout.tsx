@@ -14,7 +14,10 @@ export function AppLayout() {
   const cta = resolveViewerCta(access);
   const accountRoute = location.pathname.replace(/\/+$/, "") === "/app/profile";
   const subscribeIntent = searchParams.get("intent") === "subscribe";
-  useSubscribeIntent(access, searchParams.get("intent"));
+  const checkoutError = searchParams.get("checkout") === "error";
+  const autoCheckout =
+    !access.loading && access.authenticated && !access.entitled && !accountRoute && !checkoutError;
+  useSubscribeIntent(access, searchParams.get("intent"), autoCheckout);
   useCheckoutReturnRefresh(access);
 
   return (
@@ -63,19 +66,19 @@ export function AppLayout() {
 
       <main className="w-full px-4 py-6 sm:px-6 lg:px-8">
         {location.pathname !== "/app" ? <BackButton fallback="/app" /> : null}
-        {searchParams.get("checkout") === "error" ? (
+        {checkoutError ? (
           <div role="alert" className="mb-6 rounded border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             We couldn&apos;t start checkout. Try again in a moment or contact support.
           </div>
         ) : null}
 
-        {access.loading || auth.busy || subscribeIntent ? (
+        {access.loading || auth.busy || subscribeIntent || autoCheckout ? (
           <div className="grid min-h-[70vh] place-items-center" aria-busy="true">
             <div className="w-full max-w-md space-y-4 text-center">
               <Skeleton className="mx-auto h-10 w-2/3" />
               <Skeleton className="h-24 w-full" />
               <p className="text-sm text-muted-foreground">
-                {subscribeIntent ? "Opening secure checkout…" : "Loading your workspace…"}
+                {subscribeIntent || autoCheckout ? "Opening secure checkout…" : "Loading your workspace…"}
               </p>
             </div>
           </div>
@@ -110,14 +113,8 @@ export function AppLayout() {
           <section className="mx-auto grid min-h-[70vh] max-w-xl place-items-center text-center">
             <div className="space-y-6 rounded-2xl border border-border bg-card p-8 shadow-lg">
               <div className="space-y-2">
-                <h1 className="font-heading text-3xl font-semibold text-foreground">
-                  {access.state === "past_due"
-                    ? "Update your billing"
-                    : access.state === "canceled"
-                      ? "Subscription canceled"
-                      : "Complete your subscription"}
-                </h1>
-                <p className="text-muted-foreground">One secure checkout unlocks {productName}.</p>
+                <h1 className="font-heading text-3xl font-semibold text-foreground">Checkout didn&apos;t open</h1>
+                <p className="text-muted-foreground">Try the secure checkout again to continue to {productName}.</p>
               </div>
               <Link
                 to={cta.primaryHref}

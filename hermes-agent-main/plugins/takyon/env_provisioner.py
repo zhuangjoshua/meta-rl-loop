@@ -2605,6 +2605,40 @@ class EnvironmentProvisioner:
                 else f"unit sync failed: {(copied.stderr or '').strip()[:160]}",
             )
 
+        def _build_operator_worker_image(ip: str) -> "tuple[bool, str]":
+            """Build the revision-pinned coding image without touching host env or secrets."""
+            dockerfile = tree_root / "deploy" / "argon-alpha-14" / "takyon-claude-worker.Dockerfile"
+            if not dockerfile.is_file():
+                return False, "staged revision is missing takyon-claude-worker.Dockerfile"
+            built = subprocess.run(
+                [
+                    "ssh", *ssh_base, f"root@{ip}",
+                    "docker build --tag takyon/claude-worker:node20-chromium-v1 -",
+                ],
+                input=dockerfile.read_bytes(),
+                capture_output=True,
+                timeout=900,
+            )
+            if built.returncode != 0:
+                detail = (built.stderr or built.stdout or b"").decode("utf-8", "replace")
+                return False, f"worker image build failed: {detail.strip()[-240:]}"
+            verified = subprocess.run(
+                [
+                    "ssh", *ssh_base, f"root@{ip}",
+                    "docker run --rm takyon/claude-worker:node20-chromium-v1 sh -lc "
+                    "'agent-browser --version >/dev/null && chromium --version >/dev/null'",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            return (
+                verified.returncode == 0,
+                "worker image built and browser verified"
+                if verified.returncode == 0
+                else f"worker image verification failed: {(verified.stderr or verified.stdout or '').strip()[-240:]}",
+            )
+
         def _restart(ip: str, services: "list[str]") -> "tuple[bool, str]":
             remote = (
                 "find /opt/takyon/hermes-agent-main -name '._*' -delete 2>/dev/null; "
@@ -2649,6 +2683,8 @@ class EnvironmentProvisioner:
             ok, why = _push_code(ip)
             if ok:
                 ok, why = _push_public_service_unit(ip, role, block)
+            if ok and role == "operator":
+                ok, why = _build_operator_worker_image(ip)
             if not ok:
                 receipts.append(StepReceipt(role, STATUS_ERROR, "deploy", f"{ip}: {why}"))
                 staging_failed = True

@@ -233,6 +233,7 @@ export function resolveViewerCta(access: Pick<ViewerAccessResult, "authenticated
 export function useSubscribeIntent(
   access: Pick<ViewerAccessResult, "authenticated" | "entitled" | "loading">,
   intent: string | null,
+  autoStart = false,
 ): void {
   const startedRef = useRef(false);
   useEffect(() => {
@@ -243,7 +244,7 @@ export function useSubscribeIntent(
     // FIXED redirect path (config.redirectPath) that drops the ?intent=subscribe query, so a
     // signed-out Subscribe click used to lead to the sign-in gate and then silently do nothing
     // (intent lost). We persist the intent in sessionStorage and resume on return.
-    const wantsSubscribe = intent === "subscribe" || shouldSubscribeAfterAuth();
+    const wantsSubscribe = autoStart || intent === "subscribe" || shouldSubscribeAfterAuth();
     if (!wantsSubscribe) {
       startedRef.current = false;
       return;
@@ -286,17 +287,16 @@ export function useSubscribeIntent(
       next.delete("intent");
       if (failed) next.set("checkout", "error");
       const query = next.toString();
-      window.history.replaceState(
-        null,
-        "",
+      // Reload through the router so the normal auto-start path does not immediately retry and
+      // the customer sees the explicit checkout failure/retry state instead of a stuck loader.
+      window.location.replace(
         window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
       );
-      startedRef.current = false;
     })();
     return () => {
       cancelled = true;
     };
-  }, [intent, access.authenticated, access.entitled, access.loading]);
+  }, [autoStart, intent, access.authenticated, access.entitled, access.loading]);
 }
 
 /** Read the query string from BOTH the real query and any hash query. Stripe's `success_url` lands

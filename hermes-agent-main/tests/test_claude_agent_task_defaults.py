@@ -429,9 +429,9 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == ["claude-design"]
-    assert result["guidance_selection_reason"] == "defaulted to dense-product-safe Claude Design guidance"
-    assert "[Hermes guidance skill: default-product-site]" in instruction
+    assert result["guidance_skills"] == []
+    assert result["guidance_selection_reason"] == "preserved the established Taste DESIGN.md without extra design guidance"
+    assert "[Hermes guidance skill: default-product-site]" not in instruction
 
 
 def test_claude_agent_task_includes_public_landing_composition_contract_for_product_site(tmp_path, monkeypatch):
@@ -652,9 +652,9 @@ def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == ["claude-design"]
-    assert result["guidance_selection_reason"] == "defaulted to dense-product-safe Claude Design guidance"
-    assert "[Hermes guidance skill: inferred-product-site]" in instruction
+    assert result["guidance_skills"] == []
+    assert result["guidance_selection_reason"] == "preserved the established Taste DESIGN.md without extra design guidance"
+    assert "[Hermes guidance skill: inferred-product-site]" not in instruction
 
 
 def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):
