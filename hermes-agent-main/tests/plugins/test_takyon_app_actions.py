@@ -1707,6 +1707,20 @@ def test_surface_http_action_names_detects_referenced_file_backed_http_actions(t
     assert names == {"coach-chat"}
 
 
+def test_action_reference_scan_ignores_line_and_block_comments(tmp_path):
+    site = tmp_path / "product" / "site"
+    source = site / "src" / "screens" / "app-home.tsx"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        '// Never call client.invokeAction("comment-only", {}).\n'
+        '/* useActionRunner("also-comment-only") */\n'
+        'const runner = useDecodedActionRunner("real-action", decode);\n',
+        encoding="utf-8",
+    )
+
+    assert app_actions._referenced_action_names_in_source(site) == {"real-action"}
+
+
 def test_surface_http_action_names_excludes_stub_action_files(tmp_path):
     base = tmp_path / "businesses" / "biz" / "product" / "site"
     (base / "src" / "screens").mkdir(parents=True)

@@ -630,17 +630,80 @@ export function useRecords(type: string): UseRecordsResult {
   return { records, loading, error, refresh };
 }
 
-export interface UseActionRunnerResult {
+export type ActionResultDecoder<T> = (value: unknown) => T | null | undefined;
+export type DecodedActionResult<T> =
+  | { ok: true; value: T }
+  | { ok: false };
+export type StrictActionResultDecoder<T> = (
+  value: unknown,
+) => DecodedActionResult<T>;
+
+export interface AppActionErrorNotice {
+  id: string;
+  action: string;
+  kind: string;
+  message: string;
+  checkoutUrl?: string;
+}
+
+export const APP_ACTION_ERROR_EVENT = "takyon:app-action-error";
+
+export interface UseActionRunnerResult<T = unknown> {
   /** Runs the action; resolves with the result payload, or null when it failed
    *  (the classified error lands in `error`, preserving .kind/.checkoutUrl). */
-  run: (payload?: Record<string, unknown>) => Promise<unknown | null>;
+  run: (payload?: Record<string, unknown>) => Promise<T | null>;
   pending: boolean;
   error: TakyonActionError | null;
 }
 
-/** Wraps client.createActionRunner(name) as React state. */
-export function useActionRunner(name: string): UseActionRunnerResult {
+function invalidActionResultError(): TakyonActionError {
+  const error = new Error(
+    "The action completed, but its result did not match the product's expected schema.",
+  ) as TakyonActionError;
+  error.kind = "invalid_result";
+  return error;
+}
+
+export function decodeActionResult<T>(
+  value: unknown,
+  decode: ActionResultDecoder<T>,
+): DecodedActionResult<T> {
+  try {
+    const decoded = decode(value);
+    return decoded === null || decoded === undefined
+      ? { ok: false }
+      : { ok: true, value: decoded };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function announceActionError(action: string, error: TakyonActionError) {
+  if (typeof window === "undefined") return;
+  const notice: AppActionErrorNotice = {
+    id: `${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    action,
+    kind: String(error.kind || "action_error"),
+    message: String(error.message || "The action could not be completed."),
+    checkoutUrl: error.checkoutUrl,
+  };
+  window.dispatchEvent(
+    new CustomEvent<AppActionErrorNotice>(APP_ACTION_ERROR_EVENT, { detail: notice }),
+  );
+}
+
+/**
+ * Wraps client.createActionRunner(name) as React state. UI-consumed actions pass a decoder so a
+ * successful transport response with the wrong product schema becomes a visible runner error
+ * instead of being silently discarded by screen-local parsing.
+ */
+export function useActionRunner<T = unknown>(
+  name: string,
+  decode?: ActionResultDecoder<T>,
+): UseActionRunnerResult<T> {
   const runner = useMemo(() => client.createActionRunner(name), [name]);
+  const decodeRef = useRef(decode);
+  decodeRef.current = decode;
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<TakyonActionError | null>(null);
 
@@ -649,19 +712,62 @@ export function useActionRunner(name: string): UseActionRunnerResult {
       setPending(true);
       setError(null);
       try {
-        return await runner.run(payload);
+        const result = await runner.run(payload);
+        const currentDecode = decodeRef.current;
+        if (!currentDecode) return result as T;
+        let decoded: T | null | undefined;
+        try {
+          decoded = currentDecode(result);
+        } catch {
+          throw invalidActionResultError();
+        }
+        if (decoded === null || decoded === undefined) {
+          throw invalidActionResultError();
+        }
+        return decoded;
       } catch (err) {
         // The kit classifies errors with .kind (budget, rate_limited,
-        // already_running, unavailable, timeout, network, action_error)
-        // and attaches .checkoutUrl on budget errors when checkout is callable.
-        setError(err as TakyonActionError);
+        // already_running, unavailable, timeout, network, action_error), while
+        // decoder mismatches use invalid_result. Budget errors retain checkoutUrl.
+        const actionError =
+          err instanceof Error
+            ? (err as TakyonActionError)
+            : invalidActionResultError();
+        setError(actionError);
+        announceActionError(name, actionError);
         return null;
       } finally {
         setPending(false);
       }
     },
-    [runner],
+    [name, runner],
   );
 
   return { run, pending, error };
+}
+
+/**
+ * Required for UI-consumed action output. Its tagged decoder cannot confuse a valid boolean value
+ * with a type guard, and an absent/invalid decoder fails visibly through the AppKit announcer.
+ */
+export function useDecodedActionRunner<T>(
+  name: string,
+  decode: StrictActionResultDecoder<T>,
+): UseActionRunnerResult<T> {
+  const strictDecoderRef = useRef(decode);
+  strictDecoderRef.current = decode;
+  const strictDecode = useCallback(
+    (value: unknown): T | null => {
+      const currentDecode = strictDecoderRef.current;
+      if (typeof currentDecode !== "function") return null;
+      try {
+        const decoded = currentDecode(value);
+        return decoded && decoded.ok === true ? decoded.value : null;
+      } catch {
+        return null;
+      }
+    },
+    [],
+  );
+  return useActionRunner(name, strictDecode);
 }

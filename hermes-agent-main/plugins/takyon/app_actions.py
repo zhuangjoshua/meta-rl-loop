@@ -546,8 +546,63 @@ def compute_next_run(schedule: str, after: datetime) -> datetime:
     return croniter(schedule, base).get_next(datetime)
 
 
+def _typescript_without_comments(source: str) -> str:
+    """Mask TypeScript comments while preserving strings and source positions."""
+    output = list(source)
+    quote = ""
+    escaped = False
+    line_comment = False
+    block_comment = False
+    index = 0
+    while index < len(source):
+        char = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            else:
+                output[index] = " "
+            index += 1
+            continue
+        if block_comment:
+            output[index] = "\n" if char == "\n" else " "
+            if char == "*" and following == "/":
+                output[index + 1] = " "
+                block_comment = False
+                index += 2
+                continue
+            index += 1
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            index += 1
+            continue
+        if char == "/" and following == "/":
+            output[index] = output[index + 1] = " "
+            line_comment = True
+            index += 2
+            continue
+        if char == "/" and following == "*":
+            output[index] = output[index + 1] = " "
+            block_comment = True
+            index += 2
+            continue
+        index += 1
+    return "".join(output)
+
+
 _ACTION_UI_CALL_PATTERN = re.compile(
-    r"\b(?:useActionRunner|createActionRunner|invokeAction)\s*\(\s*['\"]([a-z][a-z0-9_-]{0,63})['\"]",
+    r"\b(?:useDecodedActionRunner|useActionRunner|createActionRunner|invokeAction)"
+    r"\s*\(\s*['\"]([a-z][a-z0-9_-]{0,63})['\"]",
     re.IGNORECASE,
 )
 _ACTION_EXPORT_TRIGGER_PATTERN = re.compile(
@@ -599,7 +654,7 @@ def _referenced_action_names_in_source(site_root: Path, *, limit: int = 300) -> 
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        for match in _ACTION_UI_CALL_PATTERN.finditer(text):
+        for match in _ACTION_UI_CALL_PATTERN.finditer(_typescript_without_comments(text)):
             referenced.add(match.group(1).strip().lower())
     return referenced
 

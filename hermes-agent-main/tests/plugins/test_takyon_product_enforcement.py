@@ -604,7 +604,8 @@ def test_requested_workflow_gate_accepts_action_generate_and_records_wiring(tmp_
     action.parent.mkdir(parents=True)
     scaffold_home.write_text("export const AppHomeScreen = () => <main>Starter</main>;\n", encoding="utf-8")
     site_home.write_text(
-        'const runner = useActionRunner("generate-proposal");\n'
+        'const runner = useDecodedActionRunner("generate-proposal", value => decodeActionResult(value, decodeProposal));\n'
+        "function ActionError() { return runner.error ? <p role='alert'>{runner.error.message}</p> : null; }\n"
         "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
         encoding="utf-8",
     )
@@ -624,6 +625,78 @@ def test_requested_workflow_gate_accepts_action_generate_and_records_wiring(tmp_
     ) == ""
 
 
+def test_requested_workflow_gate_requires_strict_decoded_action_runner(tmp_path, monkeypatch):
+    from plugins.takyon import core as takyon_core
+
+    scaffold = tmp_path / "scaffold"
+    site = tmp_path / "product" / "site"
+    scaffold_home = scaffold / "src" / "screens" / "app-home.tsx"
+    site_home = site / "src" / "screens" / "app-home.tsx"
+    action = site / "actions" / "generate-proposal.ts"
+    scaffold_home.parent.mkdir(parents=True)
+    site_home.parent.mkdir(parents=True)
+    action.parent.mkdir(parents=True)
+    scaffold_home.write_text(
+        "export const AppHomeScreen = () => <main>Starter</main>;\n",
+        encoding="utf-8",
+    )
+    incomplete = (
+        'const primary = useActionRunner("generate-proposal");\n'
+        "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n"
+    )
+    site_home.write_text(incomplete, encoding="utf-8")
+    action.write_text(
+        "export default async function generateProposal(payload, ctx) {\n"
+        "  return ctx.generate({ messages: [{ role: 'user', content: String(payload) }] });\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (action.parent / "revise-proposal.ts").write_text(
+        action.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    monkeypatch.setattr(takyon_core, "_subuser_app_scaffold_source_dir", lambda: scaffold)
+    surface = {"metadata": {"workflow_completion_required": True}}
+
+    markers = takyon_core._requested_workflow_completeness_markers(site, surface)
+    snippets = [marker["snippet"] for marker in markers]
+    assert any("uses legacy useActionRunner" in snippet for snippet in snippets)
+    assert any("has no useDecodedActionRunner" in snippet for snippet in snippets)
+
+    site_home.write_text(
+        '// Never call client.invokeAction("comment-only", {}).\n'
+        'const runners = { primary: useDecodedActionRunner("generate-proposal", value => decodeActionResult(value, decodeProposal)) };\n'
+        "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
+        encoding="utf-8",
+    )
+
+    assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
+
+    site_home.write_text(
+        'const runner = useDecodedActionRunner("generate-proposal", undefined);\n'
+        "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
+        encoding="utf-8",
+    )
+    missing_decoder = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any("null/undefined decoder" in item["snippet"] for item in missing_decoder)
+
+    site_home.write_text(
+        'const runner = useDecodedActionRunner("generate-proposal", value => ({ ok: true, value }));\n'
+        "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
+        encoding="utf-8",
+    )
+    unvalidated = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any("does not tag a real decoder" in item["snippet"] for item in unvalidated)
+
+    site_home.write_text(
+        '// Never call client.invokeAction("comment-only", {}).\n'
+        'async function generate() { return client.invokeAction("generate-proposal", {}); }\n'
+        "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
+        encoding="utf-8",
+    )
+    direct_markers = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any("calls invokeAction/createActionRunner directly" in item["snippet"] for item in direct_markers)
+
+
 def test_requested_record_mutations_require_ref_update_and_confirmed_delete(tmp_path, monkeypatch):
     from plugins.takyon import core as takyon_core
 
@@ -637,7 +710,8 @@ def test_requested_record_mutations_require_ref_update_and_confirmed_delete(tmp_
     action.parent.mkdir(parents=True)
     scaffold_home.write_text("export const AppHomeScreen = () => <main>Starter</main>;\n", encoding="utf-8")
     site_home.write_text(
-        'const runner = useActionRunner("generate-brief");\n'
+        'const runner = useDecodedActionRunner("generate-brief", value => decodeActionResult(value, decodeBrief));\n'
+        "function ActionError() { return runner.error ? <p role='alert'>{runner.error.message}</p> : null; }\n"
         "async function saveAndReopen() { await client.saveRecord({ record_type: 'brief', data: {} }); return client.listRecords({ type: 'brief' }); }\n",
         encoding="utf-8",
     )
@@ -664,7 +738,8 @@ def test_requested_record_mutations_require_ref_update_and_confirmed_delete(tmp_
     assert any("does not call deleteRecord" in snippet for snippet in snippets)
 
     site_home.write_text(
-        'const runner = useActionRunner("generate-brief");\n'
+        'const runner = useDecodedActionRunner("generate-brief", value => decodeActionResult(value, decodeBrief));\n'
+        "function ActionError() { return runner.error ? <p role='alert'>{runner.error.message}</p> : null; }\n"
         "async function saveAndReopen() { await client.saveRecord({ record_type: 'brief', data: {} }); return client.listRecords({ type: 'brief' }); }\n"
         "async function updateAndDelete(record, data) {\n"
         "  const payload = { ref: record.ref, data };\n"
@@ -709,7 +784,8 @@ def test_requested_record_revision_rejects_stale_detail_after_successful_update(
         encoding="utf-8",
     )
     stale_source = (
-        'const runner = useActionRunner("generate-brief");\n'
+        'const runner = useDecodedActionRunner("generate-brief", value => decodeActionResult(value, decodeBrief));\n'
+        "function ActionError() { return runner.error ? <p role='alert'>{runner.error.message}</p> : null; }\n"
         "async function createAndList() { const created = await client.saveRecord({ record_type: 'brief', data: { external: { ref: 'not-a-record-update' } } }); setBrief(created); return client.listRecords({ type: 'brief' }); }\n"
         "async function revise(record, edited) {\n"
         "  const result = await client.saveRecord({ ref: record.ref, data: edited });\n"

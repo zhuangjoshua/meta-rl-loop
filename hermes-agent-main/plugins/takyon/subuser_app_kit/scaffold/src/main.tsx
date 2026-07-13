@@ -2,6 +2,7 @@ import { lazy, StrictMode, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import "./index.css";
+import { ActionErrorAnnouncer } from "./components/action-error-announcer";
 import { SocialProofMarquee } from "./components/social-proof-marquee";
 import { SubscriptionCancellation } from "./components/subscription-cancellation";
 import { installInteractionSounds } from "./lib/interaction-sounds";
@@ -66,6 +67,7 @@ createRoot(container).render(
   <StrictMode>
     <BrowserRouter>
       <ProductAuthProvider>
+        <ActionErrorAnnouncer />
         <Suspense fallback={null}>
           <Routes>
             <Route path="/" element={<PublicLandingRoute />} />

@@ -83,6 +83,45 @@ def test_record_lists_keep_last_success_across_tabs_and_refresh_failures():
     assert "setRecords([])" not in catch_block
 
 
+def test_action_result_schema_drift_becomes_a_visible_runner_error():
+    hooks = read("src/lib/hooks.ts")
+    announcer = read("src/components/action-error-announcer.tsx")
+    main = read("src/main.tsx")
+    contract = takyon_core._subuser_app_kit_contract_block(None)
+    prompt = turn_runtime._business_bootstrap_instruction(
+        "schema-drift-test",
+        "Build a product workflow that generates and saves service reports",
+        "live",
+        archetype="web_saas",
+    )
+
+    assert "export type ActionResultDecoder<T>" in hooks
+    assert "export type DecodedActionResult<T>" in hooks
+    assert "export type StrictActionResultDecoder<T>" in hooks
+    assert "decode?: ActionResultDecoder<T>" in hooks
+    assert "export function decodeActionResult<T>" in hooks
+    assert "export function useDecodedActionRunner<T>" in hooks
+    assert 'APP_ACTION_ERROR_EVENT = "takyon:app-action-error"' in hooks
+    assert "announceActionError(name, actionError)" in hooks
+    assert "checkoutUrl: error.checkoutUrl" in hooks
+    assert "decoded === null || decoded === undefined" in hooks
+    assert 'error.kind = "invalid_result"' in hooks
+    assert 'role="alert"' in announcer
+    assert 'data-takyon-appkit="action-error"' in announcer
+    assert 'notice.kind === "budget" && notice.checkoutUrl' in announcer
+    assert "Upgrade plan" in announcer
+    assert "<ActionErrorAnnouncer />" in main
+    assert "src/components/action-error-announcer.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
+    assert "generation prompt, action-boundary validator/normalizer" in contract
+    assert "identical field types" in contract
+    assert "`useDecodedActionRunner(name, value => decodeActionResult(value, decoder))`" in contract
+    assert "global `invalid_result` alert" in contract
+    assert "one explicit JSON result schema" in prompt
+    assert "`useDecodedActionRunner(name, value => decodeActionResult(value, decoder))`" in prompt
+    assert "including boolean values" in prompt
+    assert "Never silently discard a successful action payload" in prompt
+
+
 def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_fluid():
     contract = takyon_core._subuser_app_kit_contract_block(None)
     assert "PublicSiteHeader" in contract
@@ -301,6 +340,7 @@ def test_open_design_templates_and_dependencies_are_removed():
 
 
 def test_navigation_component_is_force_refreshed_with_appkit_rails():
+    assert "src/components/action-error-announcer.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/components/site-navigation.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/components/social-proof-marquee.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/components/subscription-cancellation.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES

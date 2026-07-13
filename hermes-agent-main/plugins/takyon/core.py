@@ -441,6 +441,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
             "The pinned Vite SPA forbids product-side server entrypoints: no `express`/`fastify`/`hono`/`koa`, no `src/app/**/route.ts`, no `pages/api/*`, and no `next.config.*`; backend logic lives only in product/site/actions/<name>.ts.",
             "Client code must not call `/generate` directly; browser AI flows call createActionRunner/invokeAction, and the named action reaches the generate rail over ctx.base_url + ctx.session_token.",
             "Drive customer-triggered actions through the shared runtime client's createActionRunner(name): disable the trigger while the runner is pending, render the truthful error message by kind, and on budget errors offer the upgrade path via the provided checkoutUrl; never retry-loop a 402, never hide it, and never fake or simulate an action result client-side.",
+            "For every action result consumed by UI, define one explicit JSON schema and keep the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer on identical field types. Use useDecodedActionRunner(name, value => decodeActionResult(value, decoder)); the decoder returns the normalized typed value or null/throws on mismatch. AppKit always renders a global invalid_result alert; also render the runner error contextually. Never silently discard a successful action payload.",
             "Schedule-triggered actions persist their output through the records rail; show customers what happened since they left by reading existing records (listRecords), not by polling or fabricating an activity feed.",
         ],
     },
@@ -3994,6 +3995,7 @@ _STARTER_OWNED_REFRESH_FILES = (
     "src/lib/product-auth.tsx",
     "src/lib/branding.ts",
     "src/lib/interaction-sounds.ts",
+    "src/components/action-error-announcer.tsx",
     "src/components/site-navigation.tsx",
     "src/components/social-proof-marquee.tsx",
     "src/components/subscription-cancellation.tsx",
@@ -4213,9 +4215,10 @@ def _subuser_app_worker_contract_block(
             "- Do not invent product-side server code in this scaffold.",
             "- Treat `product/site/actions/*.ts` as the product backend registry: real backend behavior lives in `product/site/actions/<name>.ts`, not `src/actions/`.",
             "- Each real action file must default-export async `(payload, ctx) => result`; do not leave doc stubs, placeholder registries, or browser wrappers in `product/site/actions/`.",
-            "- Browser code reaches backend behavior through the shared runtime client's `createActionRunner(name)` / `invokeAction(name)`; do not invent a second backend path.",
+            "- Browser code reaches backend behavior through the shared `useDecodedActionRunner(name, value => decodeActionResult(value, decoder))` hook, which wraps the runtime client's action runner; do not call legacy `useActionRunner`, `invokeAction`, or `createActionRunner` directly in a requested customer workflow or invent a second backend path.",
             "- Inside a product action, ctx IS the runtime client (same API as the browser): call ctx.generate(...)/ctx.invokeAction(...)/ctx.saveRecord(...)/ctx.listRecords(...) like the browser; copy product/site/actions/_example-generate.ts (it calls `const data = await ctx.generate({ max_tokens, system, messages }); return { reply: data.text };`). No filesystem write, no shell, no provider credentials in product source.",
             "- Never fake or simulate an action result client-side just to keep the UI moving; if the backend action is missing or blocked, surface the exact blocker truthfully.",
+            "- For every UI-consumed action, define one explicit JSON result schema and use identical field types in the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer. Call `useDecodedActionRunner(name, value => decodeActionResult(value, decoder))`; the decoder returns the normalized value or null/throws on mismatch. AppKit always renders a global `invalid_result` alert; also render the runner error contextually. Never silently discard a successful action payload.",
             "- Schedule-only actions self-declare in the action file with `export const trigger = \"schedule\"` and `export const schedule = \"<cron>\"`; HTTP is the default when no trigger is exported.",
             "",
         ]
@@ -4227,7 +4230,7 @@ def _subuser_app_worker_contract_block(
         )
     if _surface_requires_complete_workflow(surface):
         lines.append(
-            "- FINAL WORKFLOW GATE IS ACTIVE: publish will refuse an unchanged app-home starter or a product without a UI-referenced real action, ctx.generate(...), saveRecord(...), and listRecords/getRecord/useRecords reopen wiring. Finish those source-backed behaviors before reporting success."
+            "- FINAL WORKFLOW GATE IS ACTIVE: publish will refuse an unchanged app-home starter or a product without a tagged useDecodedActionRunner(...) result, the AppKit-owned global error announcer, a UI-referenced real action, ctx.generate(...), saveRecord(...), and listRecords/getRecord/useRecords reopen wiring. Finish those source-backed behaviors before reporting success."
         )
         lines.append(
             "- When the requested workflow names revise/update or delete, that gate also requires an exact record.ref update path and explicit destructive confirmation. Present one working mutation control per state and reconcile the visible record after it succeeds."
@@ -4269,6 +4272,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Mutation UX must have one effective action per state. A revision result gets one update control wired to `saveRecord({ ref: existing.ref, data: completeUpdatedData })`; never render the create-save control inside that revision result. After update/delete, reconcile the returned record or await the records refresh before showing success, so the visible detail cannot revert to stale data. Every delete requires an explicit customer confirmation before `deleteRecord(ref)`.",
         "- Use the bundled runtime-client TypeScript signatures directly. Never cast `saveRecord`, `getRecord`, or `deleteRecord` through `any`/`unknown` to bypass the create-vs-update RecordRef contract.",
         "- Backend actions compile in the server action environment, not the browser environment. Type every handler as `(payload: TakyonActionPayload, ctx: TakyonActionContext)`; do not annotate either parameter as `any`, and do not use DOM/WebWorker globals that the action type environment does not provide.",
+        "- Every action result consumed by UI has one explicit JSON schema. Keep the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer on identical field types. Call `useDecodedActionRunner(name, value => decodeActionResult(value, decoder))`; the decoder returns the normalized typed value or null/throws on mismatch. AppKit always renders a global `invalid_result` alert; also render the runner error contextually. Never silently discard a successful action payload.",
         "- Scaffold-owned and force-rewritten from the bundled scaffold on EVERY product build/kit materialize — never edit these; any change to them is silently reverted before the build: "
         + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
         + ". If a screen needs a helper these files do not export, add it to a NEW worker-owned module under `src/lib/` (different filename) or define it in the screen itself.",
@@ -9477,13 +9481,90 @@ def _requested_workflow_completeness_markers(
         if not any(re.search(r"\bctx\s*\.\s*generate\s*\(", text) for text in action_sources):
             gaps.append(("actions/", "requested workflow action does not call ctx.generate(...)"))
         authored_sources: list[str] = []
+        authored_source_entries: list[tuple[str, str]] = []
         for source_path in sorted((root / "src").rglob("*"))[:300]:
             if not source_path.is_file() or source_path.suffix.lower() not in _PRODUCT_SOURCE_EXTENSIONS:
                 continue
             try:
-                authored_sources.append(source_path.read_text(encoding="utf-8"))
+                source_text = source_path.read_text(encoding="utf-8")
+                authored_sources.append(source_text)
+                authored_source_entries.append(
+                    (source_path.relative_to(root).as_posix(), source_text)
+                )
             except (OSError, UnicodeDecodeError):
                 continue
+        legacy_runner_pattern = re.compile(
+            r"\buseActionRunner(?:\s*<[^>\n]+>)?\s*\(\s*(['\"])"
+            r"[a-z][a-z0-9_-]{0,63}\1",
+            re.IGNORECASE,
+        )
+        strict_runner_pattern = re.compile(
+            r"\buseDecodedActionRunner(?:\s*<[^>\n]+>)?\s*\(\s*(['\"])"
+            r"[a-z][a-z0-9_-]{0,63}\1",
+            re.IGNORECASE,
+        )
+        missing_strict_decoder_pattern = re.compile(
+            r"\buseDecodedActionRunner(?:\s*<[^>\n]+>)?\s*\(\s*(['\"])"
+            r"[a-z][a-z0-9_-]{0,63}\1\s*,\s*(?:undefined|null)\b",
+            re.IGNORECASE,
+        )
+        direct_action_pattern = re.compile(
+            r"\b(?:client\s*\.\s*)?(?:invokeAction|createActionRunner)\s*\(\s*(['\"])"
+            r"[a-z][a-z0-9_-]{0,63}\1",
+            re.IGNORECASE,
+        )
+        checked_source_entries: list[tuple[str, str]] = []
+        for relative_path, source_text in authored_source_entries:
+            checked_source = re.sub(r"/\*.*?\*/", "", source_text, flags=re.DOTALL)
+            checked_source = re.sub(r"//.*$", "", checked_source, flags=re.MULTILINE)
+            checked_source_entries.append((relative_path, checked_source))
+            if direct_action_pattern.search(checked_source):
+                gaps.append(
+                    (
+                        relative_path,
+                        "requested workflow UI calls invokeAction/createActionRunner directly; use "
+                        "the canonical useDecodedActionRunner(name, decoder) hook so result-schema "
+                        "validation and AppKit-owned visible error handling cannot be bypassed",
+                    )
+                )
+            if legacy_runner_pattern.search(checked_source):
+                gaps.append(
+                    (
+                        relative_path,
+                        "requested workflow uses legacy useActionRunner(...); UI-consumed results must "
+                        "use useDecodedActionRunner(name, taggedDecoder) so schema drift fails visibly",
+                    )
+                )
+            if missing_strict_decoder_pattern.search(checked_source):
+                gaps.append(
+                    (
+                        relative_path,
+                        "useDecodedActionRunner(...) receives a null/undefined decoder; pass a tagged "
+                        "decoder built with decodeActionResult(...) so schema drift fails visibly",
+                    )
+                )
+            for strict_match in strict_runner_pattern.finditer(checked_source):
+                strict_arguments = _typescript_call_arguments(checked_source, strict_match)
+                if not re.search(r"\bdecodeActionResult\s*\(", strict_arguments):
+                    gaps.append(
+                        (
+                            relative_path,
+                            "useDecodedActionRunner(...) does not tag a real decoder through "
+                            "decodeActionResult(...); raw casts or unconditional ok results do not "
+                            "prove producer/consumer schema parity",
+                        )
+                    )
+        if referenced_actions and not any(
+            strict_runner_pattern.search(source_text)
+            for _relative_path, source_text in checked_source_entries
+        ):
+            gaps.append(
+                (
+                    "src/",
+                    "requested workflow has no useDecodedActionRunner(name, taggedDecoder) call; "
+                    "successful action payloads are not protected from producer/consumer schema drift",
+                )
+            )
         authored_sources.extend(action_sources)
         has_save = any(re.search(r"\bsaveRecord\s*\(", text) for text in authored_sources)
         has_reopen = any(
