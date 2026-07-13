@@ -168,6 +168,23 @@ def test_site_image_worker_bridge_caps_two_distinct_successes(tmp_path, monkeypa
     ]
 
 
+def test_site_image_worker_bridge_uses_explicit_docker_shared_parent(tmp_path):
+    class FakeStore:
+        def _resolve_business_file(self, business, relative):
+            return tmp_path / "businesses" / business / relative
+
+    shared_parent = tmp_path / "operator-workspace-home" / ".takyon-worker-bridges"
+    with core._site_image_worker_bridge(
+        store=FakeStore(),
+        business="lumen",
+        idempotency_prefix="taste-run-2",
+        parent_dir=shared_parent,
+    ) as bridge:
+        assert bridge.root.parent == shared_parent.resolve()
+        assert bridge.root.is_dir()
+    assert not bridge.root.exists()
+
+
 def test_taste_landing_asset_contract_requires_generated_hero_and_supporting_images(tmp_path):
     root = tmp_path / "product" / "site"
     receipts = root / ".takyon" / "site-images"

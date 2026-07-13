@@ -6037,8 +6037,20 @@ def _site_image_worker_bridge(
     store: "TakyonStore",
     business: str,
     idempotency_prefix: str,
+    parent_dir: Path,
 ):
-    root = Path(tempfile.mkdtemp(prefix=f"takyon-site-image-{_slugify(business)}-"))
+    parent = Path(parent_dir).resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+    # Docker Desktop cannot bind arbitrary /private/var/folders paths into its VM. Keep the
+    # ephemeral bridge beside the mounted workspace HOME (outside businesses/) so the same /Users
+    # file-sharing rail as the product scratch is used on Mac without entering durable business sync.
+    root = Path(
+        tempfile.mkdtemp(prefix=f"takyon-site-image-{_slugify(business)}-", dir=str(parent))
+    )
     bridge = _SiteImageWorkerBridge(
         store=store,
         business=business,
@@ -36756,6 +36768,7 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         store=active_store,
                         business=business,
                         idempotency_prefix=idempotency_key,
+                        parent_dir=business_root.parent.parent / ".takyon-worker-bridges",
                     )
                 )
             # ONE wall-clock budget for the entire coding task.  Turn-cap, build-fix, and Docker
