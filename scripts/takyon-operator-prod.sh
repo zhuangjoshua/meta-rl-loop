@@ -2443,9 +2443,9 @@ spawn_console_shell_windows() {
   fi
   printf -v root_quoted '%q' "$ROOT"
   if [[ -n "$business" ]]; then
-    tail_command="$(shell_join env TAKYON_OPERATOR_TARGET="$TARGET" TAKYON_SESSION_USER_ID="$operator_user_id" TAKYON_WORKER_POOL_ID="$session_pool_id" TAKYON_WORKER_POOL_EXCLUSIVE="$session_pool_exclusive" ./scripts/takyon-operator-prod.sh "$subcommand" "$business")"
+    tail_command="$(shell_join env TAKYON_OPERATOR_TARGET="$TARGET" TAKYON_SESSION_USER_ID="$operator_user_id" TAKYON_OPERATOR_TASKS_VIA_WORKER=1 TAKYON_WORKER_POOL_ID="$session_pool_id" TAKYON_WORKER_POOL_EXCLUSIVE="$session_pool_exclusive" ./scripts/takyon-operator-prod.sh "$subcommand" "$business")"
   else
-    tail_command="$(shell_join env TAKYON_OPERATOR_TARGET="$TARGET" TAKYON_SESSION_USER_ID="$operator_user_id" TAKYON_WORKER_POOL_ID="$session_pool_id" TAKYON_WORKER_POOL_EXCLUSIVE="$session_pool_exclusive" ./scripts/takyon-operator-prod.sh "$subcommand")"
+    tail_command="$(shell_join env TAKYON_OPERATOR_TARGET="$TARGET" TAKYON_SESSION_USER_ID="$operator_user_id" TAKYON_OPERATOR_TASKS_VIA_WORKER=1 TAKYON_WORKER_POOL_ID="$session_pool_id" TAKYON_WORKER_POOL_EXCLUSIVE="$session_pool_exclusive" ./scripts/takyon-operator-prod.sh "$subcommand")"
   fi
   command_text="cd $root_quoted && $tail_command"
   local index=0
@@ -2620,6 +2620,10 @@ cmd_console() {
   fi
   rm -f "$worker_ready_file"
   record_active_local_worker_pool "$worker_pid" "$session_pool_id" >/dev/null || true
+  # This console has now proven its session-owned worker is ready.  The shell must opt long-running
+  # authority tools into that durable worker lane; otherwise a business-bound shell rejects them as
+  # inline authority calls even though the worker it owns is healthy and waiting.
+  export TAKYON_OPERATOR_TASKS_VIA_WORKER=1
 
   cmd_overview
   echo

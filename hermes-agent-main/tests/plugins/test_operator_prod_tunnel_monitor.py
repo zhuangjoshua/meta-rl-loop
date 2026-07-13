@@ -755,6 +755,17 @@ def test_additional_console_shells_stay_bound_to_their_own_pool():
     # explicit inherited identity must therefore win over process-global discovery.
     assert 'TAKYON_WORKER_POOL_ID="$session_pool_id"' in spawn
     assert 'TAKYON_WORKER_POOL_EXCLUSIVE="$session_pool_exclusive"' in spawn
+    assert "TAKYON_OPERATOR_TASKS_VIA_WORKER=1" in spawn
+
+
+def test_console_enables_operator_task_deferral_only_after_its_worker_is_ready():
+    script = _script_source()
+    console = script[script.index("cmd_console() {") : script.index("\ncmd_vps_worker() {")]
+
+    ready = console.index('record_active_local_worker_pool "$worker_pid" "$session_pool_id"')
+    enable = console.index("export TAKYON_OPERATOR_TASKS_VIA_WORKER=1")
+    shell = console.index('run_console_shell "$shell_mode" "$business"')
+    assert ready < enable < shell
 
 
 def test_tunnel_monitor_fails_loud_without_the_mac_lock_tool():
