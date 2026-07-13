@@ -2524,6 +2524,35 @@ class EnvironmentProvisioner:
                                         "staged rev has no hermes-agent-main/ runtime tree"))
             return ProvisionResult(self.name, "deploy", tuple(receipts))
 
+        # Deployed hosts are archive trees, not Git checkouts. Seal the staged runtime with the
+        # same release identity contract consumed by claim_scope.runtime_release_sha() before any
+        # service restarts; otherwise a correctly archived worker cannot prove which revision it
+        # is executing and must fail closed. The web bundle is host-preserved on this code-only
+        # rail, so this manifest intentionally records only the immutable source/tree identity.
+        runtime_tree_sha = _git("rev-parse", f"{sha}:hermes-agent-main") or ""
+        if not runtime_tree_sha:
+            receipts.append(StepReceipt(
+                "code_revision", STATUS_ERROR, "deploy",
+                f"could not resolve hermes-agent-main tree for staged rev {short}",
+            ))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+        (src_tree / ".takyon-deploy-artifact.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "source_revision": sha,
+                    "repository_tree": tree_sha,
+                    "runtime_path": "hermes-agent-main",
+                    "runtime_tree": runtime_tree_sha,
+                    "prepared_at_unix": int(time.time()),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
         ds: dict[str, Any] = {}
         try:
             import yaml

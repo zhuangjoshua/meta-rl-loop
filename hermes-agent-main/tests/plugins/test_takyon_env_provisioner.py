@@ -1379,6 +1379,10 @@ def test_dev_deploy_stages_every_host_then_migrates_before_any_restart():
     assert "validateNativeTasteSkill" in source
     assert "unavailable (optional)" in source
     assert "agent-browser" not in source
+    assert 'src_tree / ".takyon-deploy-artifact.json"' in source
+    assert '"source_revision": sha' in source
+    assert '"runtime_tree": runtime_tree_sha' in source
+    assert source.index('.takyon-deploy-artifact.json') < stage_singletons
 
 
 def test_takyon_env_restart_subcommand_registered():
