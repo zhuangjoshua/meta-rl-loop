@@ -72,7 +72,6 @@ function preflightChildEnv({ browserNone = false } = {}) {
 
 const SITE_IMAGE_BRIDGE_TIMEOUT_MS = 240_000;
 const TASTE_PREFLIGHT_MAX_CALLS = 2;
-const TASTE_PREFLIGHT_DIR = "/workspace/.takyon-preflight";
 const TASTE_PREFLIGHT_CHROMIUM = "/usr/bin/chromium";
 const TASTE_PREFLIGHT_PREVIEW_TIMEOUT_MS = 20_000;
 const TASTE_PREFLIGHT_CHROMIUM_TIMEOUT_MS = 45_000;
@@ -80,6 +79,10 @@ const TASTE_PREFLIGHT_VIEWPORTS = Object.freeze([
   Object.freeze({ name: "desktop", width: 1440, height: 900 }),
   Object.freeze({ name: "mobile", width: 390, height: 844 }),
 ]);
+
+function tastePreflightDir(cwd) {
+  return path.join(path.resolve(cwd), ".takyon-preflight");
+}
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -338,6 +341,7 @@ async function captureTasteViewport({ cwd, url, viewport, outputPath, profileDir
 
 async function renderTasteLandingPreflight(cwd) {
   const distIndex = path.join(cwd, "dist", "index.html");
+  const preflightDir = tastePreflightDir(cwd);
   try {
     await fs.access(distIndex);
     await fs.access(TASTE_PREFLIGHT_CHROMIUM);
@@ -348,15 +352,15 @@ async function renderTasteLandingPreflight(cwd) {
     throw new Error(`Taste render preflight requires Chromium at ${TASTE_PREFLIGHT_CHROMIUM}`);
   }
 
-  await fs.rm(TASTE_PREFLIGHT_DIR, { recursive: true, force: true });
-  await fs.mkdir(TASTE_PREFLIGHT_DIR, { recursive: true, mode: 0o700 });
+  await fs.rm(preflightDir, { recursive: true, force: true });
+  await fs.mkdir(preflightDir, { recursive: true, mode: 0o700 });
   const profileRoot = path.join("/tmp", `takyon-taste-preflight-${randomUUID()}`);
   let preview = null;
   try {
     preview = await startVitePreview(cwd);
     const screenshots = [];
     for (const viewport of TASTE_PREFLIGHT_VIEWPORTS) {
-      const outputPath = path.join(TASTE_PREFLIGHT_DIR, `landing-${viewport.name}.png`);
+      const outputPath = path.join(preflightDir, `landing-${viewport.name}.png`);
       const profileDir = path.join(profileRoot, viewport.name);
       await fs.mkdir(profileDir, { recursive: true, mode: 0o700 });
       await captureTasteViewport({ cwd, url: preview.url, viewport, outputPath, profileDir });
@@ -984,7 +988,7 @@ async function main() {
     // verification scratch, never business source. Remove them before stdout lets the parent sync
     // the mounted workspace; the parent repeats this cleanup after forced-timeout container exits.
     if (siteImageMcpServer) {
-      await fs.rm(TASTE_PREFLIGHT_DIR, { recursive: true, force: true });
+      await fs.rm(tastePreflightDir(cwd), { recursive: true, force: true });
     }
   }
 

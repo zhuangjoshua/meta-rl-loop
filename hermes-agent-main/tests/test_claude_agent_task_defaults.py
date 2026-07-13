@@ -2669,7 +2669,8 @@ def test_claude_agent_task_registers_bounded_direct_chromium_taste_preflight():
 
     # Rendering is deterministic and owned by the tool: fixed output paths and dimensions, a
     # loopback-only strict-port Vite preview, and Chromium invoked directly without the daemon CLI.
-    assert 'const TASTE_PREFLIGHT_DIR = "/workspace/.takyon-preflight";' in text
+    assert 'return path.join(path.resolve(cwd), ".takyon-preflight");' in text
+    assert "const preflightDir = tastePreflightDir(cwd);" in text
     assert 'Object.freeze({ name: "desktop", width: 1440, height: 900 })' in text
     assert 'Object.freeze({ name: "mobile", width: 390, height: 844 })' in text
     assert 'path.join(cwd, "node_modules", ".bin", "vite")' in text
