@@ -523,6 +523,13 @@ def test_claude_agent_task_includes_public_landing_composition_contract_for_prod
 def test_claude_agent_task_includes_visual_craft_contract_for_product_site(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
+    strategy = tmp_path / "businesses" / "pupcoach" / "research" / "strategy.md"
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        "# PupCoach strategy\n\n## ICP / audience\nApartment dog owners.\n\n"
+        "## Core task\nTurn a barking log into a weekly training plan.\n",
+        encoding="utf-8",
+    )
 
     def fake_process(*, payload: dict[str, object], **kwargs):
         captured["payload"] = payload
@@ -581,6 +588,11 @@ def test_claude_agent_task_includes_visual_craft_contract_for_product_site(tmp_p
     assert "`MOTION_INTENSITY` 1-3 means NO automatic animation" in instruction
     assert "`whileInView`" in instruction
     assert "prefers-reduced-motion" in instruction
+    assert "Runtime-injected canonical business brief" in instruction
+    assert '"strategy_path": "research/strategy.md"' in instruction
+    assert "Apartment dog owners" in instruction
+    assert "Turn a barking log into a weekly training plan" in instruction
+    assert "substitutes a generic or different audience" in instruction
 
     # Every npm package the visual contract names MUST be pinned in the scaffold's own
     # package.json: worker-added dependencies are force-restored away on every surface
@@ -592,6 +604,30 @@ def test_claude_agent_task_includes_visual_craft_contract_for_product_site(tmp_p
     pinned = set(scaffold_pkg.get("dependencies") or {})
     for named_dep in ("lucide-react", "framer-motion"):
         assert named_dep in pinned
+
+
+def test_worker_business_brief_context_bounds_every_prompt_field(tmp_path):
+    store = _FakeStore(tmp_path)
+    strategy = tmp_path / "businesses" / "pupcoach" / "research" / "strategy.md"
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        "s" * (takyon_core._WORKER_BUSINESS_BRIEF_MAX_CHARS + 100),
+        encoding="utf-8",
+    )
+
+    context = takyon_core._worker_business_brief_context(
+        store,
+        "pupcoach",
+        {
+            "name": "n" * (takyon_core._WORKER_BUSINESS_NAME_MAX_CHARS + 100),
+            "goal": "g" * (takyon_core._WORKER_BUSINESS_GOAL_MAX_CHARS + 100),
+        },
+    )
+
+    assert "n" * (takyon_core._WORKER_BUSINESS_NAME_MAX_CHARS + 1) not in context
+    assert "g" * (takyon_core._WORKER_BUSINESS_GOAL_MAX_CHARS + 1) not in context
+    assert "s" * (takyon_core._WORKER_BUSINESS_BRIEF_MAX_CHARS + 1) not in context
+    assert context.count("[truncated]") == 3
 
 
 def test_mobile_worker_contract_bans_emoji_iconography():
@@ -1092,11 +1128,19 @@ def test_claude_agent_task_refreshes_docker_product_site_from_canonical_readback
     outer_home = tmp_path / "outer-home"
     workspace = outer_home / "businesses" / "latexflow" / "product" / "site"
     workspace.mkdir(parents=True, exist_ok=True)
+    strategy = outer_home / "businesses" / "latexflow" / "research" / "strategy.md"
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        "# LatexFlow strategy\n\n## ICP\nField engineers documenting site visits.\n",
+        encoding="utf-8",
+    )
     store = _FakeStore(outer_home)
     store._workspace_root_override = outer_home
     refresh_calls: list[dict[str, object]] = []
+    worker_payloads: list[dict[str, object]] = []
 
     def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int, business: str = "", operator_user_id: str = ""):
+        worker_payloads.append(dict(payload))
         return ["docker", "run"], payload, str(tmp_path), {}
 
     def fake_process(*, payload: dict[str, object], cwd: str, **kwargs):
@@ -1174,6 +1218,72 @@ def test_claude_agent_task_refreshes_docker_product_site_from_canonical_readback
     assert len(refresh_calls) == 1
     assert refresh_calls[0]["store_root"] != str(outer_home)
     assert "canonical worker landing" in refresh_calls[0]["landing"]
+    assert len(worker_payloads) == 1
+    assert "Runtime-injected canonical business brief" in str(worker_payloads[0]["instruction"])
+    assert "Field engineers documenting site visits" in str(worker_payloads[0]["instruction"])
+
+
+def test_docker_worker_injects_strategy_from_mounted_canonical_business(tmp_path, monkeypatch):
+    outer_home = tmp_path / "outer-home"
+    workspace = outer_home / "businesses" / "latexflow" / "product" / "site"
+    workspace.mkdir(parents=True, exist_ok=True)
+    strategy = outer_home / "businesses" / "latexflow" / "research" / "strategy.md"
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        "# LatexFlow strategy\n\n## ICP\nField engineers documenting site visits.\n",
+        encoding="utf-8",
+    )
+    store = _FakeStore(outer_home)
+    assert store._workspace_root_override is None
+    assert store._sync_business_workspace_remote("latexflow") == "synced"
+    worker_payloads: list[dict[str, object]] = []
+
+    def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, **_kwargs):
+        worker_payloads.append(dict(payload))
+        assert str(workspace_path).startswith(str(takyon_storage._workspace_scratch_parent(None)))
+        return ["docker", "run"], payload, str(tmp_path), {}
+
+    def fake_process(**_kwargs):
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="worker deliberately stopped")
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: True)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(
+        takyon_core,
+        "_reserve_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_in_docker", fake_docker_runner)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-mounted-brief",
+                "install": False,
+                "refresh_surface": False,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert len(worker_payloads) == 1
+    assert "Runtime-injected canonical business brief" in str(worker_payloads[0]["instruction"])
+    assert "Field engineers documenting site visits" in str(worker_payloads[0]["instruction"])
 
 
 def test_run_claude_agent_task_in_docker_uses_host_user_and_container_only_tmp_home(tmp_path, monkeypatch):
