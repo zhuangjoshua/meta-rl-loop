@@ -256,12 +256,33 @@ PRODUCT_BUILD_GATE_CONTRACT = """Customer-facing product build gate (HARD):
 """
 TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT = """Taste landing rendered-viewport preflight (HARD):
 - This is the initial public landing pass. Source inspection alone is not visual proof.
-- After `npm run build` and `npm run typecheck` pass, serve the built app locally and use the installed `agent-browser --executable-path /usr/bin/chromium --args '--no-sandbox,--disable-dev-shm-usage'` rail to render `/` at BOTH 1440x900 desktop and 390x844 mobile.
-- Save each screenshot to the absolute paths `/workspace/.takyon-preflight/landing-desktop.png` and `/workspace/.takyon-preflight/landing-mobile.png` (relative paths resolve inside the browser daemon's temp directory), read each image with the Read tool, and inspect the actual first viewport. The header + hero must form one deliberate first-screen composition: headline, support, and primary CTA visible; no accidental early next-section intrusion; no clipped or empty composition. A deliberately visible continuation is allowed only when the Design Read explains it and the first screen still reads complete.
-- If either render fails, edit the landing and repeat build/typecheck plus both rendered checks. Do not claim visual inspection without reading both screenshots.
-- Stop the local server, close the browser session, and remove `.takyon-preflight/` before finishing. A missing browser executable, failed screenshot, unread screenshot, or unverified viewport is BLOCKED, not success.
+- After `npm run build` and `npm run typecheck` pass, call `business_render_landing_preflight`. Do not start Vite, Chromium, or agent-browser with Bash: this bounded tool starts one loopback-only Vite preview, invokes Chromium directly, captures `/` at BOTH 1440x900 desktop and 390x844 mobile, and stops every child process before returning.
+- The tool returns `/workspace/.takyon-preflight/landing-desktop.png` and `/workspace/.takyon-preflight/landing-mobile.png`. Read each image with the Read tool and inspect the actual first viewport. The header + hero must form one deliberate first-screen composition: headline, support, and primary CTA visible; no accidental early next-section intrusion; no clipped or empty composition. A deliberately visible continuation is allowed only when the Design Read explains it and the first screen still reads complete.
+- If either render fails visual review, edit the landing, repeat build/typecheck, and use the tool's one remaining call to render both viewports again. The tool is capped at two calls for this Taste session. Do not claim visual inspection without reading both screenshots.
+- Leave the screenshots available until you have Read them; the SDK and parent remove `.takyon-preflight/` before durable workspace sync. A missing tool/browser executable, failed screenshot, unread screenshot, or unverified viewport is BLOCKED, not success.
 - Use only local loopback URLs. Browser rendering is verification, never provider access, deployment, or an external network call.
 """
+_TASTE_PREFLIGHT_DIRNAME = ".takyon-preflight"
+
+
+def _remove_taste_preflight_artifacts(workspace_path: Path) -> None:
+    """Remove reserved visual-QA scratch before any business workspace sync."""
+    target = Path(workspace_path) / _TASTE_PREFLIGHT_DIRNAME
+    try:
+        if target.is_symlink() or target.is_file():
+            target.unlink(missing_ok=True)
+        elif target.exists():
+            shutil.rmtree(target)
+    except OSError as exc:
+        raise TakyonError(
+            f"could not remove reserved Taste preflight scratch before workspace sync: {exc}"
+        ) from exc
+    if os.path.lexists(target):
+        raise TakyonError(
+            "reserved Taste preflight scratch still exists before workspace sync"
+        )
+
+
 TASTE_LANDING_IMAGE_CONTRACT = """Taste landing generated-asset contract (HARD):
 - This same Taste session has one additional tool: `business_generate_site_image`. It is bound to this business, Safebox money-gated, and capped at exactly two distinct successful image slugs; it returns only local `/generated/<slug>.png` paths.
 - After the Design Read and before completing the landing, call it for exactly TWO art-directed images: one real hero visual and one supporting visual. Use the brief, chosen foundation, palette, crop, material, lighting, and exact page role in each prompt. No baked-in text, UI labels, logos, watermarks, browser chrome, fake product controls, generic filler, or stock hotlinks.
@@ -36971,6 +36992,8 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         active_store,
                         f"preserving timed-out Claude worker source for business:{business}",
                     )
+                    if taste_guidance_active:
+                        _remove_taste_preflight_artifacts(workspace_path)
                     try:
                         partial_sync_status = active_store._sync_business_workspace_remote(business)
                     except Exception:
@@ -37002,6 +37025,11 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                     proc = None
                     stdout = ""
                     stderr = ""
+                # The SDK helper removes this after the same Taste session has Read both PNGs. This
+                # parent-side pass is the forced-timeout/crash backstop and runs before every later
+                # durable sync or read-back comparison.
+                if taste_guidance_active:
+                    _remove_taste_preflight_artifacts(workspace_path)
                 if proc is not None:
                     stdout = proc.stdout.strip()
                     stderr = proc.stderr.strip()

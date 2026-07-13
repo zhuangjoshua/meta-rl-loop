@@ -110,7 +110,8 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     assert "`DESIGN_VARIANCE`, `MOTION_INTENSITY`, and `VISUAL_DENSITY`" in landing_pass
     assert "persist that one-line Design Read" in landing_pass
     assert "`product/site/DESIGN.md` as the canonical design source" in landing_pass
-    assert "agent-browser + Chromium" in landing_pass
+    assert "business_render_landing_preflight" in landing_pass
+    assert "do not start Vite, Chromium, or agent-browser yourself" in landing_pass
     assert "1440x900 and 390x844" in landing_pass
     assert "no accidental early next-section intrusion" in landing_pass
     assert "max_turns: 60" in landing_pass
@@ -235,15 +236,32 @@ def test_taste_skill_is_byte_exact_pinned_upstream_implementation():
 def test_taste_landing_worker_has_real_desktop_and_mobile_render_preflight():
     contract = takyon_core.TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT
     assert "Source inspection alone is not visual proof" in contract
+    assert "business_render_landing_preflight" in contract
+    assert "Do not start Vite, Chromium, or agent-browser with Bash" in contract
     assert "1440x900" in contract
     assert "390x844" in contract
-    assert "read each image with the Read tool" in contract
+    assert "Read each image with the Read tool" in contract
     assert "no accidental early next-section intrusion" in contract
     dockerfile = (
         HERMES_ROOT.parent / "deploy" / "argon-alpha-14" / "takyon-claude-worker.Dockerfile"
     ).read_text(encoding="utf-8")
     assert "chromium" in dockerfile
     assert "agent-browser@0.26.0" in dockerfile
+
+
+def test_taste_render_scratch_cleanup_never_follows_symlinks(tmp_path):
+    workspace = tmp_path / "site"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    (workspace / ".takyon-preflight").symlink_to(outside, target_is_directory=True)
+
+    takyon_core._remove_taste_preflight_artifacts(workspace)
+
+    assert not (workspace / ".takyon-preflight").exists()
+    assert marker.read_text(encoding="utf-8") == "keep"
 
 
 def test_product_owner_and_design_command_route_taste_only_to_the_initial_landing():
@@ -257,6 +275,8 @@ def test_product_owner_and_design_command_route_taste_only_to_the_initial_landin
         assert "`timeout_ms: 900000`" in text
         assert "`guidance_skills: []`" in text
         assert "DESIGN.md" in text
+        assert "business_render_landing_preflight" in text
+        assert "agent-browser" in text
 
     assert 'guidance_skills: ["claude-design"]' not in product
     assert "do not use an Open Design template" in product

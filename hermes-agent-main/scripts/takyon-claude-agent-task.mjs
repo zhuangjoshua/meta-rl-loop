@@ -2,6 +2,8 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import net from "node:net";
 import { fileURLToPath } from "node:url";
 
 const PROGRESS_PREFIX = "TAKYON_SDK_EVENT ";
@@ -45,7 +47,39 @@ function sandboxedBashCommand(command) {
   return `/usr/bin/env -i PATH=${SANDBOX_PATH} HOME=/tmp /bin/bash -lc ${JSON.stringify(script)}`;
 }
 
+function isManualTastePreflightCommand(command) {
+  const script = String(command || "");
+  return (
+    /\bagent-browser\b/i.test(script) ||
+    /(?:^|[\s/])chromium(?:-browser)?\b/i.test(script) ||
+    /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?preview\b/i.test(script) ||
+    /\b(?:npx\s+)?vite\s+preview\b/i.test(script)
+  );
+}
+
+function preflightChildEnv({ browserNone = false } = {}) {
+  const env = {
+    PATH: SANDBOX_PATH,
+    HOME: "/tmp",
+    ...(browserNone ? { BROWSER: "none" } : {}),
+  };
+  for (const key of ["LANG", "LC_ALL"]) {
+    const value = String(process.env[key] || "").trim();
+    if (value) env[key] = value;
+  }
+  return env;
+}
+
 const SITE_IMAGE_BRIDGE_TIMEOUT_MS = 240_000;
+const TASTE_PREFLIGHT_MAX_CALLS = 2;
+const TASTE_PREFLIGHT_DIR = "/workspace/.takyon-preflight";
+const TASTE_PREFLIGHT_CHROMIUM = "/usr/bin/chromium";
+const TASTE_PREFLIGHT_PREVIEW_TIMEOUT_MS = 20_000;
+const TASTE_PREFLIGHT_CHROMIUM_TIMEOUT_MS = 45_000;
+const TASTE_PREFLIGHT_VIEWPORTS = Object.freeze([
+  Object.freeze({ name: "desktop", width: 1440, height: 900 }),
+  Object.freeze({ name: "mobile", width: 390, height: 844 }),
+]);
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -83,8 +117,271 @@ async function invokeSiteImageBridge(bridgeDir, args) {
   }
 }
 
-function createSiteImageMcpServer({ createSdkMcpServer, tool, z, bridgeDir }) {
+function childHasExited(child) {
+  return !child || child.exitCode !== null || child.signalCode !== null;
+}
+
+function signalProcessTree(child, signal) {
+  if (!child?.pid) return;
+  try {
+    // Every preflight child is detached into its own process group. Signalling the group also
+    // reaches Vite or Chromium helper processes instead of leaking daemons.
+    process.kill(-child.pid, signal);
+  } catch (error) {
+    if (error?.code !== "ESRCH" && !childHasExited(child)) {
+      try {
+        child.kill(signal);
+      } catch {
+        // The process may have exited between the state check and signal delivery.
+      }
+    }
+  }
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (childHasExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer = null;
+    const onClose = () => {
+      if (timer) clearTimeout(timer);
+      resolve(true);
+    };
+    timer = setTimeout(() => {
+      child.removeListener("close", onClose);
+      resolve(childHasExited(child));
+    }, timeoutMs);
+    child.once("close", onClose);
+  });
+}
+
+async function stopProcessTree(child) {
+  if (!child?.pid) return;
+  signalProcessTree(child, "SIGTERM");
+  await waitForChildExit(child, 2_000);
+  // The leader can exit before a descendant. Always address the original process group once more.
+  signalProcessTree(child, "SIGKILL");
+  if (!childHasExited(child)) await waitForChildExit(child, 2_000);
+}
+
+function collectBoundedOutput(stream, limit = 8_000) {
+  let output = "";
+  stream?.setEncoding?.("utf8");
+  stream?.on?.("data", (chunk) => {
+    if (output.length >= limit) return;
+    output += String(chunk || "").slice(0, limit - output.length);
+  });
+  return () => output;
+}
+
+function reserveLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+      const address = server.address();
+      const port = address && typeof address === "object" ? address.port : 0;
+      server.close((error) => {
+        if (error) reject(error);
+        else if (!port) reject(new Error("could not reserve a loopback preview port"));
+        else resolve(port);
+      });
+    });
+  });
+}
+
+async function fetchWithTimeout(url, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      method: "GET",
+      redirect: "manual",
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function waitForVitePreview({ child, url, readOutput }) {
+  const deadline = Date.now() + TASTE_PREFLIGHT_PREVIEW_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (childHasExited(child)) {
+      throw new Error(`Vite preview exited before it was ready: ${compactText(readOutput(), 1200)}`);
+    }
+    try {
+      const response = await fetchWithTimeout(url, 1_000);
+      if (response.ok) return;
+    } catch {
+      // Vite has not bound the loopback socket yet.
+    }
+    await delay(100);
+  }
+  throw new Error(
+    `Vite preview did not become ready within ${TASTE_PREFLIGHT_PREVIEW_TIMEOUT_MS}ms: ` +
+    compactText(readOutput(), 1200)
+  );
+}
+
+async function startVitePreview(cwd) {
+  const port = await reserveLoopbackPort();
+  const url = `http://127.0.0.1:${port}/`;
+  const vite = path.join(cwd, "node_modules", ".bin", "vite");
+  const child = spawn(
+    vite,
+    ["preview", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+    {
+      cwd,
+      // Product-owned Vite config executes in this child. Never inherit the parent SDK's short-TTL
+      // operator capability or provider-broker configuration into product-controlled code.
+      env: preflightChildEnv({ browserNone: true }),
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+  const readStdout = collectBoundedOutput(child.stdout);
+  const readStderr = collectBoundedOutput(child.stderr);
+  const readOutput = () => `${readStdout()}\n${readStderr()}`.trim();
+  try {
+    await Promise.race([
+      waitForVitePreview({ child, url, readOutput }),
+      new Promise((_, reject) => child.once("error", reject)),
+    ]);
+    return { child, url };
+  } catch (error) {
+    await stopProcessTree(child);
+    throw error;
+  }
+}
+
+async function runBoundedChild(command, args, { cwd, timeoutMs }) {
+  const child = spawn(command, args, {
+    cwd,
+    // Chromium renders product-controlled code; it gets no SDK/broker capability environment.
+    env: preflightChildEnv(),
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const readStdout = collectBoundedOutput(child.stdout);
+  const readStderr = collectBoundedOutput(child.stderr);
+  let timer = null;
+  try {
+    const result = await new Promise((resolve, reject) => {
+      timer = setTimeout(() => {
+        signalProcessTree(child, "SIGKILL");
+        reject(new Error(`${path.basename(command)} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    if (result.code !== 0) {
+      throw new Error(
+        `${path.basename(command)} exited ${result.code ?? result.signal}: ` +
+        compactText(`${readStdout()}\n${readStderr()}`, 1600)
+      );
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+    await stopProcessTree(child);
+  }
+}
+
+async function assertPngViewport(filePath, expectedWidth, expectedHeight) {
+  const header = await fs.readFile(filePath);
+  const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  if (header.length < 24 || !header.subarray(0, 8).equals(pngSignature)) {
+    throw new Error(`Chromium did not create a valid PNG at ${filePath}`);
+  }
+  const width = header.readUInt32BE(16);
+  const height = header.readUInt32BE(20);
+  if (width !== expectedWidth || height !== expectedHeight) {
+    throw new Error(
+      `Chromium rendered ${width}x${height} at ${filePath}; expected ` +
+      `${expectedWidth}x${expectedHeight}`
+    );
+  }
+}
+
+async function captureTasteViewport({ cwd, url, viewport, outputPath, profileDir }) {
+  await runBoundedChild(
+    TASTE_PREFLIGHT_CHROMIUM,
+    [
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-background-networking",
+      "--disable-background-timer-throttling",
+      "--disable-default-apps",
+      "--disable-extensions",
+      "--disable-gpu",
+      "--disable-renderer-backgrounding",
+      "--disable-sync",
+      "--force-color-profile=srgb",
+      "--force-device-scale-factor=1",
+      "--hide-scrollbars",
+      "--metrics-recording-only",
+      "--no-default-browser-check",
+      "--no-first-run",
+      "--run-all-compositor-stages-before-draw",
+      "--virtual-time-budget=2500",
+      `--user-data-dir=${profileDir}`,
+      `--window-size=${viewport.width},${viewport.height}`,
+      `--screenshot=${outputPath}`,
+      url,
+    ],
+    { cwd, timeoutMs: TASTE_PREFLIGHT_CHROMIUM_TIMEOUT_MS }
+  );
+  await fs.chmod(outputPath, 0o600);
+  await assertPngViewport(outputPath, viewport.width, viewport.height);
+}
+
+async function renderTasteLandingPreflight(cwd) {
+  const distIndex = path.join(cwd, "dist", "index.html");
+  try {
+    await fs.access(distIndex);
+    await fs.access(TASTE_PREFLIGHT_CHROMIUM);
+  } catch (error) {
+    if (error?.path === distIndex) {
+      throw new Error("Taste render preflight requires a built dist/index.html; run npm run build first");
+    }
+    throw new Error(`Taste render preflight requires Chromium at ${TASTE_PREFLIGHT_CHROMIUM}`);
+  }
+
+  await fs.rm(TASTE_PREFLIGHT_DIR, { recursive: true, force: true });
+  await fs.mkdir(TASTE_PREFLIGHT_DIR, { recursive: true, mode: 0o700 });
+  const profileRoot = path.join("/tmp", `takyon-taste-preflight-${randomUUID()}`);
+  let preview = null;
+  try {
+    preview = await startVitePreview(cwd);
+    const screenshots = [];
+    for (const viewport of TASTE_PREFLIGHT_VIEWPORTS) {
+      const outputPath = path.join(TASTE_PREFLIGHT_DIR, `landing-${viewport.name}.png`);
+      const profileDir = path.join(profileRoot, viewport.name);
+      await fs.mkdir(profileDir, { recursive: true, mode: 0o700 });
+      await captureTasteViewport({ cwd, url: preview.url, viewport, outputPath, profileDir });
+      screenshots.push({
+        name: viewport.name,
+        width: viewport.width,
+        height: viewport.height,
+        path: outputPath,
+      });
+    }
+    return {
+      success: true,
+      route: "/",
+      screenshots,
+      instruction: "Read both returned PNG paths with the Read tool and inspect the actual first viewports.",
+    };
+  } finally {
+    await stopProcessTree(preview?.child);
+    await fs.rm(profileRoot, { recursive: true, force: true });
+  }
+}
+
+function createSiteImageMcpServer({ createSdkMcpServer, tool, z, bridgeDir, cwd }) {
   if (!bridgeDir) return null;
+  let preflightCalls = 0;
   return createSdkMcpServer({
     name: "takyon_site_image",
     version: "1.0.0",
@@ -92,7 +389,10 @@ function createSiteImageMcpServer({ createSdkMcpServer, tool, z, bridgeDir }) {
     instructions:
       "Taste landing image generation is mandatory. After the Design Read, generate exactly two " +
       "distinct page-role assets: one hero and one supporting image. Use every returned public_path " +
-      "in an <img data-takyon-landing-asset=\"hero|supporting\">. The tool is capped and money-gated.",
+      "in an <img data-takyon-landing-asset=\"hero|supporting\">. The image tool is capped and " +
+      "money-gated. After build and typecheck pass, call business_render_landing_preflight instead " +
+      "of starting agent-browser or a preview daemon yourself. Read both returned screenshots, fix " +
+      "the source if needed, rebuild, and use the one remaining preflight call for the final render.",
     tools: [
       tool(
         "business_generate_site_image",
@@ -109,6 +409,46 @@ function createSiteImageMcpServer({ createSdkMcpServer, tool, z, bridgeDir }) {
           try {
             const result = await invokeSiteImageBridge(bridgeDir, args);
             return { content: [{ type: "text", text: JSON.stringify(result) }] };
+          } catch (error) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: String(error?.message || error) }],
+            };
+          }
+        },
+        { alwaysLoad: true }
+      ),
+      tool(
+        "business_render_landing_preflight",
+        "Deterministically render the built landing at desktop 1440x900 and mobile 390x844. " +
+          "Starts and stops one loopback-only Vite preview, invokes /usr/bin/chromium directly, " +
+          "and writes /workspace/.takyon-preflight/landing-{desktop,mobile}.png. Maximum two calls " +
+          "for this Taste session. Call only after npm run build and npm run typecheck pass; then " +
+          "Read both returned PNGs and inspect them visually.",
+        {},
+        async () => {
+          preflightCalls += 1;
+          if (preflightCalls > TASTE_PREFLIGHT_MAX_CALLS) {
+            return {
+              isError: true,
+              content: [{
+                type: "text",
+                text: `Taste landing render preflight is capped at ${TASTE_PREFLIGHT_MAX_CALLS} calls`,
+              }],
+            };
+          }
+          try {
+            const result = await renderTasteLandingPreflight(cwd);
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  ...result,
+                  call: preflightCalls,
+                  remaining_calls: TASTE_PREFLIGHT_MAX_CALLS - preflightCalls,
+                }),
+              }],
+            };
           } catch (error) {
             return {
               isError: true,
@@ -515,6 +855,7 @@ async function main() {
     tool,
     z,
     bridgeDir: siteImageBridgeDir,
+    cwd,
   });
 
   let text = "";
@@ -556,7 +897,12 @@ async function main() {
               ...(allowBash ? ["Bash"] : []),
             ],
             ...(siteImageMcpServer
-              ? { allowedTools: ["mcp__takyon_site_image__business_generate_site_image"] }
+              ? {
+                  allowedTools: [
+                    "mcp__takyon_site_image__business_generate_site_image",
+                    "mcp__takyon_site_image__business_render_landing_preflight",
+                  ],
+                }
               : {}),
             ...(siteImageMcpServer
               ? { mcpServers: { takyon_site_image: siteImageMcpServer } }
@@ -582,6 +928,20 @@ async function main() {
                   };
                 }
                 const updatedInput = { ...(toolInput || {}) };
+                const rawCommand = typeof updatedInput.command === "string"
+                  ? updatedInput.command
+                  : typeof updatedInput.cmd === "string"
+                    ? updatedInput.cmd
+                    : "";
+                if (siteImageMcpServer && isManualTastePreflightCommand(rawCommand)) {
+                  return {
+                    behavior: "deny",
+                    message:
+                      "Taste landing preview/browser commands are disabled. Run build and typecheck, " +
+                      "then call business_render_landing_preflight and Read both returned PNGs.",
+                    toolUseID: options.toolUseID
+                  };
+                }
                 if (typeof updatedInput.command === "string") {
                   updatedInput.command = sandboxedBashCommand(updatedInput.command);
                 } else if (typeof updatedInput.cmd === "string") {
@@ -620,6 +980,12 @@ async function main() {
   } finally {
     process.removeListener("SIGTERM", requestParentAbort);
     process.removeListener("SIGINT", requestParentAbort);
+    // Screenshots must remain available while this SDK session can Read them, but they are
+    // verification scratch, never business source. Remove them before stdout lets the parent sync
+    // the mounted workspace; the parent repeats this cleanup after forced-timeout container exits.
+    if (siteImageMcpServer) {
+      await fs.rm(TASTE_PREFLIGHT_DIR, { recursive: true, force: true });
+    }
   }
 
   process.stdout.write(JSON.stringify({
@@ -637,6 +1003,7 @@ async function main() {
 export {
   buildPrompt,
   progressEventFromSdkMessage,
+  renderTasteLandingPreflight,
 };
 
 const isMainModule = process.argv[1]

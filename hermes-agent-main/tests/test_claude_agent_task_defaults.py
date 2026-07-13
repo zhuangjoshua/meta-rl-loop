@@ -2656,6 +2656,50 @@ def test_claude_agent_task_registers_site_image_mcp_only_for_bridge_config():
     assert "OPENAI_API_KEY" not in text
 
 
+def test_claude_agent_task_registers_bounded_direct_chromium_taste_preflight():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
+    text = script.read_text(encoding="utf-8")
+
+    # The same Taste-only MCP server owns both the image and rendered-viewport tools. The renderer
+    # is explicit in the SDK allowlist and cannot be called more than twice in one SDK session.
+    assert '"business_render_landing_preflight"' in text
+    assert '"mcp__takyon_site_image__business_render_landing_preflight"' in text
+    assert "const TASTE_PREFLIGHT_MAX_CALLS = 2;" in text
+    assert "preflightCalls > TASTE_PREFLIGHT_MAX_CALLS" in text
+
+    # Rendering is deterministic and owned by the tool: fixed output paths and dimensions, a
+    # loopback-only strict-port Vite preview, and Chromium invoked directly without the daemon CLI.
+    assert 'const TASTE_PREFLIGHT_DIR = "/workspace/.takyon-preflight";' in text
+    assert 'Object.freeze({ name: "desktop", width: 1440, height: 900 })' in text
+    assert 'Object.freeze({ name: "mobile", width: 390, height: 844 })' in text
+    assert 'path.join(cwd, "node_modules", ".bin", "vite")' in text
+    assert '["preview", "--host", "127.0.0.1"' in text
+    assert '"--strictPort"' in text
+    assert 'const TASTE_PREFLIGHT_CHROMIUM = "/usr/bin/chromium";' in text
+    assert "TASTE_PREFLIGHT_CHROMIUM," in text
+    assert "`--screenshot=${outputPath}`" in text
+    assert 'spawn("agent-browser"' not in text
+
+    # Product-controlled Vite config and browser code must never inherit the SDK's operator-session
+    # capability or provider-broker environment. Both children receive the same minimal env.
+    assert "env: preflightChildEnv({ browserNone: true })" in text
+    assert "env: preflightChildEnv()," in text
+    assert 'PATH: SANDBOX_PATH' in text
+    assert 'HOME: "/tmp"' in text
+    assert "env: { ...process.env" not in text
+    assert "env: process.env" not in text
+    assert "const result = await renderTasteLandingPreflight(cwd);" in text
+    assert "isManualTastePreflightCommand(rawCommand)" in text
+    assert "Taste landing preview/browser commands are disabled" in text
+
+    # Both preview and Chromium get their own process groups and the preview is always torn down.
+    assert "detached: true" in text
+    assert 'process.kill(-child.pid, signal)' in text
+    assert "Always address the original process group once more" in text
+    assert "await stopProcessTree(preview?.child);" in text
+    assert "await assertPngViewport(outputPath, viewport.width, viewport.height);" in text
+
+
 def test_claude_agent_task_script_passes_beta_disable_to_child_env():
     script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
     text = script.read_text(encoding="utf-8")
