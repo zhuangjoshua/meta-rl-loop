@@ -90,6 +90,10 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     assert "distinct Log in and Sign up" in contract
     assert "full-width application workspace" in contract
     assert "persist it through `saveRecord(...)`" in contract
+    assert "one effective action per state" in contract
+    assert "Every delete requires an explicit customer confirmation" in contract
+    assert "Never cast `saveRecord`, `getRecord`, or `deleteRecord`" in contract
+    assert "as many as your workflow needs" in contract
     assert "product-specific UI visuals" in contract
     assert "Quantified outcome claims" in contract
 

@@ -4163,6 +4163,9 @@ def _subuser_app_worker_contract_block(
         lines.append(
             "- FINAL WORKFLOW GATE IS ACTIVE: publish will refuse an unchanged app-home starter or a product without a UI-referenced real action, ctx.generate(...), saveRecord(...), and listRecords/getRecord/useRecords reopen wiring. Finish those source-backed behaviors before reporting success."
         )
+        lines.append(
+            "- When the requested workflow names revise/update or delete, that gate also requires an exact record.ref update path and explicit destructive confirmation. Present one working mutation control per state and reconcile the visible record after it succeeds."
+        )
     if routes:
         lines.append(f"- Current declared product routes: {', '.join(routes)}")
     if declared_runtime_features:
@@ -4197,6 +4200,8 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of the scaffold wrappers in `src/lib/takyon.ts` and `src/lib/hooks.ts`, and build your own product pages around those shared client/hooks unless you are intentionally changing that rail's logic.",
         "- Records use runtime-owned references: `saveRecord(...)`, `listRecords(...)`, and record reads return `record.ref`; pass that exact ref to `readRecord(ref)` or `getRecord(ref)`, `saveRecord({ ref, data, ...fields })`, and `deleteRecord(ref)`. `saveRecord` is an upsert, so preserve and send the complete `data` value on create and update. Never update with raw `id`/`record_id`, never derive a record locator from a title, route slug, form value, or a second generated id, and never use positional `getRecord(type, id)` in generated product code. Record responses retain `{ record }` and also mirror that same record at the top level for compatibility; choose one response shape and use it consistently.",
+        "- Mutation UX must have one effective action per state. A revision result gets one update control wired to `saveRecord({ ref: existing.ref, data: completeUpdatedData })`; never render the create-save control inside that revision result. After update/delete, reconcile the returned record or await the records refresh before showing success, so the visible detail cannot revert to stale data. Every delete requires an explicit customer confirmation before `deleteRecord(ref)`.",
+        "- Use the bundled runtime-client TypeScript signatures directly. Never cast `saveRecord`, `getRecord`, or `deleteRecord` through `any`/`unknown` to bypass the create-vs-update RecordRef contract.",
         "- Backend actions compile in the server action environment, not the browser environment. Type every handler as `(payload: TakyonActionPayload, ctx: TakyonActionContext)`; do not annotate either parameter as `any`, and do not use DOM/WebWorker globals that the action type environment does not provide.",
         "- Scaffold-owned and force-rewritten from the bundled scaffold on EVERY product build/kit materialize — never edit these; any change to them is silently reverted before the build: "
         + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
@@ -4209,7 +4214,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Every created or generated customer artifact must survive tab and route changes: persist it through `saveRecord(...)`, render lists from `listRecords(...)`/`useRecords(...)`, and keep stale successful records visible if a refresh transiently fails. Component-local action results and browser storage are not durable product state.",
         "- The landing must show polished, product-specific UI visuals as the visitor scrolls (real representations of the workflow, not generic icon cards) and a prominent proof section. The canonical route in `src/main.tsx` renders `SocialProofMarquee` outside the worker-owned landing, so every signed-out landing keeps truthful Coscale portfolio proof even when `src/screens/landing.tsx` is redesigned. Quantified outcome claims must come from verified research or real product data; never fabricate statistics, testimonials, or customer counts.",
         "- The public header is a visually separated, full-viewport-width banner (border/background/shadow with responsive edge padding) and remains structurally static within signed-out and signed-in states. Do not constrain it to the landing content width or vary its options by public page.",
-        "- Pricing may display only the exact published plan price, billing interval, and usage limits exported in `surfaceContext.plans`; never invent a promotion, introductory price, discount, trial, feature allowance, or quota that checkout/billing does not enforce. Use `defaultPlanPriceLabel()` and `defaultPlanLimitLabels()`.",
+        "- Pricing may display only the exact published plan price, billing interval, and usage limits exported in `surfaceContext.plans`; never invent a promotion, introductory price, discount, trial, feature allowance, or quota that checkout/billing does not enforce. Use `defaultPlanPriceLabel()` and `defaultPlanLimitLabels()`. For action-backed features, `unlimited`, `as many as you need`, `as many as your workflow needs`, `no limits`, and equivalent unbounded paraphrases are false unless the exact plan allowance is actually unbounded.",
         "- Keep the canonical AppKit interaction-sound installer in `src/lib/interaction-sounds.ts`; it provides a quiet click sound for enabled buttons as progressive enhancement and must never block an interaction.",
         "- Takyon app products do NOT support a free plan or free tier. There is exactly one paid entitlement; an unentitled viewer has no usable access and must be routed to subscribe. Do not invent free-tier copy or UI: no \"Free plan\", \"Free · N/month\", \"N free per month\", \"free account\", \"free trial\", \"no credit card\", or freemium framing anywhere (landing, app home, profile, or pricing). Show the single paid plan and a subscribe-first gate; the free shape is unsupported runtime-side, so advertising it ships a promise the product cannot keep.",
         "- The single plan is a MONTHLY paid subscription billed every month. There is NO trial of any kind — not a free trial and not a paid trial. Never show \"free trial\", \"N-day free trial\", \"trial\", \"Start Free Trial\", \"try free\", \"no credit card\", or any countdown/trial CTA, even attached to the paid plan. The subscribe CTA must read like \"Subscribe\" / \"Subscribe — $N/month\", and price copy must say \"/month\".",
@@ -7566,7 +7571,14 @@ _PRODUCT_INVENTORY_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("provider_or_compile", re.compile(r"\b(?:compile|pdf|git sync|provider|api key|env var)\b", re.IGNORECASE)),
 )
 _PRODUCT_CLAIM_SNIPPET_PATTERN = re.compile(
-    r"(\$[0-9]|/month|/mo\b|\b(?:free|pro|team|unlimited|included|live|available|yes|pricing|checkout|auth|login|magic[- ]?link|compile|pdf|git sync)\b)",
+    r"(\$[0-9]|/month|/mo\b|\bas\s+many\b|\bno\s+(?:usage|generation|action)\s+limits?\b|"
+    r"\b(?:free|pro|team|unlimited|included|live|available|yes|pricing|checkout|auth|login|magic[- ]?link|compile|pdf|git sync)\b)",
+    re.IGNORECASE,
+)
+_PRODUCT_UNBOUNDED_ACTION_USAGE_PATTERN = re.compile(
+    r"\bunlimited\b|"
+    r"\bas\s+many\b[^\n.!?]{0,120}\bas\b[^\n.!?]{0,80}\b(?:need|needs|want|wants|like)\b|"
+    r"\b(?:no|without)\s+(?:usage|generation|action)\s+limits?\b",
     re.IGNORECASE,
 )
 _PRETEND_PRODUCT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -8619,16 +8631,19 @@ def _requested_workflow_completeness_markers(
     gaps: list[tuple[str, str]] = []
     app_home = root / "src" / "screens" / "app-home.tsx"
     scaffold_home = _subuser_app_scaffold_source_dir() / "src" / "screens" / "app-home.tsx"
+    app_home_text = ""
     try:
         if not app_home.is_file():
             gaps.append(("src/screens/app-home.tsx", "requested workflow app screen is missing"))
-        elif scaffold_home.is_file() and app_home.read_bytes() == scaffold_home.read_bytes():
-            gaps.append(
-                (
-                    "src/screens/app-home.tsx",
-                    "requested workflow app screen is byte-identical to the seeded access starter",
+        else:
+            app_home_text = app_home.read_text(encoding="utf-8")
+            if scaffold_home.is_file() and app_home.read_bytes() == scaffold_home.read_bytes():
+                gaps.append(
+                    (
+                        "src/screens/app-home.tsx",
+                        "requested workflow app screen is byte-identical to the seeded access starter",
+                    )
                 )
-            )
     except OSError as exc:
         gaps.append(("src/screens/app-home.tsx", f"could not verify requested workflow app screen: {exc}"))
 
@@ -8673,6 +8688,45 @@ def _requested_workflow_completeness_markers(
                 (
                     "src/screens/app-home.tsx",
                     "requested workflow does not both save and reopen customer work through the records rail",
+                )
+            )
+        requested_workflow = _surface_text(surface)
+        requires_update = re.search(
+            r"\b(?:revise|revision|edit|update)\b", requested_workflow, re.IGNORECASE
+        ) is not None
+        requires_delete = re.search(
+            r"\b(?:delete|remove)\b", requested_workflow, re.IGNORECASE
+        ) is not None
+        has_ref_update = has_save and (
+            re.search(r"\b(?:ref|recordRef|record_ref)\s*:", app_home_text) is not None
+            or re.search(r"\.\s*(?:ref|recordRef|record_ref)\s*=", app_home_text) is not None
+        )
+        if requires_update and not has_ref_update:
+            gaps.append(
+                (
+                    "src/screens/app-home.tsx",
+                    "requested revise/update workflow does not pass the exact saved record.ref "
+                    "back to saveRecord(...) for an in-place update",
+                )
+            )
+        has_delete = re.search(r"\bdeleteRecord\s*\(", app_home_text) is not None
+        has_delete_confirmation = re.search(
+            r"\b(?:window\s*\.\s*)?confirm\s*\(|"
+            r"\b(?:AlertDialog|ConfirmDialog|confirmDelete|deleteConfirmation|pendingDelete)\b",
+            app_home_text,
+        ) is not None
+        if requires_delete and not has_delete:
+            gaps.append(
+                (
+                    "src/screens/app-home.tsx",
+                    "requested delete workflow does not call deleteRecord(record.ref)",
+                )
+            )
+        elif requires_delete and not has_delete_confirmation:
+            gaps.append(
+                (
+                    "src/screens/app-home.tsx",
+                    "requested destructive delete has no explicit customer confirmation",
                 )
             )
     except Exception as exc:
@@ -9544,12 +9598,13 @@ def _validate_product_surface_contract(
         )
     if (
         ("actions" in runtime_features or "actions" in runtime_integrations)
-        and re.search(r"\bunlimited\b", claim_text, re.IGNORECASE)
+        and _PRODUCT_UNBOUNDED_ACTION_USAGE_PATTERN.search(claim_text)
     ):
         return (
             False,
-            "product source promises unlimited action-backed usage, but product actions are "
-            "quota- and budget-gated; replace unlimited claims with the exact plan allowance",
+            "product source promises unbounded action-backed usage, but product actions are "
+            "quota- and budget-gated; replace unlimited/as-many-as-needed claims with the exact "
+            "plan allowance",
         )
     return True, ""
 

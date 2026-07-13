@@ -370,7 +370,36 @@ def test_action_backed_product_refuses_unlimited_usage_claim(tmp_path):
     ok, blocker = _validate_product_surface_contract(inventory, surface)
 
     assert ok is False
-    assert "unlimited action-backed usage" in blocker
+    assert "unbounded action-backed usage" in blocker
+
+
+def test_action_backed_product_refuses_as_many_as_needed_usage_claim(tmp_path):
+    site = tmp_path / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text(
+        "<main>Generate as many briefs as your workflow needs.</main>\n"
+        "<script>client.checkout({ plan_key: 'pro' });</script>\n",
+        encoding="utf-8",
+    )
+    (site / "actions").mkdir()
+    (site / "actions" / "generate.ts").write_text(
+        "export default async (payload, ctx) => ctx.generate(payload);\n", encoding="utf-8"
+    )
+    (site / "src").mkdir()
+    (site / "src" / "app.ts").write_text(
+        'client.invokeAction("generate", {});\n', encoding="utf-8"
+    )
+    surface = {
+        "runtime_features": ["auth", "account", "checkout", "actions"],
+        "routes": [{"path": "/"}, {"path": "/app"}],
+        "metadata": {"product_workflow": {"actions": [{"name": "generate", "trigger": "http"}]}},
+    }
+
+    inventory = _bounded_product_inventory(tmp_path, "product/site", surface=surface)
+    ok, blocker = _validate_product_surface_contract(inventory, surface)
+
+    assert ok is False
+    assert "unlimited/as-many-as-needed" in blocker
 
 
 def test_pinned_stack_gate_treats_legacy_alias_as_vite_stack(tmp_path):
@@ -592,6 +621,72 @@ def test_requested_workflow_gate_accepts_action_generate_and_records_wiring(tmp_
     assert takyon_core._requested_workflow_unfinished_blocker(
         {"status": "passed", "inventory": {"risk_markers": []}}
     ) == ""
+
+
+def test_requested_record_mutations_require_ref_update_and_confirmed_delete(tmp_path, monkeypatch):
+    from plugins.takyon import core as takyon_core
+
+    scaffold = tmp_path / "scaffold"
+    site = tmp_path / "product" / "site"
+    scaffold_home = scaffold / "src" / "screens" / "app-home.tsx"
+    site_home = site / "src" / "screens" / "app-home.tsx"
+    action = site / "actions" / "generate-brief.ts"
+    scaffold_home.parent.mkdir(parents=True)
+    site_home.parent.mkdir(parents=True)
+    action.parent.mkdir(parents=True)
+    scaffold_home.write_text("export const AppHomeScreen = () => <main>Starter</main>;\n", encoding="utf-8")
+    site_home.write_text(
+        'const runner = useActionRunner("generate-brief");\n'
+        "async function saveAndReopen() { await client.saveRecord({ record_type: 'brief', data: {} }); return client.listRecords({ type: 'brief' }); }\n",
+        encoding="utf-8",
+    )
+    action.write_text(
+        "export default async function generateBrief(payload, ctx) {\n"
+        "  return ctx.generate({ messages: [{ role: 'user', content: String(payload) }] });\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(takyon_core, "_subuser_app_scaffold_source_dir", lambda: scaffold)
+    surface = {
+        "metadata": {
+            "workflow_completion_required": True,
+            "product_workflow": {
+                "primary_job": "Generate, save, reopen, revise, and delete client briefs.",
+                "actions": [{"name": "generate-brief", "trigger": "http"}],
+            },
+        }
+    }
+
+    missing = takyon_core._requested_workflow_completeness_markers(site, surface)
+    snippets = [marker["snippet"] for marker in missing]
+    assert any("exact saved record.ref" in snippet for snippet in snippets)
+    assert any("does not call deleteRecord" in snippet for snippet in snippets)
+
+    site_home.write_text(
+        'const runner = useActionRunner("generate-brief");\n'
+        "async function saveAndReopen() { await client.saveRecord({ record_type: 'brief', data: {} }); return client.listRecords({ type: 'brief' }); }\n"
+        "async function updateAndDelete(record, data) {\n"
+        "  const payload = { ref: record.ref, data };\n"
+        "  await client.saveRecord(payload);\n"
+        "  await client.deleteRecord(record.ref);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    unsafe_delete = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any(
+        "no explicit customer confirmation" in marker["snippet"]
+        for marker in unsafe_delete
+    )
+
+    site_home.write_text(
+        site_home.read_text(encoding="utf-8").replace(
+            "await client.deleteRecord(record.ref);",
+            "if (window.confirm('Delete this brief?')) await client.deleteRecord(record.ref);",
+        ),
+        encoding="utf-8",
+    )
+
+    assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
 
 
 def test_requested_live_action_execution_verification_is_durable_and_live_build_scoped(tmp_path):
