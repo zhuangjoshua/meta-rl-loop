@@ -5984,8 +5984,43 @@ class _SiteImageWorkerBridge:
                     and str(prior.get("public_path") or "") == f"/generated/{slug}.png"
                     and asset_path.is_file()
                 ):
+                    try:
+                        self._capture_asset_snapshot(slug)
+                    except Exception:
+                        # Repair a previously charged provider-format mismatch before the worker
+                        # starts. The worker is allowed to reuse an existing public_path without
+                        # calling the image tool, so request-time repair alone is insufficient.
+                        prior_key = str(prior.get("idempotency_key") or "").strip()
+                        prior_prompt = str(prior.get("prompt") or "").strip()
+                        if not prior_key or not prior_prompt:
+                            continue
+                        repaired_raw = _handle_business_generate_site_image_with_store(
+                            {
+                                "business": self.business,
+                                "slug": slug,
+                                "prompt": prior_prompt,
+                                "aspect_ratio": str(prior.get("aspect_ratio") or "16:9"),
+                                "purpose": str(prior.get("purpose") or "site imagery"),
+                                # Reuse the receipt's original key: the handler takes its no-charge
+                                # idempotent repair branch and must never issue another provider call.
+                                "idempotency_key": prior_key,
+                                "reason": "repair prior Taste site-image encoding",
+                                "actor": "taste-worker-bridge",
+                            },
+                            self.store,
+                        )
+                        try:
+                            repaired = (
+                                json.loads(repaired_raw)
+                                if isinstance(repaired_raw, str)
+                                else dict(repaired_raw or {})
+                            )
+                            if not repaired.get("success"):
+                                continue
+                            self._capture_asset_snapshot(slug)
+                        except Exception:
+                            continue
                     self._successful_slugs.add(slug)
-                    self._capture_asset_snapshot(slug)
         try:
             os.chmod(self.root, 0o700)
             os.chmod(self.requests_dir, 0o700)
@@ -6036,7 +6071,12 @@ class _SiteImageWorkerBridge:
             except Exception:
                 prior = {}
             if prior.get("success") and str(prior.get("public_path") or "") == f"/generated/{slug}.png":
-                self._successful_slugs.add(slug)
+                try:
+                    self._capture_asset_snapshot(slug)
+                except Exception:
+                    pass
+                else:
+                    self._successful_slugs.add(slug)
         if slug not in self._successful_slugs and len(self._successful_slugs) >= _SITE_IMAGE_BRIDGE_MAX_IMAGES:
             raise TakyonError("Taste landing site-image cap is exactly two distinct images")
 
@@ -32126,6 +32166,65 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+_SITE_IMAGE_MAX_PROVIDER_BYTES = 32 * 1024 * 1024
+_SITE_IMAGE_MAX_PNG_BYTES = 64 * 1024 * 1024
+
+
+def _normalize_site_image_png(image_bytes: bytes) -> bytes:
+    """Decode one provider image and emit a real, validated PNG with no secret-bearing env."""
+    if not image_bytes:
+        raise TakyonError("site-image provider returned an empty image")
+    if len(image_bytes) > _SITE_IMAGE_MAX_PROVIDER_BYTES:
+        raise TakyonError("site-image provider output exceeds the 32 MiB decode limit")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise TakyonError("site-image PNG normalization requires ffmpeg")
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-i",
+                "pipe:0",
+                "-frames:v",
+                "1",
+                "-map_metadata",
+                "-1",
+                "-f",
+                "image2pipe",
+                "-c:v",
+                "png",
+                "pipe:1",
+            ],
+            input=image_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=45,
+            check=False,
+            env={
+                "PATH": f"{Path(ffmpeg).parent}:/usr/bin:/bin",
+                "HOME": "/tmp",
+                "LANG": "C",
+            },
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TakyonError("site-image PNG normalization timed out") from exc
+    if proc.returncode != 0:
+        detail = _truncate_text(proc.stderr.decode("utf-8", errors="replace"), 500)
+        raise TakyonError(f"site-image provider returned an undecodable image: {detail}")
+    png_bytes = bytes(proc.stdout or b"")
+    if (
+        len(png_bytes) < 512
+        or len(png_bytes) > _SITE_IMAGE_MAX_PNG_BYTES
+        or not png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    ):
+        raise TakyonError("site-image PNG normalization returned an invalid image")
+    return png_bytes
+
+
 def _handle_business_generate_site_image_with_store(args: dict, store: "TakyonStore") -> str:
     """Generate one business-owned site image through the gated Gemini site-image route.
 
@@ -32159,6 +32258,18 @@ def _handle_business_generate_site_image_with_store(args: dict, store: "TakyonSt
         receipt_abs = store._resolve_business_file(business, receipt_rel)
         prior = _read_existing_receipt(receipt_abs, idempotency_key)
         if prior is not None and asset_abs.exists():
+            prior_bytes = asset_abs.read_bytes()
+            if not prior_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                # Gemini may return JPEG even though the requested public contract is PNG. Repair a
+                # previously charged/idempotent result in place instead of charging for a new image.
+                prior_bytes = _normalize_site_image_png(prior_bytes)
+                _atomic_write_bytes(asset_abs, prior_bytes)
+                prior = {**prior, "bytes": len(prior_bytes), "format": "png"}
+                _atomic_write_text(
+                    receipt_abs,
+                    json.dumps(prior, ensure_ascii=False, indent=2) + "\n",
+                )
+                store._sync_business_workspace_remote(business)
             return tool_result(
                 {
                     "success": bool(prior.get("success", True)),
@@ -32197,8 +32308,9 @@ def _handle_business_generate_site_image_with_store(args: dict, store: "TakyonSt
                 raise TakyonError("Gemini site-image route returned invalid image bytes") from exc
             if not image_bytes:
                 raise TakyonError("Gemini site-image route returned an empty image")
-            _atomic_write_bytes(asset_abs, image_bytes)
-            return {"asset_path": asset_rel, "bytes": len(image_bytes)}
+            png_bytes = _normalize_site_image_png(image_bytes)
+            _atomic_write_bytes(asset_abs, png_bytes)
+            return {"asset_path": asset_rel, "bytes": len(png_bytes), "format": "png"}
 
         generated = gated_creative_call(
             _GEMINI_SITE_IMAGE,
@@ -32233,6 +32345,7 @@ def _handle_business_generate_site_image_with_store(args: dict, store: "TakyonSt
             "balance_credits": generated.get("balance_credits"),
             "reserved_credits": generated.get("reserved_credits"),
             "bytes": processed.get("bytes"),
+            "format": "png",
             "created_at": _now(),
         }
         _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
+import subprocess
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+
+import pytest
 
 from plugins.takyon import core, creative_provider_registry
 
@@ -35,7 +39,13 @@ def test_site_image_tool_writes_key_free_public_asset(tmp_path, monkeypatch):
             return None
 
     store = FakeStore()
-    encoded = base64.b64encode(b"site-image-bytes").decode("ascii")
+    provider_bytes = b"\xff\xd8\xff\xe0provider-jpeg"
+    png_bytes = b"\x89PNG\r\n\x1a\n" + (b"p" * 600)
+    encoded = base64.b64encode(provider_bytes).decode("ascii")
+
+    def fake_normalize(raw):
+        assert raw == provider_bytes
+        return png_bytes
 
     def fake_gated(spec, **kwargs):
         assert spec.canonical_id == "image:gemini-site"
@@ -56,6 +66,7 @@ def test_site_image_tool_writes_key_free_public_asset(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(core, "_store", lambda: store)
+    monkeypatch.setattr(core, "_normalize_site_image_png", fake_normalize)
     monkeypatch.setattr(creative_provider_registry, "gated_creative_call", fake_gated)
 
     result = json.loads(
@@ -81,7 +92,7 @@ def test_site_image_tool_writes_key_free_public_asset(tmp_path, monkeypatch):
         / "generated"
         / "hero-atmosphere.png"
     )
-    assert asset.read_bytes() == b"site-image-bytes"
+    assert asset.read_bytes() == png_bytes
     receipt = (
         tmp_path
         / "businesses"
@@ -92,8 +103,111 @@ def test_site_image_tool_writes_key_free_public_asset(tmp_path, monkeypatch):
         / "site-images"
         / "hero-atmosphere.json"
     )
-    assert json.loads(receipt.read_text(encoding="utf-8"))["credits_charged"] == 2
+    receipt_value = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_value["credits_charged"] == 2
+    assert receipt_value["bytes"] == len(png_bytes)
+    assert receipt_value["format"] == "png"
     assert call_order == ["workspace", "event"]
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
+def test_site_image_png_normalizer_transcodes_real_jpeg_bytes():
+    ffmpeg = shutil.which("ffmpeg")
+    assert ffmpeg
+    jpeg = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=1",
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-c:v",
+            "mjpeg",
+            "pipe:1",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+
+    png = core._normalize_site_image_png(jpeg)
+
+    assert jpeg.startswith(b"\xff\xd8\xff")
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert int.from_bytes(png[16:20], "big") == 64
+    assert int.from_bytes(png[20:24], "big") == 64
+
+
+def test_site_image_idempotent_result_repairs_mislabeled_jpeg_without_recharge(
+    tmp_path, monkeypatch
+):
+    class FakeStore:
+        @contextmanager
+        def _connect(self):
+            yield object()
+
+        def _ensure_business(self, _conn, business):
+            return {"slug": business, "mode": "live", "owner_user_id": "owner-1"}
+
+        def _resolve_business_file(self, business, relative):
+            return tmp_path / "businesses" / business / relative
+
+        def _sync_business_workspace_remote(self, business):
+            assert business == "lumen"
+            syncs.append(business)
+            return "synced"
+
+    store = FakeStore()
+    syncs: list[str] = []
+    asset = store._resolve_business_file(
+        "lumen", "product/site/public/generated/hero-atmosphere.png"
+    )
+    receipt = store._resolve_business_file(
+        "lumen", "product/site/.takyon/site-images/hero-atmosphere.json"
+    )
+    asset.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True)
+    asset.write_bytes(b"\xff\xd8\xff\xe0old-provider-jpeg")
+    receipt.write_text(
+        json.dumps(
+            {
+                "success": True,
+                "status": "created",
+                "idempotency_key": "lumen-site-image-v1",
+                "public_path": "/generated/hero-atmosphere.png",
+                "bytes": 24,
+            }
+        ),
+        encoding="utf-8",
+    )
+    repaired = b"\x89PNG\r\n\x1a\n" + (b"r" * 600)
+    monkeypatch.setattr(core, "_store", lambda: store)
+    monkeypatch.setattr(core, "_normalize_site_image_png", lambda _raw: repaired)
+
+    result = json.loads(
+        core.handle_business_generate_site_image(
+            {
+                "business": "lumen",
+                "slug": "hero-atmosphere",
+                "prompt": "A precise hero image.",
+                "idempotency_key": "lumen-site-image-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["idempotent"] is True
+    assert asset.read_bytes() == repaired
+    repaired_receipt = json.loads(receipt.read_text(encoding="utf-8"))
+    assert repaired_receipt["bytes"] == len(repaired)
+    assert repaired_receipt["format"] == "png"
+    assert syncs == ["lumen"]
 
 
 def test_site_image_tool_is_authority_only():
@@ -197,6 +311,67 @@ def test_site_image_worker_bridge_caps_two_distinct_successes(tmp_path, monkeypa
     hero.unlink()
     assert bridge.restore_generated_assets() == 2
     assert hero.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_site_image_worker_bridge_proactively_repairs_prior_jpeg_without_worker_request(
+    tmp_path, monkeypatch
+):
+    class FakeStore:
+        def _business_root(self, business, *, sync=True):
+            return tmp_path / "businesses" / business
+
+        def _resolve_business_file(self, business, relative):
+            return tmp_path / "businesses" / business / relative
+
+    store = FakeStore()
+    slug = "hero-atmosphere"
+    asset = store._resolve_business_file(
+        "lumen", f"product/site/public/generated/{slug}.png"
+    )
+    receipt = store._resolve_business_file(
+        "lumen", f"product/site/.takyon/site-images/{slug}.json"
+    )
+    asset.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True)
+    asset.write_bytes(b"\xff\xd8\xff\xe0old-provider-jpeg")
+    receipt.write_text(
+        json.dumps(
+            {
+                "success": True,
+                "slug": slug,
+                "public_path": f"/generated/{slug}.png",
+                "idempotency_key": "prior-site-image-key",
+                "prompt": "A repaired prior hero.",
+                "aspect_ratio": "16:9",
+                "purpose": "hero",
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def fake_repair(args, fake_store):
+        calls.append(str(args["slug"]))
+        asset.write_bytes(b"\x89PNG\r\n\x1a\n" + (b"r" * 600))
+        return json.dumps(
+            {"success": True, "slug": slug, "public_path": f"/generated/{slug}.png"}
+        )
+
+    monkeypatch.setattr(core, "_handle_business_generate_site_image_with_store", fake_repair)
+    bridge = core._SiteImageWorkerBridge(
+        store=store,
+        business="lumen",
+        idempotency_prefix="taste-repair-1",
+        root=tmp_path / "bridge-repair",
+    )
+    bridge.start()
+    try:
+        assert bridge.restore_generated_assets() == 1
+    finally:
+        assert bridge.close() is True
+
+    assert calls == [slug]
+    assert asset.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_site_image_worker_bridge_uses_explicit_docker_shared_parent(tmp_path):
