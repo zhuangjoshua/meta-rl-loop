@@ -5889,7 +5889,55 @@ class _SiteImageWorkerBridge:
         )
         self._handled: set[str] = set()
         self._successful_slugs: set[str] = set()
+        self._asset_snapshots: dict[str, tuple[bytes, str]] = {}
         self._attempts = 0
+
+    def _business_file_without_sync(self, relative: str) -> Path:
+        business_root = self.store._business_root(self.business, sync=False).resolve()
+        candidate = (business_root / _safe_relpath(relative, field="site-image bridge path")).resolve()
+        if business_root not in (candidate, *candidate.parents):
+            raise TakyonError("site-image bridge path escaped business root")
+        return candidate
+
+    def _capture_asset_snapshot(self, slug: str) -> None:
+        asset_path = self._business_file_without_sync(
+            f"product/site/public/generated/{slug}.png",
+        )
+        receipt_path = self._business_file_without_sync(
+            f"product/site/.takyon/site-images/{slug}.json",
+        )
+        image = asset_path.read_bytes()
+        receipt_text = receipt_path.read_text(encoding="utf-8")
+        receipt = json.loads(receipt_text)
+        if (
+            len(image) < 512
+            or not image.startswith(b"\x89PNG\r\n\x1a\n")
+            or not isinstance(receipt, Mapping)
+            or not receipt.get("success")
+            or str(receipt.get("public_path") or "") != f"/generated/{slug}.png"
+        ):
+            raise TakyonError("site-image handler did not persist a valid generated asset")
+        # Keep the authoritative provider output in parent memory, outside every container-writable
+        # path. The product worker may rebuild or replace its public tree after image generation;
+        # restoring this snapshot before the gate prevents that ordinary edit from deleting a paid,
+        # already-committed asset or making the final workspace sync remove it from canonical state.
+        self._asset_snapshots[slug] = (image, receipt_text)
+
+    def restore_generated_assets(self) -> int:
+        for slug, (image, receipt_text) in self._asset_snapshots.items():
+            _atomic_write_bytes(
+                self._business_file_without_sync(
+                    f"product/site/public/generated/{slug}.png",
+                ),
+                image,
+            )
+            _atomic_write_text(
+                self._business_file_without_sync(
+                    f"product/site/.takyon/site-images/{slug}.json",
+                ),
+                receipt_text,
+            )
+        return len(self._asset_snapshots)
 
     def start(self) -> None:
         self.requests_dir.mkdir(parents=True, exist_ok=True)
@@ -5916,6 +5964,7 @@ class _SiteImageWorkerBridge:
                     and asset_path.is_file()
                 ):
                     self._successful_slugs.add(slug)
+                    self._capture_asset_snapshot(slug)
         try:
             os.chmod(self.root, 0o700)
             os.chmod(self.requests_dir, 0o700)
@@ -5992,6 +6041,7 @@ class _SiteImageWorkerBridge:
         public_path = str(result.get("public_path") or "").strip()
         if public_path != f"/generated/{slug}.png":
             raise TakyonError("site-image handler returned an unexpected public path")
+        self._capture_asset_snapshot(slug)
         self._successful_slugs.add(slug)
         return {
             "success": True,
@@ -36990,6 +37040,10 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                             f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
                         )
                 if (sdk_result.get("success") or sdk_result.get("timed_out")) and taste_guidance_active:
+                    if site_image_bridge is not None:
+                        sdk_result["restored_taste_landing_assets"] = (
+                            site_image_bridge.restore_generated_assets()
+                        )
                     design_contract, design_contract_blocker = _read_taste_design_contract(
                         workspace_path
                     )

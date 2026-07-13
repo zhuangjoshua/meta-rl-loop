@@ -115,18 +115,41 @@ def test_site_image_capability_is_scoped_to_gemini_site_images():
 
 def test_site_image_worker_bridge_caps_two_distinct_successes(tmp_path, monkeypatch):
     class FakeStore:
+        def _business_root(self, business, *, sync=True):
+            return tmp_path / "businesses" / business
+
         def _resolve_business_file(self, business, relative):
             return tmp_path / "businesses" / business / relative
 
     calls: list[dict[str, object]] = []
 
-    def fake_generate(args, _store):
+    def fake_generate(args, fake_store):
         calls.append(dict(args))
+        slug = str(args["slug"])
+        asset = fake_store._resolve_business_file(
+            args["business"], f"product/site/public/generated/{slug}.png"
+        )
+        receipt = fake_store._resolve_business_file(
+            args["business"], f"product/site/.takyon/site-images/{slug}.json"
+        )
+        asset.parent.mkdir(parents=True, exist_ok=True)
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        asset.write_bytes(b"\x89PNG\r\n\x1a\n" + (b"x" * 600))
+        receipt.write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "slug": slug,
+                    "public_path": f"/generated/{slug}.png",
+                }
+            ),
+            encoding="utf-8",
+        )
         return json.dumps(
             {
                 "success": True,
-                "slug": args["slug"],
-                "public_path": f"/generated/{args['slug']}.png",
+                "slug": slug,
+                "public_path": f"/generated/{slug}.png",
             }
         )
 
@@ -170,6 +193,10 @@ def test_site_image_worker_bridge_caps_two_distinct_successes(tmp_path, monkeypa
         "taste-run-1:site-image:hero-atmosphere",
         "taste-run-1:site-image:supporting-detail",
     ]
+    hero = tmp_path / "businesses/lumen/product/site/public/generated/hero-atmosphere.png"
+    hero.unlink()
+    assert bridge.restore_generated_assets() == 2
+    assert hero.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_site_image_worker_bridge_uses_explicit_docker_shared_parent(tmp_path):
