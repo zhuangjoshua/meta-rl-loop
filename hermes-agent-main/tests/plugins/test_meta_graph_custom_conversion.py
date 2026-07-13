@@ -154,6 +154,28 @@ def test_purchase_rule_requires_private_event_and_exact_app_host():
     assert {"url": {"i_contains": "clipbook.coscale.app/app"}} in rule["and"]
 
 
+def test_purchase_event_name_is_stable_private_and_within_meta_limit():
+    key = b"k" * 32
+    first = meta_graph.derive_purchase_event_name(key, "clipbook")
+    assert first == meta_graph.derive_purchase_event_name(key, "clipbook")
+    assert first != meta_graph.derive_purchase_event_name(key, "notewave")
+    assert first.startswith("TakyonPurchase_")
+    assert len(first) == 40
+
+
+def test_purchase_rule_and_capi_reject_overlong_event_names(monkeypatch):
+    overlong = "TakyonPurchase_" + "a" * 26
+    with pytest.raises(ValueError, match="40-character"):
+        meta_graph.purchase_custom_conversion_rule(overlong, "clipbook.coscale.app")
+    monkeypatch.setattr(meta_graph, "_graph", lambda *args, **kwargs: pytest.fail("called Meta"))
+    with pytest.raises(ValueError, match="40-character"):
+        meta_graph.send_purchase_conversion_event(
+            "token", "123456", event_name=overlong, event_time=1_700_000_000,
+            event_id="event-1", event_source_url="https://clipbook.coscale.app/app",
+            user_data={"em": ["abc"]}, value=19.0, currency="usd",
+        )
+
+
 def test_capi_purchase_sends_one_server_event(monkeypatch):
     captured = {}
 

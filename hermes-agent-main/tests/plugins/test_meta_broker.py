@@ -439,6 +439,7 @@ def test_verified_stripe_checkout_emits_private_capi_purchase(monkeypatch):
         "sent": True, "event_id": "takyon-stripe:cs_1:evt_1", "events_received": 1,
     }
     assert captured["event_name"].startswith("TakyonPurchase_")
+    assert len(captured["event_name"]) <= 40
     assert captured["event_source_url"] == "https://clipbook.coscale.app/app?checkout=success"
     assert captured["user_data"] == {
         "em": [hashlib.sha256(b"buyer@example.com").hexdigest()]

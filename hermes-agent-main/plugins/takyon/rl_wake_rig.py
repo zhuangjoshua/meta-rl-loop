@@ -171,7 +171,7 @@ class RigSafebox:
 
     def meta_graph_ensure_custom_conversion(self, **kw: Any) -> dict[str, Any]:
         self.calls.append({"op": "ensure_custom_conversion", **{k: str(v)[:60] for k, v in kw.items()}})
-        event_name = f"TakyonPurchase_{str(kw.get('business') or 'rig'):0<32}"[:47]
+        event_name = f"TakyonPurchase_{str(kw.get('business') or 'rig'):0<25}"[:40]
         site_host = str(kw.get("site_hostname") or "")
         rule = json.dumps({
             "and": [
@@ -459,7 +459,7 @@ def seed_business(dsn: str, store: Any, slug: str) -> None:
         "custom_event_type": "PURCHASE",
         "pixel_id": "PIX-RIG-1",
         "rule": json.dumps({"and": [
-            {"event": {"eq": f"TakyonPurchase_{slug:0<32}"[:47]}},
+            {"event": {"eq": f"TakyonPurchase_{slug:0<25}"[:40]}},
             {"url": {"i_contains": f"{site_host}/app"}},
         ]}, sort_keys=True, separators=(",", ":")),
         "url_match": f"{site_host}/app",

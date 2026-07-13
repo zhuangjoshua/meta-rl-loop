@@ -413,6 +413,8 @@ def purchase_custom_conversion_rule(event_name: str, site_hostname: str) -> str:
     host = str(site_hostname or "").strip().lower().rstrip(".")
     if not event:
         raise ValueError("purchase custom conversion requires event_name")
+    if len(event) > 40:
+        raise ValueError("purchase custom conversion event_name exceeds Meta's 40-character limit")
     if not host or "/" in host or ":" in host:
         raise ValueError("purchase custom conversion requires a hostname")
     return json.dumps(
@@ -434,7 +436,9 @@ def derive_purchase_event_name(signing_key: bytes, business: str) -> str:
     if len(key) < 32 or not slug:
         raise ValueError("purchase event derivation requires a signing key and business")
     digest = hmac.new(key, f"meta-purchase-v1:{slug}".encode(), hashlib.sha256).hexdigest()
-    return f"TakyonPurchase_{digest[:32]}"
+    # Meta custom-event names are capped at 40 characters.  The fixed prefix is 15
+    # characters, leaving 25 hex characters (100 bits) for the private business boundary.
+    return f"TakyonPurchase_{digest[:25]}"
 
 
 def send_purchase_conversion_event(
@@ -462,6 +466,8 @@ def send_purchase_conversion_event(
     eid = str(event_id or "").strip()
     if not pixel.isdigit() or not name or not source_url or not eid:
         raise ValueError("CAPI purchase requires pixel_id, event_name, event_id, and source URL")
+    if len(name) > 40:
+        raise ValueError("CAPI purchase event_name exceeds Meta's 40-character limit")
     event = {
         "event_name": name,
         "event_time": int(event_time),
