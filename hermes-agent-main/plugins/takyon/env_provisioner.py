@@ -2637,8 +2637,15 @@ class EnvironmentProvisioner:
                     "const sdk = \"@anthropic-ai/claude-agent-sdk\"; "
                     "if (!pkg.dependencies?.[sdk] || !lock.packages?.[`node_modules/${sdk}`]) "
                     "throw new Error(\"Agent SDK dependency is not pinned\"); "
+                    "const root = await (await import(\"node:fs/promises\")).mkdtemp(\"/tmp/takyon-native-skill-\"); "
+                    "const path = await import(\"node:path\"); "
+                    "const nativeDir = path.join(root, \"skills\", \"design-taste-frontend\"); "
+                    "const fsp = await import(\"node:fs/promises\"); "
+                    "await fsp.mkdir(path.dirname(nativeDir), { recursive: true }); "
+                    "const canonicalDir = \"/takyon-runtime/skills/creative/taste-frontend\"; "
+                    "await fsp.symlink(canonicalDir, nativeDir, \"dir\"); "
                     "const { validateNativeTasteSkill } = await import(\"./scripts/takyon-claude-agent-task.mjs\"); "
-                    "await validateNativeTasteSkill();' >/dev/null",
+                    "await validateNativeTasteSkill({ nativeDir, canonicalDir });' >/dev/null",
                 ],
                 capture_output=True,
                 text=True,

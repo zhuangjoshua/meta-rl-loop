@@ -1549,7 +1549,7 @@ require_docker_for_worker() {
     --workdir /takyon-runtime \
     "$worker_image" \
     --input-type=module \
-    -e 'await import("@anthropic-ai/claude-agent-sdk"); const { validateNativeTasteSkill } = await import("./scripts/takyon-claude-agent-task.mjs"); await validateNativeTasteSkill();' \
+    -e 'import fs from "node:fs/promises"; import path from "node:path"; await import("@anthropic-ai/claude-agent-sdk"); const root = await fs.mkdtemp("/tmp/takyon-native-skill-"); const nativeDir = path.join(root, "skills", "design-taste-frontend"); await fs.mkdir(path.dirname(nativeDir), { recursive: true }); const canonicalDir = "/takyon-runtime/skills/creative/taste-frontend"; await fs.symlink(canonicalDir, nativeDir, "dir"); const { validateNativeTasteSkill } = await import("./scripts/takyon-claude-agent-task.mjs"); await validateNativeTasteSkill({ nativeDir, canonicalDir });' \
     >/dev/null 2>&1; then
     die "Claude worker runtime is missing the Agent SDK or pinned native Taste skill: $RUNTIME_DIR"
   fi
