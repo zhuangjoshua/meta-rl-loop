@@ -2601,9 +2601,16 @@ cmd_console() {
   export TAKYON_WORKER_POOL_ID="$session_pool_id"
   export TAKYON_WORKER_POOL_EXCLUSIVE="${TAKYON_WORKER_POOL_EXCLUSIVE:-1}"
   echo "Starting local worker pool: concurrency=$concurrency pool=$session_pool_id exclusive=$TAKYON_WORKER_POOL_EXCLUSIVE (log: $worker_log)"
+  # The operator shell and this console share the terminal foreground process group.  A user
+  # interrupt intended only for `/create` or `/product` must not also stop the session-owned worker
+  # and leave later jobs queued behind its still-live pool lease.  Start the worker in a separate
+  # session while retaining its exact PID so console cleanup can still TERM+drain only this pool.
   TAKYON_OPERATOR_TUNNELS_MANAGED=1 \
   TAKYON_WORKER_READY_FILE="$worker_ready_file" \
-    "$0" worker "$concurrency" --user-id "$(resolved_operator_user_id)" >"$worker_log" 2>&1 &
+    "$TAKYON_CLI_PYTHON" -c \
+      'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+      "$ROOT/scripts/takyon-operator-prod.sh" worker "$concurrency" \
+      --user-id "$(resolved_operator_user_id)" >"$worker_log" 2>&1 &
   worker_pid="$!"
   if ! wait_for_worker_preflight "$worker_pid" "$worker_ready_file" "$worker_log"; then
     worker_pid=""

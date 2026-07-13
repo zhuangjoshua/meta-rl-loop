@@ -1,9 +1,12 @@
 import os
+import signal
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -667,6 +670,58 @@ def test_console_wiring_requires_worker_ready_marker_before_shell():
     assert "TAKYON_WORKER_READY_FILE" not in worker
     assert 'tunnel_consumer_pid="$(current_shell_process_pid)"' in console
     assert "release_managed_tunnel_consumer" in console
+
+
+@pytest.mark.skipif(os.name != "posix", reason="console process groups are POSIX-only")
+def test_console_worker_isolated_from_foreground_shell_interrupts(tmp_path):
+    script = _script_source()
+    console = script[script.index("cmd_console() {") : script.index("\ncmd_vps_worker() {")]
+
+    assert '"$TAKYON_CLI_PYTHON" -c' in console
+    assert "os.setsid()" in console
+    assert 'os.execv(sys.argv[1], sys.argv[1:])' in console
+    assert '"$ROOT/scripts/takyon-operator-prod.sh" worker' in console
+    assert 'worker_pid="$!"' in console
+    assert 'gracefully_drain_worker_pid "$worker_pid"' in console
+
+    launcher = "import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])"
+    pid_file = tmp_path / "worker.pid"
+    driver_source = (
+        "import pathlib, signal, subprocess, sys, time; "
+        "signal.signal(signal.SIGINT, signal.SIG_IGN); "
+        f"p=subprocess.Popen([sys.executable, '-c', {launcher!r}, "
+        "sys.executable, '-c', 'import time; time.sleep(30)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(p.pid)); time.sleep(30)"
+    )
+    driver = subprocess.Popen(
+        [sys.executable, "-c", driver_source, str(pid_file)],
+        start_new_session=True,
+    )
+    worker_pid = None
+    try:
+        for _ in range(50):
+            if pid_file.exists():
+                worker_pid = int(pid_file.read_text())
+                break
+            time.sleep(0.02)
+        assert worker_pid is not None
+        for _ in range(50):
+            if os.getpgid(worker_pid) != os.getpgid(driver.pid):
+                break
+            time.sleep(0.02)
+        assert os.getpgid(worker_pid) != os.getpgid(driver.pid)
+
+        os.killpg(driver.pid, signal.SIGINT)
+        time.sleep(0.1)
+        os.kill(worker_pid, 0)
+    finally:
+        if worker_pid is not None:
+            try:
+                os.kill(worker_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        driver.terminate()
+        driver.wait(timeout=3)
 
 
 def test_parallel_consoles_never_stop_unrelated_local_worker_pools():
