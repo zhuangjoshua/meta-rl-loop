@@ -580,17 +580,14 @@ ensure_takyon_cli_runtime() {
 }
 
 run_takyon_cli() {
-  if takyon_cli_shim_ready; then
-    "$TAKYON_CLI_BIN" "$@"
-    return
-  fi
+  # Always import the CLI from this sealed checkout. A reused/copied venv can contain a
+  # console-script shim whose editable-install pointer targets a different worktree; invoking that
+  # shim would silently run stale code while advertising this checkout's release SHA.
   PYTHONPATH="$RUNTIME_DIR${PYTHONPATH:+:$PYTHONPATH}" "$TAKYON_CLI_PYTHON" -m takyon_cli.main "$@"
 }
 
 exec_takyon_cli() {
-  if takyon_cli_shim_ready; then
-    exec "$TAKYON_CLI_BIN" "$@"
-  fi
+  # Keep the exec path source-sealed for the same reason as run_takyon_cli above.
   exec env PYTHONPATH="$RUNTIME_DIR${PYTHONPATH:+:$PYTHONPATH}" "$TAKYON_CLI_PYTHON" -m takyon_cli.main "$@"
 }
 

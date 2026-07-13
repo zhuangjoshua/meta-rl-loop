@@ -118,6 +118,24 @@ def test_prod_compute_is_sealed_to_clean_published_live_release():
     assert "verify_local_runtime_release" in load
 
 
+def test_prod_cli_never_executes_a_cross_worktree_console_script_shim():
+    script = _script_source()
+    run_cli = script[
+        script.index("run_takyon_cli() {") : script.index("\nexec_takyon_cli() {")
+    ]
+    exec_cli = script[
+        script.index("exec_takyon_cli() {") : script.index("\noperator_runtime_deps_ready() {")
+    ]
+
+    expected = 'PYTHONPATH="$RUNTIME_DIR${PYTHONPATH:+:$PYTHONPATH}"'
+    assert expected in run_cli
+    assert expected in exec_cli
+    assert '"$TAKYON_CLI_PYTHON" -m takyon_cli.main "$@"' in run_cli
+    assert '"$TAKYON_CLI_PYTHON" -m takyon_cli.main "$@"' in exec_cli
+    assert '"$TAKYON_CLI_BIN" "$@"' not in run_cli
+    assert '"$TAKYON_CLI_BIN" "$@"' not in exec_cli
+
+
 def test_shared_tunnel_monitor_and_initial_start_use_one_reconciler():
     script = _script_source()
     monitor = script[
