@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import shutil
 import subprocess
@@ -280,7 +281,9 @@ def test_site_image_worker_bridge_caps_two_distinct_successes(tmp_path, monkeypa
         responses = []
         for slug in ("hero-atmosphere", "supporting-detail", "third-image"):
             request_id = str(uuid.uuid4())
-            (bridge.requests_dir / f"{request_id}.json").write_text(
+            request_path = bridge.requests_dir / f"{request_id}.json"
+            temporary_request_path = bridge.requests_dir / f".{request_id}.tmp"
+            temporary_request_path.write_text(
                 json.dumps(
                     {
                         "args": {
@@ -293,6 +296,7 @@ def test_site_image_worker_bridge_caps_two_distinct_successes(tmp_path, monkeypa
                 ),
                 encoding="utf-8",
             )
+            temporary_request_path.replace(request_path)
             response_path = bridge.responses_dir / f"{request_id}.json"
             deadline = time.monotonic() + 2
             while not response_path.exists() and time.monotonic() < deadline:
@@ -302,7 +306,7 @@ def test_site_image_worker_bridge_caps_two_distinct_successes(tmp_path, monkeypa
         assert bridge.close() is True
 
     assert [response["success"] for response in responses] == [True, True, False]
-    assert "exactly two" in responses[2]["error"]
+    assert "at most two" in responses[2]["error"]
     assert [call["idempotency_key"] for call in calls] == [
         "taste-run-1:site-image:hero-atmosphere",
         "taste-run-1:site-image:supporting-detail",
@@ -363,6 +367,9 @@ def test_site_image_worker_bridge_proactively_repairs_prior_jpeg_without_worker_
         business="lumen",
         idempotency_prefix="taste-repair-1",
         root=tmp_path / "bridge-repair",
+        trusted_asset_digests={
+            f"/generated/{slug}.png": hashlib.sha256(asset.read_bytes()).hexdigest(),
+        },
     )
     bridge.start()
     try:
@@ -421,5 +428,11 @@ def test_taste_landing_asset_contract_requires_generated_hero_and_supporting_ima
     contract, blocker = core._read_taste_landing_asset_contract(root)
 
     assert blocker == ""
-    assert contract["hero_path"] == "/generated/hero-atmosphere.png"
-    assert {asset["role"] for asset in contract["assets"]} == {"hero", "supporting"}
+    assert contract["used_paths"] == [
+        "/generated/hero-atmosphere.png",
+        "/generated/supporting-detail.png",
+    ]
+    assert {asset["public_path"] for asset in contract["assets"]} == {
+        "/generated/hero-atmosphere.png",
+        "/generated/supporting-detail.png",
+    }

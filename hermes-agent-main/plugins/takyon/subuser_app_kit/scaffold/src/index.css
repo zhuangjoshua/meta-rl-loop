@@ -9,12 +9,3 @@
     @apply bg-background font-sans text-foreground antialiased;
   }
 }
-
-@keyframes proof-marquee {
-  from { transform: translateX(0); }
-  to { transform: translateX(calc(-50% - 0.5rem)); }
-}
-
-.animate-proof-marquee {
-  animation: proof-marquee 32s linear infinite;
-}

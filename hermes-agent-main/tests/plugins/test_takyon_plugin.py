@@ -3176,7 +3176,7 @@ def test_surface_md_lists_selected_and_owned_runtime_rails(tmp_path, monkeypatch
     assert "Canonical tools: business_create_app_checkout, business_record_stripe_webhook" in surface_md
 
 
-def test_claude_agent_task_distills_guidance_skill_into_worker_instruction(tmp_path, monkeypatch):
+def test_claude_agent_task_does_not_inject_guidance_skill_into_worker_instruction(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -3244,7 +3244,6 @@ Use this skill for strong product UI work.
             return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
         return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
 
-    monkeypatch.setattr(takyon_core, "get_all_skills_dirs", lambda: [skills_dir])
     monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
     monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
     monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
@@ -3256,7 +3255,6 @@ Use this skill for strong product UI work.
                 "business": "latexflow",
                 "workspace": "product/site",
                 "instruction": "Build a more intentional product surface.",
-                "guidance_skills": ["claude-design"],
                 "idempotency_key": "workspace-guidance",
                 "install": False,
             }
@@ -3265,17 +3263,16 @@ Use this skill for strong product UI work.
 
     instruction = captured["payload"]["instruction"]
     assert result["success"] is True
-    assert result["guidance_skills"] == ["claude-design"]
-    assert result["guidance_selection_reason"] == "used explicit customer-facing guidance exactly as requested"
+    assert "guidance_skills" not in result
     assert "[Design guidance hierarchy]" not in instruction
     assert "[Hermes guidance skill: taste-frontend]" not in instruction
-    assert "[Hermes guidance skill: claude-design]" in instruction
-    assert "Follow this guidance when it improves the artifact quality or UX." in instruction
+    assert "[Hermes guidance skill: claude-design]" not in instruction
+    assert "Follow this guidance when it improves the artifact quality or UX." not in instruction
     assert "## Workflow" not in instruction
     assert "current working directory is already the requested business workspace: product/site" in instruction
 
 
-def test_claude_agent_task_distills_method_and_style_guidance_skills(tmp_path, monkeypatch):
+def test_claude_agent_task_does_not_inject_layered_design_skill_prose(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -3380,7 +3377,6 @@ Playful shared design system.
             return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
         return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
 
-    monkeypatch.setattr(takyon_core, "get_all_skills_dirs", lambda: [skills_dir])
     monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
     monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
     monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
@@ -3392,7 +3388,6 @@ Playful shared design system.
                 "business": "dogsnap",
                 "workspace": "product/site",
                 "instruction": "Build a playful dog photo-sharing homepage.",
-                "guidance_skills": ["claude-design", "claude-design-doodle"],
                 "idempotency_key": "workspace-guidance-pair",
                 "install": False,
             }
@@ -3401,11 +3396,11 @@ Playful shared design system.
 
     instruction = captured["payload"]["instruction"]
     assert result["success"] is True
-    assert result["guidance_skills"] == ["claude-design", "claude-design-doodle"]
+    assert "guidance_skills" not in result
     assert "[Design guidance hierarchy]" not in instruction
     assert "[Hermes guidance skill: taste-frontend]" not in instruction
-    assert "[Hermes guidance skill: claude-design]" in instruction
-    assert "[Hermes guidance skill: claude-design-doodle]" in instruction
+    assert "[Hermes guidance skill: claude-design]" not in instruction
+    assert "[Hermes guidance skill: claude-design-doodle]" not in instruction
     assert "[Hermes design reference: claude-design-doodle / DESIGN.md]" not in instruction
     assert "required design contract" not in instruction
     assert "Pick one coherent style skill." not in instruction
@@ -3455,8 +3450,8 @@ def test_claude_agent_task_publishes_verified_product_surface(tmp_path, monkeypa
     assert app["surface_contract"]["public_url"] == "https://latexflow.coscale.app/"
     receipt_path = tmp_path / "businesses" / "latexflow" / str(result["surface_refresh"]["receipt_path"])
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt["guidance_skills"] == []
-    assert receipt["guidance_selection_reason"] == ""
+    assert "guidance_skills" not in receipt
+    assert "guidance_selection_reason" not in receipt
 
 
 def test_claude_agent_task_treats_null_install_as_default_true_for_surface_refresh(tmp_path, monkeypatch):
@@ -8610,6 +8605,32 @@ def test_surface_refresh_handler_defers_before_session_authority_guard(monkeypat
     )
     assert blocked["success"] is False
     assert "authority tool surface" in blocked["error"]
+
+
+def test_claude_product_worker_fails_authority_preflight_before_store_or_coding(monkeypatch):
+    monkeypatch.setattr(takyon_core, "_refuse_on_autonomous_wake", lambda _action: None)
+    monkeypatch.setattr(takyon_core, "_defer_claude_agent_task_to_worker", lambda _args: None)
+    monkeypatch.setattr(takyon_core, "_blocks_session_bound_authority_op", lambda: True)
+
+    def store_must_not_open():
+        raise AssertionError("authority preflight must run before store/coding worker")
+
+    monkeypatch.setattr(takyon_core, "_store", store_must_not_open)
+    result = json.loads(
+        takyon_core.handle_business_claude_agent_task(
+            {
+                "business": "acme",
+                "workspace": "product/site",
+                "instruction": "build",
+                "idempotency_key": "authority-preflight-1",
+                "refresh_surface": True,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["blocker"] == "product_worker_authority_preflight_failed"
+    assert "before the coding worker starts" in result["error"]
 
 
 def test_defer_claude_agent_task_fails_if_worker_never_picks_up(monkeypatch):

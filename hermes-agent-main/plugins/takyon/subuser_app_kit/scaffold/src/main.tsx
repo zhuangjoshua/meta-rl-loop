@@ -3,10 +3,8 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import "./index.css";
 import { ActionErrorAnnouncer } from "./components/action-error-announcer";
-import { SocialProofMarquee } from "./components/social-proof-marquee";
 import { SubscriptionCancellation } from "./components/subscription-cancellation";
 import { installInteractionSounds } from "./lib/interaction-sounds";
-import { useViewerAccess } from "./lib/hooks";
 import { ProductAuthProvider } from "./lib/product-auth";
 import { LandingScreen } from "./screens/landing";
 // Not lazy: the store lives on the landing chunk already (StoreSection is rendered inline on the
@@ -47,17 +45,6 @@ function AccountRoute() {
   );
 }
 
-function PublicLandingRoute() {
-  const access = useViewerAccess();
-  if (access.loading || access.authenticated) return <LandingScreen />;
-  return (
-    <>
-      <LandingScreen />
-      <SocialProofMarquee />
-    </>
-  );
-}
-
 const container = document.getElementById("root");
 if (!container) throw new Error("root element missing");
 
@@ -70,7 +57,7 @@ createRoot(container).render(
         <ActionErrorAnnouncer />
         <Suspense fallback={null}>
           <Routes>
-            <Route path="/" element={<PublicLandingRoute />} />
+            <Route path="/" element={<LandingScreen />} />
             <Route path="/store" element={<StoreScreen />} />
             <Route path="/faq" element={<FaqScreen />} />
             <Route path="/pricing" element={<PricingScreen />} />

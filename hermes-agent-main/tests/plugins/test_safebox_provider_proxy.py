@@ -483,6 +483,32 @@ def test_anthropic_stream_upstream_error_releases_hold(client, monkeypatch):
     assert len(_reserves()) == 1 and len(_releases()) == 1 and _settles() == []
 
 
+def test_anthropic_worker_fail_fast_header_disables_sdk_retry(client, monkeypatch):
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_estimate_microusd", lambda p: 6000)
+    monkeypatch.setattr(safebox_provider_proxy, "_deepseek_key", lambda: _REAL_KEY)
+    from plugins.takyon import ai_provider
+
+    monkeypatch.setattr(ai_provider, "anthropic_payload", lambda b: ({}, "deepseek-v4-pro", 10))
+    _patch_httpx(monkeypatch)
+    _FakeClient.stream_response = _FakeStream(529, [b'{"error":"overloaded"}'])
+    headers = {
+        **_cap_headers(_session_cap()),
+        "x-takyon-fail-on-api-retry": "1",
+    }
+    resp = client.post(
+        "/v1/messages",
+        headers=headers,
+        json={
+            "model": "deepseek-v4-pro",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    )
+    assert resp.status_code == 529
+    assert resp.headers["x-should-retry"] == "false"
+    assert len(_reserves()) == 1 and len(_releases()) == 1 and _settles() == []
+
+
 def test_anthropic_stream_open_transport_failure_is_502_and_releases(client, monkeypatch, caplog):
     monkeypatch.setattr(safebox_provider_proxy, "_anthropic_estimate_microusd", lambda p: 6000)
     monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)

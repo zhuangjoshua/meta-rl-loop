@@ -795,30 +795,54 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
         _settle(ledger, reservation, actual)
         return JSONResponse(content=data, status_code=resp.status_code)
 
-    def _anthropic_messages(body: Any, authorization: str | None, x_api_key: str | None):
-        auth = _authorize_operator_proxy(
-            authorization, x_api_key, capability_audiences=frozenset({_ANTHROPIC_AUDIENCE})
-        )
-        payload = _as_json_object(body)
-        return _anthropic_passthrough(payload, auth)
+    def _anthropic_messages(
+        body: Any,
+        authorization: str | None,
+        x_api_key: str | None,
+        x_takyon_fail_on_api_retry: str | None,
+    ):
+        fail_on_api_retry = str(x_takyon_fail_on_api_retry or "").strip() == "1"
+        try:
+            auth = _authorize_operator_proxy(
+                authorization, x_api_key, capability_audiences=frozenset({_ANTHROPIC_AUDIENCE})
+            )
+            payload = _as_json_object(body)
+            return _anthropic_passthrough(payload, auth)
+        except HTTPException as exc:
+            # Claude Code has an internal retry loop that runs before the Agent SDK can abort it.
+            # A bounded Takyon worker opts into fail-fast with a request header; preserve ordinary
+            # callers' retry behavior, but tell the stock Anthropic client this response is terminal.
+            if fail_on_api_retry:
+                exc.headers = {**(exc.headers or {}), "x-should-retry": "false"}
+            raise
 
     @router.post("/v1/proxy/anthropic/messages")
     def proxy_anthropic_messages(
         body: Any = Body(default=None),
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None, alias="x-api-key"),
+        x_takyon_fail_on_api_retry: str | None = Header(
+            default=None, alias="x-takyon-fail-on-api-retry"
+        ),
     ):
-        return _anthropic_messages(body, authorization, x_api_key)
+        return _anthropic_messages(
+            body, authorization, x_api_key, x_takyon_fail_on_api_retry
+        )
 
     @router.post("/v1/messages")
     def proxy_anthropic_messages_sdk(
         body: Any = Body(default=None),
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None, alias="x-api-key"),
+        x_takyon_fail_on_api_retry: str | None = Header(
+            default=None, alias="x-takyon-fail-on-api-retry"
+        ),
     ):
         # ALSO mounted at the stock Anthropic SDK path so a caller can set ANTHROPIC_BASE_URL to the
         # safebox root and have the SDK work unmodified.
-        return _anthropic_messages(body, authorization, x_api_key)
+        return _anthropic_messages(
+            body, authorization, x_api_key, x_takyon_fail_on_api_retry
+        )
 
     # ── OpenAI Responses (streaming-capable, money-gated passthrough) ─────────────────────────────
     # The CEO lane (named custom provider, api_mode codex_responses) brokers here under operator

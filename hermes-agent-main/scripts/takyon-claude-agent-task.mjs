@@ -1,14 +1,154 @@
 #!/usr/bin/env node
 import path from "node:path";
 import fs from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
 
 const PROGRESS_PREFIX = "TAKYON_SDK_EVENT ";
 const SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const TASTE_SKILL_NAME = "design-taste-frontend";
+const TASTE_SKILL_SHA256 = "aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89";
+const TASTE_PROMPT_DISTINCTIVE_MARKERS = Object.freeze([
+  "The audience picks the aesthetic, not your taste.",
+  "A pure-text page is not minimalism. It is incomplete work.",
+  "The agent's default mental model that \"creative brief = serif\"",
+]);
+const RUNTIME_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const CLAUDE_CONFIG_DIR = path.join(RUNTIME_ROOT, ".claude");
+const TASTE_SKILL_CANONICAL_DIR = path.join(RUNTIME_ROOT, "skills", "creative", "taste-frontend");
+const TASTE_SKILL_NATIVE_DIR = path.join(CLAUDE_CONFIG_DIR, "skills", TASTE_SKILL_NAME);
 let workerStderr = "";
+let workerSkillReceipt = null;
+let workerSkillStartedAt = 0;
+let workerTastePublicationState = null;
+let workerModel = null;
+let workerUsage = null;
+let workerTotalCostUsd = null;
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function isProductSiteWorkspace(workspace) {
+  const normalized = normalizeRelative(workspace || ".");
+  return normalized === "product/site" || normalized.startsWith("product/site/");
+}
+
+function isTasteSkillApplicable(input) {
+  return isProductSiteWorkspace(input?.workspace);
+}
+
+function hasCanonicalTasteFrontmatter(value) {
+  const head = Buffer.isBuffer(value) ? value.subarray(0, 4096).toString("utf8") : String(value || "").slice(0, 4096);
+  return /^---\s*$[\s\S]*?^name:\s*design-taste-frontend\s*$[\s\S]*?^---\s*$/m.test(head);
+}
+
+async function validateNativeTasteSkill({ nativeDir, canonicalDir } = {}) {
+  const resolvedNativeDir = path.resolve(String(nativeDir || TASTE_SKILL_NATIVE_DIR));
+  const resolvedCanonicalDir = path.resolve(String(canonicalDir || TASTE_SKILL_CANONICAL_DIR));
+  const nativePath = path.join(resolvedNativeDir, "SKILL.md");
+  const canonicalPath = path.join(resolvedCanonicalDir, "SKILL.md");
+  let link;
+  try {
+    link = await fs.lstat(resolvedNativeDir);
+  } catch (error) {
+    throw new Error(
+      `shared native Taste skill is not installed at ${resolvedNativeDir}: ${error?.code || "unreadable"}`
+    );
+  }
+  if (!link.isSymbolicLink()) {
+    throw new Error(`shared native Taste skill must be a symlink: ${resolvedNativeDir}`);
+  }
+  const [nativeRealPath, canonicalRealPath, nativeContent, canonicalContent] = await Promise.all([
+    fs.realpath(nativePath),
+    fs.realpath(canonicalPath),
+    fs.readFile(nativePath),
+    fs.readFile(canonicalPath),
+  ]);
+  if (nativeRealPath !== canonicalRealPath) {
+    throw new Error("shared native Taste skill symlink does not resolve to the canonical runtime skill");
+  }
+  const nativeDigest = sha256(nativeContent);
+  const canonicalDigest = sha256(canonicalContent);
+  if (
+    nativeDigest !== TASTE_SKILL_SHA256
+    || canonicalDigest !== TASTE_SKILL_SHA256
+    || !hasCanonicalTasteFrontmatter(nativeContent)
+    || !hasCanonicalTasteFrontmatter(canonicalContent)
+  ) {
+    throw new Error(
+      `shared native Taste skill failed canonical verification; expected ${TASTE_SKILL_SHA256}`
+    );
+  }
+  return {
+    configDir: path.resolve(resolvedNativeDir, "..", ".."),
+    receipt: {
+      name: TASTE_SKILL_NAME,
+      installed: true,
+      expected_sha256: TASTE_SKILL_SHA256,
+      installed_sha256: nativeDigest,
+      source: "shared-runtime-symlink",
+      native_scope: "user",
+      canonical_target: true,
+    },
+  };
+}
+
+function nativeTasteSkillUseFromSdkMessage(message) {
+  return nativeTasteSkillToolUsesFromSdkMessage(message).length > 0;
+}
+
+function nativeTasteSkillToolUsesFromSdkMessage(message) {
+  const record = message && typeof message === "object" ? message : null;
+  if (!record || record.type !== "assistant") return [];
+  const content = Array.isArray(record.message?.content) ? record.message.content : [];
+  return content.flatMap((block) => {
+    if (!block || block.type !== "tool_use" || block.name !== "Skill") return [];
+    const input = block.input && typeof block.input === "object" ? block.input : {};
+    const requested = String(input.skill || input.name || input.command || "").trim();
+    if (requested !== TASTE_SKILL_NAME && !requested.endsWith(`:${TASTE_SKILL_NAME}`)) return [];
+    return [{ id: String(block.id || "").trim(), requested }];
+  });
+}
+
+function nativeTasteSkillResultsFromSdkMessage(message, pendingIds) {
+  const record = message && typeof message === "object" ? message : null;
+  if (!record || record.type !== "user") return [];
+  const content = Array.isArray(record.message?.content) ? record.message.content : [];
+  return content.flatMap((block) => {
+    if (!block || block.type !== "tool_result") return [];
+    const id = String(block.tool_use_id || "").trim();
+    if (!id || !pendingIds.has(id)) return [];
+    const rendered = typeof block.content === "string"
+      ? block.content
+      : Array.isArray(block.content)
+        ? block.content.map((item) => String(item?.text || "")).join("\n")
+        : "";
+    const failed = block.is_error === true || /<tool_use_error>|no such tool available/i.test(rendered);
+    return [{ id, success: !failed, error: failed ? compactText(rendered, 160) : "" }];
+  });
+}
+
+function completedReadToolResultsFromSdkMessage(message, pendingReads) {
+  const record = message && typeof message === "object" ? message : null;
+  if (!record || record.type !== "user") return [];
+  const content = Array.isArray(record.message?.content) ? record.message.content : [];
+  return content.flatMap((block) => {
+    if (!block || block.type !== "tool_result") return [];
+    const id = String(block.tool_use_id || "").trim();
+    const filePath = pendingReads.get(id);
+    if (!id || !filePath) return [];
+    const rendered = typeof block.content === "string"
+      ? block.content
+      : Array.isArray(block.content)
+        ? block.content.map((item) => String(item?.text || "")).join("\n")
+        : "";
+    const failed = block.is_error === true || /<tool_use_error>|no such tool available/i.test(rendered);
+    return [{ id, filePath, success: !failed }];
+  });
+}
 
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -78,10 +218,48 @@ const TASTE_PREFLIGHT_CHROMIUM_TIMEOUT_MS = 45_000;
 const TASTE_PREFLIGHT_VIEWPORTS = Object.freeze([
   Object.freeze({ name: "desktop", width: 1440, height: 900 }),
   Object.freeze({ name: "mobile", width: 390, height: 844 }),
+  Object.freeze({ name: "hero-1280", width: 1280, height: 800 }),
 ]);
+const TASTE_OFFICIAL_GATE_IDS = Object.freeze([
+  "zero_visible_dashes",
+  "canonical_preflight_evidence",
+  "section_layout_diversity",
+  "image_plan_and_asset_integrity",
+  "hero_first_viewport",
+  "single_visual_system",
+]);
+const TASTE_PUBLICATION_GATE_PATH = path.join(
+  RUNTIME_ROOT,
+  "plugins",
+  "takyon",
+  "taste_publication_gate.py"
+);
 
 function tastePreflightDir(cwd) {
   return path.join(path.resolve(cwd), ".takyon-preflight");
+}
+
+async function loadTastePublicationContract(sourcePath = TASTE_PUBLICATION_GATE_PATH) {
+  const source = await fs.readFile(sourcePath, "utf8");
+  const probeMatch = source.match(/TASTE_RENDER_INSPECTION_JS\s*=\s*r?"""([\s\S]*?)"""/);
+  if (!probeMatch?.[1]) {
+    throw new Error("Taste publication gate does not expose TASTE_RENDER_INSPECTION_JS");
+  }
+  const idsMatch = source.match(/CANONICAL_PREFLIGHT_IDS\s*=\s*\(([\s\S]*?)\n\)/);
+  if (!idsMatch?.[1]) {
+    throw new Error("Taste publication gate does not expose CANONICAL_PREFLIGHT_IDS");
+  }
+  const canonicalPreflightIds = [...idsMatch[1].matchAll(/["']([a-z0-9_]+)["']/g)]
+    .map((match) => match[1]);
+  if (canonicalPreflightIds.length < 1 || new Set(canonicalPreflightIds).size !== canonicalPreflightIds.length) {
+    throw new Error("Taste publication gate canonical preflight IDs are empty or duplicated");
+  }
+  return {
+    inspectionExpression: probeMatch[1],
+    inspectionSha256: sha256(probeMatch[1]),
+    canonicalPreflightIds,
+    sourcePath,
+  };
 }
 
 function delay(ms) {
@@ -258,39 +436,7 @@ async function startVitePreview(cwd) {
   }
 }
 
-async function runBoundedChild(command, args, { cwd, timeoutMs }) {
-  const child = spawn(command, args, {
-    cwd,
-    // Chromium renders product-controlled code; it gets no SDK/broker capability environment.
-    env: preflightChildEnv(),
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const readStdout = collectBoundedOutput(child.stdout);
-  const readStderr = collectBoundedOutput(child.stderr);
-  let timer = null;
-  try {
-    const result = await new Promise((resolve, reject) => {
-      timer = setTimeout(() => {
-        signalProcessTree(child, "SIGKILL");
-        reject(new Error(`${path.basename(command)} timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-      child.once("error", reject);
-      child.once("close", (code, signal) => resolve({ code, signal }));
-    });
-    if (result.code !== 0) {
-      throw new Error(
-        `${path.basename(command)} exited ${result.code ?? result.signal}: ` +
-        compactText(`${readStdout()}\n${readStderr()}`, 1600)
-      );
-    }
-  } finally {
-    if (timer) clearTimeout(timer);
-    await stopProcessTree(child);
-  }
-}
-
-async function assertPngViewport(filePath, expectedWidth, expectedHeight) {
+async function pngEvidence(filePath, expectedWidth = null, expectedHeight = null) {
   const header = await fs.readFile(filePath);
   const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
   if (header.length < 24 || !header.subarray(0, 8).equals(pngSignature)) {
@@ -298,17 +444,146 @@ async function assertPngViewport(filePath, expectedWidth, expectedHeight) {
   }
   const width = header.readUInt32BE(16);
   const height = header.readUInt32BE(20);
-  if (width !== expectedWidth || height !== expectedHeight) {
+  if (
+    expectedWidth !== null
+    && expectedHeight !== null
+    && (width !== expectedWidth || height !== expectedHeight)
+  ) {
     throw new Error(
       `Chromium rendered ${width}x${height} at ${filePath}; expected ` +
       `${expectedWidth}x${expectedHeight}`
     );
   }
+  return {
+    width,
+    height,
+    sha256: sha256(header),
+    bytes: header.length,
+  };
 }
 
-async function captureTasteViewport({ cwd, url, viewport, outputPath, profileDir }) {
-  await runBoundedChild(
-    TASTE_PREFLIGHT_CHROMIUM,
+class CdpPipeClient {
+  constructor(child, timeoutMs) {
+    this.child = child;
+    this.timeoutMs = timeoutMs;
+    this.nextId = 1;
+    this.pending = new Map();
+    this.events = [];
+    this.waiters = [];
+    this.buffer = Buffer.alloc(0);
+    const responsePipe = child.stdio[4];
+    responsePipe.on("data", (chunk) => this.accept(chunk));
+    responsePipe.on("error", (error) => this.rejectAll(error));
+    child.once("error", (error) => this.rejectAll(error));
+    child.once("close", (code, signal) => {
+      this.rejectAll(new Error(`Chromium CDP pipe closed (${code ?? signal ?? "unknown"})`));
+    });
+  }
+
+  accept(chunk) {
+    this.buffer = Buffer.concat([this.buffer, Buffer.from(chunk)]);
+    while (true) {
+      const separator = this.buffer.indexOf(0);
+      if (separator < 0) return;
+      const payload = this.buffer.subarray(0, separator).toString("utf8");
+      this.buffer = this.buffer.subarray(separator + 1);
+      if (!payload.trim()) continue;
+      let message;
+      try {
+        message = JSON.parse(payload);
+      } catch (error) {
+        this.rejectAll(new Error(`Chromium CDP returned invalid JSON: ${error?.message || error}`));
+        continue;
+      }
+      if (Number.isInteger(message.id)) {
+        const pending = this.pending.get(message.id);
+        if (!pending) continue;
+        this.pending.delete(message.id);
+        clearTimeout(pending.timer);
+        if (message.error) {
+          pending.reject(new Error(`CDP ${pending.method} failed: ${JSON.stringify(message.error)}`));
+        } else {
+          pending.resolve(message.result || {});
+        }
+        continue;
+      }
+      this.events.push(message);
+      for (const waiter of [...this.waiters]) {
+        if (!waiter.matches(message)) continue;
+        this.waiters.splice(this.waiters.indexOf(waiter), 1);
+        clearTimeout(waiter.timer);
+        waiter.resolve(message.params || {});
+      }
+    }
+  }
+
+  rejectAll(error) {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+    for (const waiter of this.waiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    this.waiters.length = 0;
+  }
+
+  send(method, params = {}, sessionId = "") {
+    const id = this.nextId++;
+    const message = { id, method, params, ...(sessionId ? { sessionId } : {}) };
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP ${method} timed out after ${this.timeoutMs}ms`));
+      }, this.timeoutMs);
+      this.pending.set(id, { method, resolve, reject, timer });
+      this.child.stdio[3].write(`${JSON.stringify(message)}\0`, "utf8", (error) => {
+        if (!error) return;
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      });
+    });
+  }
+
+  waitFor(method, sessionId = "") {
+    const bufferedIndex = this.events.findIndex(
+      (event) => event.method === method && (!sessionId || event.sessionId === sessionId)
+    );
+    if (bufferedIndex >= 0) {
+      const [event] = this.events.splice(bufferedIndex, 1);
+      return Promise.resolve(event.params || {});
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        matches: (event) => event.method === method && (!sessionId || event.sessionId === sessionId),
+        resolve,
+        reject,
+        timer: null,
+      };
+      waiter.timer = setTimeout(() => {
+        this.waiters.splice(this.waiters.indexOf(waiter), 1);
+        reject(new Error(`CDP event ${method} timed out after ${this.timeoutMs}ms`));
+      }, this.timeoutMs);
+      this.waiters.push(waiter);
+    });
+  }
+}
+
+async function captureTasteViewport({
+  cwd,
+  url,
+  viewport,
+  outputPath,
+  profileDir,
+  inspectionExpression,
+  chromiumPath = TASTE_PREFLIGHT_CHROMIUM,
+  chromiumEnv = null,
+}) {
+  const child = spawn(
+    chromiumPath,
     [
       "--headless=new",
       "--no-sandbox",
@@ -327,30 +602,110 @@ async function captureTasteViewport({ cwd, url, viewport, outputPath, profileDir
       "--no-default-browser-check",
       "--no-first-run",
       "--run-all-compositor-stages-before-draw",
-      "--virtual-time-budget=2500",
+      "--remote-debugging-pipe",
       `--user-data-dir=${profileDir}`,
       `--window-size=${viewport.width},${viewport.height}`,
-      `--screenshot=${outputPath}`,
-      url,
+      "about:blank",
     ],
-    { cwd, timeoutMs: TASTE_PREFLIGHT_CHROMIUM_TIMEOUT_MS }
+    {
+      cwd,
+      // Chromium renders product-controlled code; it gets no SDK/broker capability environment.
+      env: chromiumEnv || preflightChildEnv(),
+      detached: true,
+      // Chromium's --remote-debugging-pipe contract reads JSON+NUL on fd 3 and writes it on fd 4.
+      stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
+    }
   );
-  await fs.chmod(outputPath, 0o600);
-  await assertPngViewport(outputPath, viewport.width, viewport.height);
+  const readStdout = collectBoundedOutput(child.stdout);
+  const readStderr = collectBoundedOutput(child.stderr);
+  const client = new CdpPipeClient(child, TASTE_PREFLIGHT_CHROMIUM_TIMEOUT_MS);
+  try {
+    const { targetId } = await client.send("Target.createTarget", { url: "about:blank" });
+    const { sessionId } = await client.send("Target.attachToTarget", { targetId, flatten: true });
+    await client.send("Page.enable", {}, sessionId);
+    await client.send("Runtime.enable", {}, sessionId);
+    await client.send(
+      "Emulation.setDeviceMetricsOverride",
+      {
+        width: viewport.width,
+        height: viewport.height,
+        deviceScaleFactor: 1,
+        mobile: viewport.width <= 480,
+        screenWidth: viewport.width,
+        screenHeight: viewport.height,
+      },
+      sessionId
+    );
+    const loaded = client.waitFor("Page.loadEventFired", sessionId);
+    const navigation = await client.send("Page.navigate", { url }, sessionId);
+    if (navigation.errorText) {
+      throw new Error(`Chromium could not navigate to the Taste preview: ${navigation.errorText}`);
+    }
+    await loaded;
+    await client.send(
+      "Runtime.evaluate",
+      {
+        expression:
+          "Promise.all([document.fonts?.ready, new Promise((resolve) => " +
+          "requestAnimationFrame(() => requestAnimationFrame(resolve)))])",
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      sessionId
+    );
+    const evaluated = await client.send(
+      "Runtime.evaluate",
+      {
+        expression: `(${inspectionExpression})()`,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      sessionId
+    );
+    if (evaluated.exceptionDetails || !evaluated.result || evaluated.result.type !== "object") {
+      throw new Error(
+        `Taste browser inspection failed: ${JSON.stringify(evaluated.exceptionDetails || evaluated.result || {})}`
+      );
+    }
+    const probe = evaluated.result.value;
+    if (!probe || typeof probe !== "object") {
+      throw new Error("Taste browser inspection returned no facts");
+    }
+    const screenshot = await client.send(
+      "Page.captureScreenshot",
+      { format: "png", fromSurface: true, captureBeyondViewport: false },
+      sessionId
+    );
+    const png = Buffer.from(String(screenshot.data || ""), "base64");
+    if (!png.length) throw new Error("Chromium CDP returned an empty screenshot");
+    await fs.writeFile(outputPath, png, { mode: 0o600 });
+    const evidence = await pngEvidence(outputPath, viewport.width, viewport.height);
+    return { ...evidence, probe };
+  } catch (error) {
+    const detail = compactText(`${readStdout()}\n${readStderr()}`, 1600);
+    throw new Error(`${error?.message || error}${detail ? `; Chromium: ${detail}` : ""}`);
+  } finally {
+    client.rejectAll(new Error("Chromium CDP session closed"));
+    await stopProcessTree(child);
+  }
 }
 
-async function renderTasteLandingPreflight(cwd) {
+async function renderTasteLandingPreflight(
+  cwd,
+  { publicationContract = null, chromiumPath = TASTE_PREFLIGHT_CHROMIUM } = {}
+) {
   const distIndex = path.join(cwd, "dist", "index.html");
   const preflightDir = tastePreflightDir(cwd);
   try {
     await fs.access(distIndex);
-    await fs.access(TASTE_PREFLIGHT_CHROMIUM);
+    await fs.access(chromiumPath);
   } catch (error) {
     if (error?.path === distIndex) {
       throw new Error("Taste render preflight requires a built dist/index.html; run npm run build first");
     }
-    throw new Error(`Taste render preflight requires Chromium at ${TASTE_PREFLIGHT_CHROMIUM}`);
+    throw new Error(`Taste render preflight requires Chromium at ${chromiumPath}`);
   }
+  const contract = publicationContract || await loadTastePublicationContract();
 
   await fs.rm(preflightDir, { recursive: true, force: true });
   await fs.mkdir(preflightDir, { recursive: true, mode: 0o700 });
@@ -363,24 +718,391 @@ async function renderTasteLandingPreflight(cwd) {
       const outputPath = path.join(preflightDir, `landing-${viewport.name}.png`);
       const profileDir = path.join(profileRoot, viewport.name);
       await fs.mkdir(profileDir, { recursive: true, mode: 0o700 });
-      await captureTasteViewport({ cwd, url: preview.url, viewport, outputPath, profileDir });
+      const evidence = await captureTasteViewport({
+        cwd,
+        url: preview.url,
+        viewport,
+        outputPath,
+        profileDir,
+        inspectionExpression: contract.inspectionExpression,
+        chromiumPath,
+      });
       screenshots.push({
         name: viewport.name,
-        width: viewport.width,
-        height: viewport.height,
         path: outputPath,
+        screenshot_path: outputPath,
+        screenshot_sha256: evidence.sha256,
+        bytes: evidence.bytes,
+        width: evidence.width,
+        height: evidence.height,
+        inspected: true,
+        probe: evidence.probe,
       });
     }
     return {
       success: true,
       route: "/",
       screenshots,
-      instruction: "Read both returned PNG paths with the Read tool and inspect the actual first viewports.",
+      inspection_contract: {
+        source_path: contract.sourcePath,
+        constant: "TASTE_RENDER_INSPECTION_JS",
+        sha256: contract.inspectionSha256,
+      },
+      instruction:
+        "Read all three returned PNG paths with the Read tool and inspect the actual first viewports.",
     };
   } finally {
     await stopProcessTree(preview?.child);
     await fs.rm(profileRoot, { recursive: true, force: true });
   }
+}
+
+function createTastePublicationState(cwd, publicationContract) {
+  return {
+    cwd: path.resolve(cwd),
+    publicationContract,
+    generatedAssets: new Map(),
+    renderEvidence: null,
+    requiredReadPaths: new Set(),
+    authorizedReadPaths: new Set(),
+    completedReadPaths: new Set(),
+    readAuthorizations: [],
+    audit: null,
+  };
+}
+
+function registerTasteRequiredRead(state, filePath) {
+  const resolved = path.resolve(filePath);
+  if (!isSubpath(state.cwd, resolved)) {
+    throw new Error(`Taste evidence path escapes the product workspace: ${resolved}`);
+  }
+  state.requiredReadPaths.add(resolved);
+  return resolved;
+}
+
+async function refreshTasteGeneratedAssets(state) {
+  const receiptsDir = path.join(state.cwd, ".takyon", "site-images");
+  let entries = [];
+  try {
+    entries = await fs.readdir(receiptsDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    let receipt;
+    try {
+      receipt = JSON.parse(await fs.readFile(path.join(receiptsDir, entry.name), "utf8"));
+    } catch (error) {
+      throw new Error(`generated-image receipt is invalid (${entry.name}): ${error?.message || error}`);
+    }
+    const publicPath = String(receipt?.public_path || "").trim();
+    if (!receipt?.success || !/^\/generated\/[a-z0-9]+(?:-[a-z0-9]+)*\.png$/.test(publicPath)) {
+      throw new Error(`generated-image receipt is unsuccessful or malformed: ${entry.name}`);
+    }
+    const imagePath = path.join(state.cwd, "public", publicPath.slice(1));
+    const evidence = await pngEvidence(imagePath);
+    state.generatedAssets.set(publicPath, {
+      public_path: publicPath,
+      path: registerTasteRequiredRead(state, imagePath),
+      image_sha256: evidence.sha256,
+      width: evidence.width,
+      height: evidence.height,
+      bytes: evidence.bytes,
+    });
+  }
+  return [...state.generatedAssets.values()].sort((left, right) =>
+    left.public_path.localeCompare(right.public_path)
+  );
+}
+
+function evidenceArrayToMap(items, expectedIds, label) {
+  const result = {};
+  for (const item of Array.isArray(items) ? items : []) {
+    const id = String(item?.id || "").trim();
+    if (!id || Object.hasOwn(result, id)) {
+      throw new Error(`${label} contains a missing or duplicate id`);
+    }
+    result[id] = {
+      passed: item?.passed === true,
+      evidence: String(item?.evidence || "").trim(),
+      source: String(item?.source || "").trim(),
+    };
+  }
+  const expected = new Set(expectedIds);
+  const missing = expectedIds.filter((id) => !Object.hasOwn(result, id));
+  const extra = Object.keys(result).filter((id) => !expected.has(id));
+  if (missing.length || extra.length) {
+    throw new Error(
+      `${label} is incomplete (missing: ${missing.join(", ") || "none"}; ` +
+      `unexpected: ${extra.join(", ") || "none"})`
+    );
+  }
+  for (const [id, item] of Object.entries(result)) {
+    if (!item.passed) throw new Error(`${label} reports a failed gate: ${id}`);
+    if (!item.evidence || !item.source) {
+      throw new Error(`${label} lacks code/copy evidence for ${id}`);
+    }
+  }
+  return result;
+}
+
+function rgbHue(value) {
+  const match = String(value || "").match(/^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/i);
+  if (!match) return null;
+  const channels = match.slice(1).map((channel) => Number(channel) / 255);
+  const high = Math.max(...channels);
+  const low = Math.min(...channels);
+  if (high === low) return null;
+  const delta = high - low;
+  let hue;
+  if (high === channels[0]) hue = ((channels[1] - channels[2]) / delta) % 6;
+  else if (high === channels[1]) hue = (channels[2] - channels[0]) / delta + 2;
+  else hue = (channels[0] - channels[1]) / delta + 4;
+  return ((hue * 60) + 360) % 360;
+}
+
+function hueClusterCount(colors, tolerance = 28) {
+  const clusters = [];
+  for (const color of colors) {
+    const hue = rgbHue(color);
+    if (hue === null) continue;
+    if (clusters.some((center) => Math.min(Math.abs(hue - center), 360 - Math.abs(hue - center)) <= tolerance)) {
+      continue;
+    }
+    clusters.push(hue);
+  }
+  return clusters.length;
+}
+
+function officialGateFailures(renderEvidence, designSource = "") {
+  const byName = Object.fromEntries(
+    (renderEvidence?.screenshots || []).map((entry) => [String(entry.name || ""), entry])
+  );
+  const desktop = byName.desktop?.probe || {};
+  const hero = byName["hero-1280"]?.probe || {};
+  const failures = [];
+  const allBodyText = Object.values(byName).map((entry) => String(entry?.probe?.body_text || "")).join("\n");
+  if (/[—–]/.test(allBodyText)) failures.push("zero_visible_dashes");
+
+  const families = (desktop.section_layouts || []).map((entry) => String(entry?.family || "")).filter(Boolean);
+  if (new Set(families).size < Math.min(families.length, 4)) {
+    failures.push("section_layout_diversity");
+  }
+
+  const sectionSources = (desktop.section_layouts || [])
+    .flatMap((entry) => Array.isArray(entry?.image_srcs) ? entry.image_srcs : [])
+    .map((source) => String(source || ""));
+  const usesUnsplash = sectionSources.some((source) => /(?:^|\.)unsplash\.com\//i.test(source));
+  const unsplashExplicitlyAllowed = /\bunsplash\b.{0,80}\b(?:explicitly\s+)?(?:allowed|approved|provided)\b/i
+    .test(designSource);
+  if (
+    (usesUnsplash && !unsplashExplicitlyAllowed)
+    || new Set(sectionSources).size !== sectionSources.length
+  ) {
+    failures.push("image_plan_and_asset_integrity");
+  }
+
+  const heroWords = String(hero.hero_subtext || "").trim().match(/\b[\w'-]+\b/g) || [];
+  if (
+    Number(hero.viewport_width || 0) !== 1280
+    || Number(hero.viewport_height || 0) !== 800
+    || Number(hero.h1_line_count || 0) > 2
+    || heroWords.length > 20
+    || hero.primary_cta_visible !== true
+  ) {
+    failures.push("hero_first_viewport");
+  }
+
+  const radii = desktop.shape_radii && typeof desktop.shape_radii === "object"
+    ? Object.values(desktop.shape_radii)
+    : [];
+  if (
+    (
+      new Set(desktop.theme_modes || []).size > 1
+      && !/\b(?:theme switch|color block story)\b/i.test(designSource)
+    )
+    || hueClusterCount(desktop.accent_colors || []) > 1
+    || (
+      radii.some((values) => Array.isArray(values) && new Set(values).size > 1)
+      && !/\b(?:radius|corner)\s+(?:rule|system)\b/i.test(designSource)
+    )
+  ) {
+    failures.push("single_visual_system");
+  }
+  return [...new Set(failures)];
+}
+
+async function submitTastePublicationAudit(state, args) {
+  if (!state.renderEvidence?.success) {
+    throw new Error("Taste publication audit requires a successful rendered preflight");
+  }
+  const assets = await refreshTasteGeneratedAssets(state);
+  if (assets.length < 2 || new Set(assets.map((asset) => asset.image_sha256)).size !== assets.length) {
+    throw new Error("Taste publication audit requires at least two distinct generated landing assets");
+  }
+  const missingReads = [...state.requiredReadPaths].filter(
+    (filePath) => !state.completedReadPaths.has(filePath)
+  );
+  if (missingReads.length) {
+    throw new Error(`Taste publication audit requires successful Read evidence for: ${missingReads.join(", ")}`);
+  }
+  const officialGates = evidenceArrayToMap(
+    args?.official_gates,
+    TASTE_OFFICIAL_GATE_IDS,
+    "official Taste gates"
+  );
+  const preflightEvidence = evidenceArrayToMap(
+    args?.preflight_evidence,
+    state.publicationContract.canonicalPreflightIds,
+    "canonical Taste preflight"
+  );
+  let designSource = "";
+  try {
+    designSource = await fs.readFile(path.join(state.cwd, "DESIGN.md"), "utf8");
+  } catch {
+    // The Python publication gate owns the durable DESIGN.md requirement and produces the blocker.
+  }
+  const mechanicalFailures = officialGateFailures(state.renderEvidence, designSource);
+  if (mechanicalFailures.length) {
+    throw new Error(`trusted browser facts fail official Taste gates: ${mechanicalFailures.join(", ")}`);
+  }
+  const renderedImagePaths = new Set(
+    (state.renderEvidence.screenshots || []).flatMap((render) =>
+      Array.isArray(render?.probe?.image_srcs) ? render.probe.image_srcs : []
+    ).map((source) => {
+      try {
+        return new URL(String(source || ""), "http://127.0.0.1").pathname;
+      } catch {
+        return String(source || "").split("?")[0];
+      }
+    })
+  );
+  const unusedAssets = assets.filter((asset) => !renderedImagePaths.has(asset.public_path));
+  if (unusedAssets.length) {
+    throw new Error(
+      `Taste publication audit found generated assets absent from the render: ` +
+      unusedAssets.map((asset) => asset.public_path).join(", ")
+    );
+  }
+
+  const submittedAssets = new Map();
+  for (const item of Array.isArray(args?.asset_inspections) ? args.asset_inspections : []) {
+    const publicPath = String(item?.public_path || "").trim();
+    if (!publicPath || submittedAssets.has(publicPath)) {
+      throw new Error("asset inspections contain a missing or duplicate public_path");
+    }
+    submittedAssets.set(publicPath, item);
+  }
+  const missingAssets = assets.filter((asset) => !submittedAssets.has(asset.public_path));
+  const extraAssets = [...submittedAssets.keys()].filter(
+    (publicPath) => !state.generatedAssets.has(publicPath)
+  );
+  if (missingAssets.length || extraAssets.length) {
+    throw new Error(
+      `asset visual inspections are incomplete (missing: ` +
+      `${missingAssets.map((asset) => asset.public_path).join(", ") || "none"}; ` +
+      `unexpected: ${extraAssets.join(", ") || "none"})`
+    );
+  }
+  const assetInspections = {};
+  for (const asset of assets) {
+    const submitted = submittedAssets.get(asset.public_path);
+    if (
+      String(submitted.image_sha256 || "") !== asset.image_sha256
+      || Number(submitted.inspected_width || 0) !== asset.width
+      || Number(submitted.inspected_height || 0) !== asset.height
+    ) {
+      throw new Error(`asset visual inspection is stale or not full-resolution: ${asset.public_path}`);
+    }
+    const detectedText = (submitted.detected_text || []).map((value) => String(value || "").trim()).filter(Boolean);
+    const fakeUiDetected = submitted.fake_ui_detected === true;
+    if (detectedText.length || fakeUiDetected) {
+      throw new Error(`asset visual inspection reports a text artifact or fake UI: ${asset.public_path}`);
+    }
+    const source = String(submitted.source || "").trim();
+    if (!source || !source.includes(asset.path)) {
+      throw new Error(`asset visual inspection lacks its exact successful Read path: ${asset.public_path}`);
+    }
+    assetInspections[asset.public_path] = {
+      public_path: asset.public_path,
+      image_sha256: asset.image_sha256,
+      inspected: true,
+      inspected_width: asset.width,
+      inspected_height: asset.height,
+      detected_text: [],
+      fake_ui_detected: false,
+      artifact_labels: (submitted.artifact_labels || []).map((value) => String(value || "").trim()).filter(Boolean),
+      source,
+    };
+  }
+
+  const renders = Object.fromEntries(
+    state.renderEvidence.screenshots.map((entry) => [entry.name, {
+      width: entry.width,
+      height: entry.height,
+      screenshot_path: entry.screenshot_path,
+      screenshot_sha256: entry.screenshot_sha256,
+      inspected: true,
+      probe: entry.probe,
+    }])
+  );
+  state.audit = {
+    version: 1,
+    submitted: true,
+    passed: true,
+    inspection_contract: state.renderEvidence.inspection_contract,
+    official_gates: officialGates,
+    preflight_evidence: preflightEvidence,
+    render_inspections: {
+      desktop: renders.desktop,
+      mobile: renders.mobile,
+      hero_1280: renders["hero-1280"],
+    },
+    asset_inspections: assetInspections,
+    read_evidence: {
+      required_paths: [...state.requiredReadPaths].sort(),
+      authorized_paths: [...state.authorizedReadPaths].sort(),
+      completed_paths: [...state.completedReadPaths].sort(),
+      authorizations: [...state.readAuthorizations],
+    },
+  };
+  return state.audit;
+}
+
+function tastePublicationEvidenceFromState(state) {
+  if (!state) return null;
+  if (state.audit) return state.audit;
+  const renders = Object.fromEntries(
+    (state.renderEvidence?.screenshots || []).map((entry) => [entry.name, {
+      width: entry.width,
+      height: entry.height,
+      screenshot_path: entry.screenshot_path,
+      screenshot_sha256: entry.screenshot_sha256,
+      inspected: entry.inspected === true,
+      probe: entry.probe,
+    }])
+  );
+  return {
+    version: 1,
+    submitted: false,
+    passed: false,
+    inspection_contract: state.renderEvidence?.inspection_contract || null,
+    render_inspections: {
+      desktop: renders.desktop || null,
+      mobile: renders.mobile || null,
+      hero_1280: renders["hero-1280"] || null,
+    },
+    asset_inspections: {},
+    preflight_evidence: {},
+    official_gates: {},
+    read_evidence: {
+      required_paths: [...state.requiredReadPaths].sort(),
+      authorized_paths: [...state.authorizedReadPaths].sort(),
+      completed_paths: [...state.completedReadPaths].sort(),
+      authorizations: [...state.readAuthorizations],
+    },
+  };
 }
 
 function createSiteImageMcpServer({
@@ -390,26 +1112,34 @@ function createSiteImageMcpServer({
   bridgeDir,
   cwd,
   renderLandingPreflight = renderTasteLandingPreflight,
+  publicationState = null,
+  publicationContract = null,
 }) {
   if (!bridgeDir) return null;
+  const state = publicationState || createTastePublicationState(cwd, publicationContract);
+  if (!state.publicationContract) {
+    throw new Error("Taste publication MCP requires the canonical publication contract");
+  }
   let preflightCalls = 0;
   return createSdkMcpServer({
     name: "takyon_site_image",
     version: "1.0.0",
     alwaysLoad: true,
     instructions:
-      "Taste landing image generation is mandatory. After the Design Read, generate exactly two " +
-      "distinct page-role assets: one hero and one supporting image. Use every returned public_path " +
-      "in an <img data-takyon-landing-asset=\"hero|supporting\">. The image tool is capped and " +
-      "money-gated. After build and typecheck pass, call business_render_landing_preflight instead " +
-      "of starting agent-browser or a preview daemon yourself. Call it exactly once after the final " +
-      "green build, then Read both returned screenshots. A render failure is a blocker, not a retry.",
+      "A Safebox-gated, cost-capped image generator is available. Let the native Taste skill choose " +
+      "the art direction and how many generated assets the page needs within the tool's cap; use each " +
+      "returned public_path in the shipped page. Read every generated full-resolution PNG. After build " +
+      "and typecheck pass, call business_render_landing_preflight instead of starting agent-browser or " +
+      "a preview daemon yourself. Call it exactly once after the final green build, then Read all three " +
+      "returned screenshots. Finally submit business_submit_taste_publication_audit with the six official " +
+      "gate results, every canonical preflight checkbox, and one inspection for every generated asset. " +
+      "A render, Read, or audit failure is a blocker, not a retry.",
     tools: [
       tool(
         "business_generate_site_image",
         "Generate one real, business-owned landing image through Takyon's Safebox-gated creative rail. " +
-          "Art-direct one exact page role. No baked-in text, UI labels, logos, watermarks, browser chrome, " +
-          "fake product controls, generic filler, or stock hotlinks. Returns only a local /generated/... path.",
+          "The native Taste skill chooses the prompt, purpose, aspect ratio, and page role. Returns a " +
+          "local /generated/... path.",
         {
           slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(80),
           prompt: z.string().min(1).max(12000),
@@ -419,7 +1149,34 @@ function createSiteImageMcpServer({
         async (args) => {
           try {
             const result = await invokeSiteImageBridge(bridgeDir, args);
-            return { content: [{ type: "text", text: JSON.stringify(result) }] };
+            const publicPath = String(result?.public_path || "").trim();
+            if (!/^\/generated\/[a-z0-9]+(?:-[a-z0-9]+)*\.png$/.test(publicPath)) {
+              throw new Error("site-image bridge returned an invalid public_path");
+            }
+            const imagePath = path.join(state.cwd, "public", publicPath.slice(1));
+            const evidence = await pngEvidence(imagePath);
+            const asset = {
+              public_path: publicPath,
+              path: registerTasteRequiredRead(state, imagePath),
+              image_sha256: evidence.sha256,
+              width: evidence.width,
+              height: evidence.height,
+              bytes: evidence.bytes,
+            };
+            state.generatedAssets.set(publicPath, asset);
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  ...result,
+                  read_path: asset.path,
+                  image_sha256: asset.image_sha256,
+                  width: asset.width,
+                  height: asset.height,
+                  instruction: "Read read_path at full resolution before submitting the Taste audit.",
+                }),
+              }],
+            };
           } catch (error) {
             return {
               isError: true,
@@ -431,11 +1188,11 @@ function createSiteImageMcpServer({
       ),
       tool(
         "business_render_landing_preflight",
-        "Deterministically render the built landing at desktop 1440x900 and mobile 390x844. " +
-          "Starts and stops one loopback-only Vite preview, invokes /usr/bin/chromium directly, " +
-          "and writes /workspace/.takyon-preflight/landing-{desktop,mobile}.png. Exactly one call " +
-          "is allowed for this Taste session. Call only after the final green build and typecheck; then " +
-          "Read both returned PNGs and inspect them visually.",
+        "Deterministically render the built landing at desktop 1440x900, mobile 390x844, and the " +
+          "official hero gate 1280x800. Starts and stops one loopback-only Vite preview, drives the " +
+          "pinned /usr/bin/chromium through the DevTools pipe, captures PNGs, and evaluates the exact " +
+          "TASTE_RENDER_INSPECTION_JS contract. Exactly one call is allowed for this Taste session. " +
+          "Call only after the final green build and typecheck; then Read all returned PNGs.",
         {},
         async () => {
           preflightCalls += 1;
@@ -449,17 +1206,68 @@ function createSiteImageMcpServer({
             };
           }
           try {
-            const result = await renderLandingPreflight(cwd);
+            const result = await renderLandingPreflight(cwd, {
+              publicationContract: state.publicationContract,
+            });
+            state.renderEvidence = result;
+            for (const screenshot of result.screenshots || []) {
+              registerTasteRequiredRead(state, screenshot.screenshot_path || screenshot.path);
+            }
+            const assets = await refreshTasteGeneratedAssets(state);
             return {
               content: [{
                 type: "text",
                 text: JSON.stringify({
                   ...result,
+                  generated_assets_to_read: assets,
                   call: preflightCalls,
                   remaining_calls: TASTE_PREFLIGHT_MAX_CALLS - preflightCalls,
                 }),
               }],
             };
+          } catch (error) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: String(error?.message || error) }],
+            };
+          }
+        },
+        { alwaysLoad: true }
+      ),
+      tool(
+        "business_submit_taste_publication_audit",
+        "Submit the final native Taste audit after successfully Read-ing every preflight screenshot " +
+          "and every generated PNG. Requires all six official gates, all canonical preflight " +
+          "checkboxes with code/copy evidence, and digest-bound full-resolution asset findings. " +
+          "Any failed gate, missing Read, stale digest, baked text, or fake UI blocks publication.",
+        {
+          official_gates: z.array(z.object({
+            id: z.string().min(1).max(120),
+            passed: z.boolean(),
+            evidence: z.string().min(1).max(4000),
+            source: z.string().min(1).max(1000),
+          }).strict()).length(TASTE_OFFICIAL_GATE_IDS.length),
+          preflight_evidence: z.array(z.object({
+            id: z.string().min(1).max(120),
+            passed: z.boolean(),
+            evidence: z.string().min(1).max(4000),
+            source: z.string().min(1).max(1000),
+          }).strict()).min(1).max(200),
+          asset_inspections: z.array(z.object({
+            public_path: z.string().regex(/^\/generated\/[a-z0-9]+(?:-[a-z0-9]+)*\.png$/),
+            image_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+            inspected_width: z.number().int().positive(),
+            inspected_height: z.number().int().positive(),
+            detected_text: z.array(z.string().max(1000)).max(100),
+            fake_ui_detected: z.boolean(),
+            artifact_labels: z.array(z.string().max(1000)).max(100),
+            source: z.string().min(1).max(1000),
+          }).strict()).min(2).max(20),
+        },
+        async (args) => {
+          try {
+            const evidence = await submitTastePublicationAudit(state, args);
+            return { content: [{ type: "text", text: JSON.stringify(evidence) }] };
           } catch (error) {
             return {
               isError: true,
@@ -483,8 +1291,10 @@ function buildClaudeSessionEnv({
   anthropicDefaultSonnetModel,
   anthropicDefaultHaikuModel,
   claudeCodeSubagentModel,
+  claudeConfigDir,
   inDockerWorker,
   cwd,
+  failOnApiRetry,
 }) {
   const env = {
     PATH: String(process.env.PATH || SANDBOX_PATH).trim() || SANDBOX_PATH,
@@ -493,6 +1303,14 @@ function buildClaudeSessionEnv({
     ANTHROPIC_TOKEN: anthropicToken,
     CLAUDE_AGENT_SDK_CLIENT_APP: "takyon-business-agent",
     CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: disableExperimentalBetas,
+    // Claude Code otherwise performs its own retry loop before the Agent SDK can emit and let the
+    // parent reject an api_retry frame.  Zero retries makes the first retryable response terminal,
+    // so Takyon can fail the worker after exactly one provider request.
+    ...(failOnApiRetry ? { CLAUDE_CODE_MAX_RETRIES: "0" } : {}),
+    ...(failOnApiRetry
+      ? { ANTHROPIC_CUSTOM_HEADERS: "x-takyon-fail-on-api-retry: 1" }
+      : {}),
+    ...(claudeConfigDir ? { CLAUDE_CONFIG_DIR: claudeConfigDir } : {}),
     ...(anthropicBaseUrl ? { ANTHROPIC_BASE_URL: anthropicBaseUrl } : {}),
     ...(anthropicModel ? { ANTHROPIC_MODEL: anthropicModel } : {}),
     ...(anthropicDefaultOpusModel ? { ANTHROPIC_DEFAULT_OPUS_MODEL: anthropicDefaultOpusModel } : {}),
@@ -750,6 +1568,26 @@ function apiRetryFailureFromSdkMessage(message) {
   );
 }
 
+function failFastApiFailureFromTerminalError(error) {
+  const message = String(error?.message || error || "");
+  const match = message.match(/\bAPI Error:\s*(408|409|429|5\d\d)\b/i);
+  if (!match) return "";
+  const status = Number.parseInt(match[1], 10);
+  const reason = status === 408
+    ? "request_timeout"
+    : status === 409
+      ? "request_conflict"
+      : status === 429
+        ? "rate_limit_error"
+        : status === 529
+          ? "overloaded_error"
+          : "server_error";
+  return compactText(
+    `Claude API retry refused by fail-fast policy on attempt 1/1: ${reason} (HTTP ${status})`,
+    320
+  );
+}
+
 let lastProgressSignature = "";
 
 function emitProgress(event) {
@@ -791,9 +1629,9 @@ function buildPrompt(input) {
     `You may inspect and edit files only inside the provided current workspace. ${bashRule}`,
     "The provided current workspace is already your working directory. Write paths relative to it; do not prefix paths with the workspace name again.",
     "",
-    `Make the smallest useful changes that satisfy the task. Preserve existing business files unless the instruction asks to update them. ${noteRule}`,
+    `Complete the requested task while preserving unrelated business files. ${noteRule}`,
     "",
-    "Execution posture (HARD): begin with targeted file inspection, then implement immediately. Do not narrate design exploration, produce an implementation plan, or spend a turn deliberating before using tools. Keep private reasoning private; expose only concise tool progress and the final result.",
+    "Inspect the relevant files, reason about the task, and use the available tools as needed. Keep private reasoning private; expose only concise tool progress and the final result.",
     "",
     "Do not claim external execution happened. If the task needs a vendor/API/payment/deploy/posting action you cannot perform, report the blocker in the final summary instead of pretending it ran.",
     "Do not create request/spec/verification markdown files unless the instruction explicitly asks for them.",
@@ -813,8 +1651,31 @@ async function main() {
   thinkingBlockState.clear();
   emittedPlanningMilestone = false;
   lastProgressSignature = "";
+  workerSkillStartedAt = Date.now();
+  workerTastePublicationState = null;
+  workerStderr = "";
+  workerModel = null;
+  workerUsage = null;
+  workerTotalCostUsd = null;
   const raw = await readStdin();
   const input = JSON.parse(raw || "{}");
+  const tasteSkillRequired = isTasteSkillApplicable(input);
+  workerSkillReceipt = {
+    name: TASTE_SKILL_NAME,
+    installed: false,
+    expected_sha256: TASTE_SKILL_SHA256,
+    required: tasteSkillRequired,
+    requested: true,
+    discovered: false,
+    discovery_event: false,
+    included: null,
+    inclusion_event: false,
+    native_use: false,
+    native_use_attempts: 0,
+    native_use_events: 0,
+    model: null,
+    usage: null,
+  };
   const cwd = path.resolve(String(input.cwd || "."));
   const root = path.resolve(String(input.root || cwd));
   if (!isSubpath(root, cwd)) {
@@ -857,6 +1718,9 @@ async function main() {
       "coding worker model is not configured; no fallback model is available"
     );
   }
+  workerSkillReceipt.model = model;
+  workerSkillReceipt.requested_model = model;
+  workerModel = model;
   for (const [name, value] of Object.entries({
     ANTHROPIC_MODEL: anthropicModel,
     ANTHROPIC_DEFAULT_OPUS_MODEL: anthropicDefaultOpusModel,
@@ -883,18 +1747,58 @@ async function main() {
   const inDockerWorker = String(process.env.TAKYON_CLAUDE_AGENT_IN_DOCKER || "").trim() === "1";
   const siteImageBridgeDir = String(input.siteImageBridgeDir || "").trim();
   const failOnApiRetry = input.failOnApiRetry === true;
-  const siteImageMcpServer = createSiteImageMcpServer({
-    createSdkMcpServer,
-    tool,
-    z,
-    bridgeDir: siteImageBridgeDir,
-    cwd,
+  const configuredClaudeConfigDir = path.resolve(String(
+    input.claudeConfigDir || process.env.CLAUDE_CONFIG_DIR || CLAUDE_CONFIG_DIR
+  ));
+  const nativeTasteSkill = await validateNativeTasteSkill({
+    nativeDir: path.join(configuredClaudeConfigDir, "skills", TASTE_SKILL_NAME),
+    canonicalDir: TASTE_SKILL_CANONICAL_DIR,
   });
+  Object.assign(workerSkillReceipt, nativeTasteSkill.receipt);
+  if (workerSkillReceipt.installed) {
+    emitProgress({
+      kind: "claude_agent_skill",
+      status: "output",
+      detail: `Installed canonical ${TASTE_SKILL_NAME} as a native Claude Code skill.`,
+    });
+  }
+  const publicationContract = tasteSkillRequired ? await loadTastePublicationContract() : null;
+  workerTastePublicationState = tasteSkillRequired
+    ? createTastePublicationState(cwd, publicationContract)
+    : null;
+  const siteImageMcpServer = tasteSkillRequired
+    ? createSiteImageMcpServer({
+        createSdkMcpServer,
+        tool,
+        z,
+        bridgeDir: siteImageBridgeDir,
+        cwd,
+        publicationState: workerTastePublicationState,
+        publicationContract,
+      })
+    : null;
+  if (tasteSkillRequired && !siteImageMcpServer) {
+    throw new Error("product/site publication refused: Taste image, render, and audit tools are unavailable");
+  }
 
   let text = "";
   let totalCostUsd = null;
   let finalUsage = null;
-  workerStderr = "";
+  const actualModels = new Set();
+  const pendingTasteSkillUses = new Set();
+  const pendingReadUses = new Map();
+  const workerPrompt = buildPrompt(input);
+  const canonicalTasteBody = await fs.readFile(
+    path.join(TASTE_SKILL_CANONICAL_DIR, "SKILL.md"),
+    "utf8"
+  );
+  workerSkillReceipt.prompt_body_absent = !workerPrompt.includes(canonicalTasteBody);
+  workerSkillReceipt.prompt_distinctive_markers_absent = TASTE_PROMPT_DISTINCTIVE_MARKERS.every(
+    (marker) => !workerPrompt.includes(marker)
+  );
+  workerSkillReceipt.prompt_body_injected = false;
+  workerSkillReceipt.prompt_sha256 = sha256(workerPrompt);
+  workerSkillReceipt.prompt_bytes = Buffer.byteLength(workerPrompt, "utf8");
   let parentAbortRequested = false;
   const requestParentAbort = () => {
     parentAbortRequested = true;
@@ -902,9 +1806,47 @@ async function main() {
   };
   process.once("SIGTERM", requestParentAbort);
   process.once("SIGINT", requestParentAbort);
+  const captureSkillInclusion = async (sdkQuery) => {
+    try {
+      const contextUsage = await sdkQuery.getContextUsage();
+      const skillUsage = contextUsage && typeof contextUsage === "object" ? contextUsage.skills : null;
+      workerSkillReceipt.inclusion_event = true;
+      if (!skillUsage || typeof skillUsage !== "object") {
+        workerSkillReceipt.included = false;
+        workerSkillReceipt.inclusion_error = "SDK context usage omitted skills";
+        return;
+      }
+      const frontmatter = Array.isArray(skillUsage.skillFrontmatter)
+        ? skillUsage.skillFrontmatter
+        : [];
+      const matched = frontmatter.find((item) => {
+        const name = String(item?.name || "").trim();
+        return name === TASTE_SKILL_NAME || name.endsWith(`:${TASTE_SKILL_NAME}`);
+      });
+      const matchedSource = matched ? String(matched.source || "") : "";
+      workerSkillReceipt.included = Boolean(matched && matchedSource === "userSettings");
+      workerSkillReceipt.included_skills = frontmatter.map((item) => ({
+        name: String(item?.name || ""),
+        source: String(item?.source || ""),
+        tokens: Number(item?.tokens || 0),
+      }));
+      workerSkillReceipt.included_skill_count = Number(skillUsage.includedSkills || 0);
+      workerSkillReceipt.total_skills = Number(skillUsage.totalSkills || 0);
+      workerSkillReceipt.included_source = matchedSource || null;
+      workerSkillReceipt.included_tokens = matched ? Number(matched.tokens || 0) : 0;
+      if (matched && matchedSource !== "userSettings") {
+        workerSkillReceipt.inclusion_error =
+          `native Taste resolved from forbidden source ${matchedSource || "unknown"}`;
+      }
+    } catch (error) {
+      workerSkillReceipt.inclusion_event = false;
+      workerSkillReceipt.included = null;
+      workerSkillReceipt.inclusion_error = compactText(error?.message || String(error), 160);
+    }
+  };
   try {
-    for await (const message of query({
-          prompt: buildPrompt(input),
+    const sdkQuery = query({
+          prompt: workerPrompt,
           options: {
             abortController,
             cwd,
@@ -918,15 +1860,21 @@ async function main() {
               anthropicDefaultSonnetModel: model,
               anthropicDefaultHaikuModel: model,
               claudeCodeSubagentModel: model,
+              claudeConfigDir: nativeTasteSkill.configDir,
               inDockerWorker,
               cwd,
+              failOnApiRetry,
             }),
             model,
+            // Supplying a title disables Claude Code's separate paid title-generation request.
+            title: `Takyon ${String(input.business || "business")} worker`,
+            skills: [TASTE_SKILL_NAME],
+            settingSources: ["user"],
             includePartialMessages: true,
             thinking: { type: "adaptive", display: "summarized" },
             effort: ["low", "medium", "high"].includes(effort) ? effort : "high",
             tools: [
-              "Read", "Write", "Edit", "MultiEdit", "Grep", "Glob",
+              "Read", "Write", "Edit", "MultiEdit", "Grep", "Glob", "Skill",
               ...(allowBash ? ["Bash"] : []),
             ],
             ...(siteImageMcpServer
@@ -934,6 +1882,7 @@ async function main() {
                   allowedTools: [
                     "mcp__takyon_site_image__business_generate_site_image",
                     "mcp__takyon_site_image__business_render_landing_preflight",
+                    "mcp__takyon_site_image__business_submit_taste_publication_audit",
                   ],
                 }
               : {}),
@@ -971,7 +1920,7 @@ async function main() {
                     behavior: "deny",
                     message:
                       "Taste landing preview/browser commands are disabled. Run build and typecheck, " +
-                      "then call business_render_landing_preflight and Read both returned PNGs.",
+                      "then call business_render_landing_preflight and Read all returned PNGs.",
                     toolUseID: options.toolUseID
                   };
                 }
@@ -991,11 +1940,88 @@ async function main() {
                   toolUseID: options.toolUseID
                 };
               }
+              if (toolName === "Read") {
+                const readPathValue = pathValues(updatedInput)[0];
+                if (readPathValue) {
+                  const resolvedReadPath = path.resolve(cwd, readPathValue);
+                  pendingReadUses.set(options.toolUseID, resolvedReadPath);
+                  if (workerTastePublicationState?.requiredReadPaths.has(resolvedReadPath)) {
+                    workerTastePublicationState.authorizedReadPaths.add(resolvedReadPath);
+                    workerTastePublicationState.readAuthorizations.push({
+                      tool_use_id: options.toolUseID,
+                      path: resolvedReadPath,
+                    });
+                  }
+                }
+              }
               return { behavior: "allow", updatedInput, toolUseID: options.toolUseID };
             }
           }
-    })) {
+    });
+    for await (const message of sdkQuery) {
       emitProgress(progressEventFromSdkMessage(message));
+      const reportedModel = String(message?.message?.model || message?.model || "").trim();
+      if (reportedModel) actualModels.add(reportedModel);
+      if (message && typeof message === "object" && message.type === "system" && message.subtype === "init") {
+        const discoveredSkills = Array.isArray(message.skills)
+          ? message.skills.map((name) => String(name || "").trim()).filter(Boolean)
+          : [];
+        workerSkillReceipt.discovery_event = true;
+        workerSkillReceipt.discovered = discoveredSkills.includes(TASTE_SKILL_NAME);
+        workerSkillReceipt.discovered_skills = discoveredSkills;
+        workerSkillReceipt.taste_discovered_name = discoveredSkills.find(
+          (name) => name === TASTE_SKILL_NAME || name.endsWith(`:${TASTE_SKILL_NAME}`)
+        ) || null;
+        if (workerSkillReceipt.discovered) {
+          emitProgress({
+            kind: "claude_agent_skill",
+            status: "output",
+            detail: `Claude Code discovered native skill ${TASTE_SKILL_NAME}.`,
+          });
+        }
+        if (tasteSkillRequired && !workerSkillReceipt.discovered) {
+          abortController.abort();
+          throw new Error(
+            `product/site publication refused: Claude Code did not discover native skill ${TASTE_SKILL_NAME}`
+          );
+        }
+      }
+      const tasteToolUses = nativeTasteSkillToolUsesFromSdkMessage(message);
+      if (tasteToolUses.length > 0) {
+        for (const use of tasteToolUses) {
+          if (use.id) pendingTasteSkillUses.add(use.id);
+        }
+        workerSkillReceipt.native_use_attempts += tasteToolUses.length;
+      }
+      const tasteToolResults = nativeTasteSkillResultsFromSdkMessage(message, pendingTasteSkillUses);
+      if (tasteToolResults.length > 0) {
+        for (const result of tasteToolResults) {
+          pendingTasteSkillUses.delete(result.id);
+          if (result.success) {
+            workerSkillReceipt.native_use = true;
+            workerSkillReceipt.native_use_events += 1;
+          } else {
+            workerSkillReceipt.native_use_error = result.error || "native Skill tool failed";
+          }
+        }
+        if (workerSkillReceipt.native_use_events === 1) {
+          emitProgress({
+            kind: "claude_agent_skill",
+            status: "output",
+            detail: `Claude Code invoked native skill ${TASTE_SKILL_NAME}.`,
+          });
+        }
+        if (workerSkillReceipt.native_use && !workerSkillReceipt.inclusion_event) {
+          await captureSkillInclusion(sdkQuery);
+        }
+      }
+      const completedReads = completedReadToolResultsFromSdkMessage(message, pendingReadUses);
+      for (const result of completedReads) {
+        pendingReadUses.delete(result.id);
+        if (result.success && workerTastePublicationState?.requiredReadPaths.has(result.filePath)) {
+          workerTastePublicationState.completedReadPaths.add(result.filePath);
+        }
+      }
       const apiRetryFailure = failOnApiRetry ? apiRetryFailureFromSdkMessage(message) : "";
       if (apiRetryFailure) {
         abortController.abort();
@@ -1006,23 +2032,62 @@ async function main() {
       if (message && typeof message === "object" && message.type === "result") {
         if (typeof message.total_cost_usd === "number" && Number.isFinite(message.total_cost_usd)) {
           totalCostUsd = message.total_cost_usd;
+          workerTotalCostUsd = totalCostUsd;
         }
         if (message.usage && typeof message.usage === "object") {
           finalUsage = message.usage;
+          workerUsage = finalUsage;
         }
       }
     }
     if (parentAbortRequested) {
       throw new Error("Claude Agent SDK task cancelled by parent supervisor");
     }
+    if (tasteSkillRequired && !workerSkillReceipt.discovery_event) {
+      throw new Error(
+        `product/site publication refused: Claude Code emitted no native skill discovery receipt for ${TASTE_SKILL_NAME}`
+      );
+    }
+    if (tasteSkillRequired && (!workerSkillReceipt.inclusion_event || !workerSkillReceipt.included)) {
+      throw new Error(
+        `product/site publication refused: Claude Code did not include native skill ${TASTE_SKILL_NAME}`
+      );
+    }
+    if (tasteSkillRequired && !workerSkillReceipt.native_use) {
+      throw new Error(
+        `product/site publication refused: Claude Code did not invoke native skill ${TASTE_SKILL_NAME}`
+      );
+    }
+    if (
+      tasteSkillRequired
+      && (
+        workerSkillReceipt.prompt_body_absent !== true
+        || workerSkillReceipt.prompt_distinctive_markers_absent !== true
+      )
+    ) {
+      throw new Error("product/site publication refused: native Taste content was pasted into the worker prompt");
+    }
+    if (tasteSkillRequired && !workerTastePublicationState?.audit?.passed) {
+      throw new Error(
+        "product/site publication refused: trusted rendered Taste publication audit was not submitted and passed"
+      );
+    }
+  } catch (error) {
+    const failFastFailure = failOnApiRetry
+      ? failFastApiFailureFromTerminalError(error)
+      : "";
+    if (failFastFailure) throw new Error(failFastFailure);
+    throw error;
   } finally {
     process.removeListener("SIGTERM", requestParentAbort);
     process.removeListener("SIGINT", requestParentAbort);
-    // Screenshots must remain available while this SDK session can Read them, but they are
-    // verification scratch, never business source. Remove them before stdout lets the parent sync
-    // the mounted workspace; the parent repeats this cleanup after forced-timeout container exits.
-    if (siteImageMcpServer) {
-      await fs.rm(tastePreflightDir(cwd), { recursive: true, force: true });
+    // The parent validates these digest-bound PNGs with taste_publication_gate.py before it removes
+    // verification scratch and syncs the business workspace. Deleting here would destroy the proof.
+    if (workerSkillReceipt) {
+      workerSkillReceipt.duration_ms = Math.max(0, Date.now() - workerSkillStartedAt);
+      workerSkillReceipt.usage = finalUsage;
+      workerSkillReceipt.actual_models = [...actualModels];
+      workerSkillReceipt.actual_model = actualModels.size === 1 ? [...actualModels][0] : null;
     }
   }
 
@@ -1034,6 +2099,8 @@ async function main() {
     total_cost_usd: typeof totalCostUsd === "number" ? totalCostUsd : null,
     actual_cost_cents: typeof totalCostUsd === "number" ? Math.max(0, Math.round(totalCostUsd * 100)) : null,
     usage: finalUsage,
+    skill_receipt: workerSkillReceipt,
+    taste_publication_evidence: tastePublicationEvidenceFromState(workerTastePublicationState),
     worker_stderr: redact(workerStderr).trim() || null,
   }));
 }
@@ -1041,15 +2108,29 @@ async function main() {
 export {
   apiRetryFailureFromSdkMessage,
   buildPrompt,
+  captureTasteViewport,
+  completedReadToolResultsFromSdkMessage,
+  createTastePublicationState,
   createSiteImageMcpServer,
+  loadTastePublicationContract,
+  nativeTasteSkillUseFromSdkMessage,
   progressEventFromSdkMessage,
   renderTasteLandingPreflight,
+  submitTastePublicationAudit,
+  tastePublicationEvidenceFromState,
+  validateNativeTasteSkill,
 };
 
 const isMainModule = process.argv[1]
   && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isMainModule) main().catch((error) => {
+  if (workerSkillReceipt) {
+    workerSkillReceipt.duration_ms = Math.max(0, Date.now() - workerSkillStartedAt);
+    workerSkillReceipt.usage = workerUsage;
+    workerSkillReceipt.model ??= workerModel;
+    workerSkillReceipt.requested_model ??= workerModel;
+  }
   emitProgress({
     kind: "claude_agent_sdk",
     status: "failed",
@@ -1059,7 +2140,16 @@ if (isMainModule) main().catch((error) => {
   process.stdout.write(JSON.stringify({
     success: false,
     source: "claude-agent-sdk",
+    model: workerModel,
+    actual_model: workerSkillReceipt?.actual_model || null,
+    total_cost_usd: typeof workerTotalCostUsd === "number" ? workerTotalCostUsd : null,
+    actual_cost_cents: typeof workerTotalCostUsd === "number"
+      ? Math.max(0, Math.round(workerTotalCostUsd * 100))
+      : null,
+    usage: workerUsage,
     error: redact(error?.stack || error?.message || String(error)),
+    skill_receipt: workerSkillReceipt,
+    taste_publication_evidence: tastePublicationEvidenceFromState(workerTastePublicationState),
     worker_stderr: redact(workerStderr).trim() || null,
   }));
   process.exitCode = 1;

@@ -71,12 +71,23 @@ def test_product_worker_uses_an_immutable_claimed_release_snapshot(tmp_path, mon
     release = "a" * 40
     runtime = tmp_path / "runtime"
     (runtime / "scripts").mkdir(parents=True)
+    canonical_skill = (
+        Path(core.__file__).resolve().parents[2]
+        / "skills"
+        / "creative"
+        / "taste-frontend"
+        / "SKILL.md"
+    ).read_bytes()
+    taste_gate = (Path(core.__file__).resolve().parent / "taste_publication_gate.py").read_bytes()
     files = {
         "package.json": b'{"dependencies":{"@anthropic-ai/claude-agent-sdk":"1.0.0"}}',
         "package-lock.json": b'{"lockfileVersion":3,"packages":{}}',
+        "plugins/takyon/taste_publication_gate.py": taste_gate,
         "scripts/takyon-claude-agent-task.mjs": b"console.log('sealed');\n",
+        "skills/creative/taste-frontend/SKILL.md": canonical_skill,
     }
     for relative, content in files.items():
+        (runtime / relative).parent.mkdir(parents=True, exist_ok=True)
         (runtime / relative).write_bytes(content)
     (runtime / ".takyon-deploy-artifact.json").write_text(
         json.dumps({"source_revision": release}), encoding="utf-8"
@@ -103,6 +114,95 @@ def test_product_worker_uses_an_immutable_claimed_release_snapshot(tmp_path, mon
     assert (snapshot / "scripts" / "takyon-claude-agent-task.mjs").read_bytes() == files[
         "scripts/takyon-claude-agent-task.mjs"
     ]
+    assert (snapshot / "plugins" / "takyon" / "taste_publication_gate.py").read_bytes() == taste_gate
+    native = snapshot / ".claude" / "skills" / "design-taste-frontend"
+    assert native.is_symlink()
+    assert native.readlink() == Path("../../skills/creative/taste-frontend")
+    assert native.resolve() == snapshot / "skills" / "creative" / "taste-frontend"
+
+
+def test_non_docker_native_taste_install_is_shared_under_takyon_home(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    canonical_dir = runtime / "skills" / "creative" / "taste-frontend"
+    canonical_dir.mkdir(parents=True)
+    source_skill = (
+        Path(core.__file__).resolve().parents[2]
+        / "skills"
+        / "creative"
+        / "taste-frontend"
+        / "SKILL.md"
+    )
+    (canonical_dir / "SKILL.md").write_bytes(source_skill.read_bytes())
+    takyon_home = tmp_path / "operator-home"
+    monkeypatch.setenv("TAKYON_HOME", str(takyon_home))
+
+    config = core._shared_claude_config_dir(runtime)
+    native = config / "skills" / "design-taste-frontend"
+
+    assert config == takyon_home / ".claude"
+    assert native.is_symlink()
+    assert native.resolve() == canonical_dir
+    native.unlink()
+    native.symlink_to(tmp_path / "forbidden-business-override", target_is_directory=True)
+    assert core._shared_claude_config_dir(runtime) == config
+    assert native.resolve() == canonical_dir
+    monkeypatch.setattr(core, "_repo_root", lambda: runtime)
+    monkeypatch.setattr(
+        core,
+        "_mint_claude_agent_operator_session_token",
+        lambda _business, _operator_user_id: "operator-session-capability",
+    )
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
+    env = core._claude_agent_non_docker_worker_env("native-taste", "owner-1")
+    assert env["CLAUDE_CONFIG_DIR"] == str(config)
+    source = Path(core.__file__).read_text(encoding="utf-8")
+    assert '"claudeConfigDir": worker_env["CLAUDE_CONFIG_DIR"]' in source
+
+
+def test_docker_native_taste_config_is_writable_but_skill_is_release_readonly(
+    tmp_path, monkeypatch
+):
+    from tools.environments import docker as docker_env
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    snapshot = tmp_path / "snapshot"
+    (snapshot / ".claude" / "skills").mkdir(parents=True)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_resolve_host_user_spec", lambda: None)
+    monkeypatch.setattr(docker_env, "_host_user_identity_mount_args", lambda _spec: [])
+    monkeypatch.setattr(docker_env, "_build_security_args", lambda _as_user=False: [])
+    monkeypatch.setattr(core, "_repo_root", lambda: tmp_path / "runtime")
+    monkeypatch.setattr(core, "_product_worker_runtime_snapshot", lambda _root: snapshot)
+    monkeypatch.setattr(core, "_docker_claude_worker_binary_mounts", lambda **_kwargs: ([], {}))
+    monkeypatch.setattr(core, "_runtime_env", lambda extra=None: dict(extra or {}))
+    monkeypatch.setattr(core, "_shared_npm_cache_dir", lambda: tmp_path / "npm-cache")
+    monkeypatch.setattr(
+        core,
+        "_mint_claude_agent_operator_session_token",
+        lambda _business, _operator_user_id: "operator-session-capability",
+    )
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_MODEL", "deepseek-v4-pro")
+
+    command, payload, _worker_cwd, _worker_env = core._run_claude_agent_task_in_docker(
+        payload={"business": "native-taste", "workspace": "product/site", "instruction": "x"},
+        workspace_path=workspace,
+        timeout_ms=30_000,
+        business="native-taste",
+        operator_user_id="owner-1",
+    )
+
+    assert payload["claudeConfigDir"] == "/repo/.claude"
+    assert "CLAUDE_CONFIG_DIR=/repo/.claude" in command
+    assert "/repo/.claude:rw,nosuid,nodev,noexec,mode=1777,size=64m" in command
+    assert f"type=bind,src={snapshot},dst=/repo,readonly" in command
+    assert (
+        f"type=bind,src={snapshot / '.claude' / 'skills'},dst=/repo/.claude/skills,readonly"
+        in command
+    )
 
 
 def test_existing_business_upsert_does_not_hydrate_workspace(tmp_path, monkeypatch):
@@ -441,6 +541,32 @@ def test_every_business_claude_worker_fails_on_first_sdk_retry():
     assert '"failOnApiRetry": True' in source
 
 
+def test_product_worker_preflights_release_and_never_starts_a_repair_model_call():
+    source = Path(core.__file__).read_text(encoding="utf-8")
+    owned = source.split("def _handle_business_claude_agent_task_owned", 1)[1].split(
+        "\ndef ", 1
+    )[0]
+
+    assert owned.index("runtime_release_sha(runtime_root=_repo_root())") < owned.index(
+        "_reserve_operator_task_budget("
+    )
+    assert "should_retry_surface_build" not in owned
+    assert "should_retry_turn_cap" not in owned
+    assert "Hermes automatic build-fix retry" not in owned
+    assert "Hermes automatic continuation retry" not in source
+
+
+def test_product_site_capabilities_are_selected_by_workspace_not_guidance():
+    source = Path(core.__file__).read_text(encoding="utf-8")
+    owned = source.split("def _handle_business_claude_agent_task_owned", 1)[1].split(
+        "\ndef ", 1
+    )[0]
+
+    assert "guidance_skills" not in owned
+    assert "if _workspace_needs_runtime_ui_contract(workspace_rel):\n" in owned
+    assert "_site_image_worker_bridge(" in owned
+
+
 def _clean_git_runtime(tmp_path: Path) -> tuple[Path, str]:
     root = tmp_path / "runtime"
     root.mkdir()
@@ -504,24 +630,18 @@ def test_runtime_release_sha_timeout_is_unavailable_not_invalid(tmp_path, monkey
         _REAL_RUNTIME_RELEASE_SHA(runtime_root=root)
 
 
-def test_pinned_upstream_taste_body_is_injected_once_without_excerpt_truncation():
-    skill_file = core._find_guidance_skill_file("taste-frontend")
-    assert skill_file is not None
-    _frontmatter, body = core.parse_frontmatter(skill_file.read_text(encoding="utf-8"))
-    assert len(body) > 12_000, "regression requires the full upstream body to exceed old excerpt cap"
-    names, guidance = core._compose_worker_guidance_block(["taste-frontend"])
+def test_core_does_not_inject_taste_or_guidance_skill_prose():
+    source = Path(core.__file__).read_text(encoding="utf-8")
+    task = next(
+        item
+        for item in core.TAKYON_TOOL_DEFINITIONS
+        if item["name"] == "business_claude_agent_task"
+    )
 
-    assert names == ["design-taste-frontend"]
-    assert guidance.count(body.strip()) == 1
-    assert body.strip()[-500:] in guidance
-    assert "...[truncated]" not in guidance
-
-
-def test_product_design_default_adds_no_legacy_template():
-    names, reason = core._resolve_worker_guidance_skills({}, "product/site")
-
-    assert names == []
-    assert reason == "preserved the established Taste DESIGN.md without extra design guidance"
+    assert "guidance_skills" not in task["schema"]["parameters"]["properties"]
+    assert "[Hermes guidance skill:" not in source
+    assert "_compose_worker_guidance_block" not in source
+    assert "_resolve_worker_guidance_skills" not in source
 
 
 def test_taste_design_contract_requires_all_dials_in_range(tmp_path):

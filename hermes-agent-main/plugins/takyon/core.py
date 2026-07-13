@@ -60,7 +60,6 @@ except Exception:  # pragma: no cover - Takyon normally depends on python-dotenv
                 os.environ[key] = value
         return True
 
-from agent.skill_utils import get_all_skills_dirs, parse_frontmatter
 from takyon_constants import get_default_takyon_root, get_takyon_home
 from tools.registry import tool_error, tool_result
 
@@ -73,6 +72,15 @@ from .product_claims import (
     customer_feature_claims,
     feature_claim_blocker,
     unsupported_feature_claims,
+)
+from .taste_publication_gate import (
+    AssetVisualInspection,
+    DESIGN_SNAPSHOT_RELATIVE_PATH,
+    RenderInspection,
+    TasteDesignSnapshot,
+    load_design_snapshot,
+    validate_taste_publication,
+    write_design_snapshot,
 )
 from . import (
     app_supabase_auth,
@@ -211,24 +219,6 @@ CUSTOMER_FACING_AI_COPY_CONTRACT = """Customer-facing AI product copy contract:
 - Never mix vendors accidentally. Do not describe Claude-backed behavior with GPT names or stale model labels like GPT-4o-mini.
 - Prefer customer-visible claims like analyze feedback, cluster themes, rank opportunities, explain why, and export insights.
 """
-PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition floor:
-- On desktop, the public `/` first screen should fill most of the viewport and read page-scale, not as a small centered island with large dead gutters on both outer sides.
-- Take exact hero width, container max-width, grid balance, and type scale from your selected design direction; do not leave the page feeling half-empty or bottled up on a laptop screen.
-- Name the product like a real product. The HTML `<title>`, landing headline, visible branding, and SEO/OG tags must carry a human product name and/or plain-language value proposition. NEVER derive them from the business slug or workspace id — an internal slug (e.g. `qaproof0708b`) must not appear in the title, hero, nav brand, or meta tags. If no product name exists yet, coin a short brandable one consistent with the business's research/ and product/ state and use it consistently everywhere.
-"""
-# Injected for every product/site worker pass (bootstrap and iterate alike) so the visual-craft
-# floor rides alongside the brief-driven Taste guidance. The capabilities it names
-# (`lucide-react`, `framer-motion`) are pinned in the scaffold's own package.json — worker-added
-# deps are force-restored away on every refresh, so this contract must only ever name deps the
-# scaffold itself pins.
-PRODUCT_VISUAL_CRAFT_CONTRACT = """Product visual craft contract (icons, motion, assets):
-- Never use emoji as UI iconography — not feature icons, list bullets, buttons, badges, logos, stat markers, or empty states. Emoji may appear only as literal content where a human would type one (for example inside chat text a persona sends).
-- Iconography: import per-icon from `lucide-react` (pinned in this scaffold), or hand-author inline SVG for custom marks. Keep one consistent icon size and stroke weight per surface.
-- Motion: `framer-motion` is pinned in this scaffold, but the active design contract is authoritative. On an initial Taste landing, obey `DESIGN.md` exactly: `MOTION_INTENSITY` 1-3 means NO automatic animation (no load-in reveal, initial opacity/transform, `whileInView`, autoplay, or animated counter); only hover, press, focus, and direct state feedback may move. At higher Taste levels, use only the motion band that the pinned Taste skill permits. On non-Taste product UI, use framer-motion or plain CSS for purposeful hover/press feedback, layout/list transitions, and loading states. Keep micro-interactions roughly 150-300ms with intentional easing; motion should clarify hierarchy and state changes, not decorate everything.
-- Respect reduced motion: gate non-essential animation behind `useReducedMotion()` from framer-motion or the `prefers-reduced-motion` media query. No scroll-jacking, no autoplaying carousels, no infinite attention-seeking loops.
-- Real graphic texture comes from CSS gradients/patterns, inline SVG illustration, the published brand assets (`brandLogoUrl()` from `src/lib/branding.ts`), and static files under `public/` — never from emoji, and never from fabricated external image URLs.
-- Real typefaces: declare `@font-face`/`@import` in worker-owned CSS (`src/tokens.css` / `src/index.css`); never edit `index.html` for fonts — it is starter-owned and force-refreshed.
-"""
 RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Build runtime-backed product UI through the shared runtime client, not browser-only authority state.
 - Use the canonical prefixed runtime API base from `./_takyon/surface-context.js`.
@@ -254,14 +244,6 @@ PRODUCT_BUILD_GATE_CONTRACT = """Customer-facing product build gate (HARD):
 - `tsc --noEmit` rejects unused variables/imports and type errors; remove them. Do not leave the workspace with a failing build or typecheck.
 - If you cannot land BOTH green within this pass, do NOT report success. Your FINAL line MUST start with `BLOCKED:` followed by the exact remaining build/typecheck error and the file(s) involved, so Takyon hand-patches instead of cold re-delegating. A plain "I inspected the workspace" or a diagnosis without a green build is a failure, not a success.
 """
-TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT = """Taste landing rendered-viewport preflight (HARD):
-- This is the initial public landing pass. Source inspection alone is not visual proof.
-- After the final `npm run build` and `npm run typecheck` pass, call `business_render_landing_preflight` exactly once. Do not start Vite, Chromium, or agent-browser with Bash: this bounded tool starts one loopback-only Vite preview, invokes Chromium directly, captures `/` at BOTH 1440x900 desktop and 390x844 mobile, and stops every child process before returning.
-- The tool returns `/workspace/.takyon-preflight/landing-desktop.png` and `/workspace/.takyon-preflight/landing-mobile.png`. Read each image with the Read tool and inspect the actual first viewport. The header + hero must form one deliberate first-screen composition: headline, support, and primary CTA visible; no accidental early next-section intrusion; no clipped or empty composition. A deliberately visible continuation is allowed only when the Design Read explains it and the first screen still reads complete.
-- The tool is single-use for this Taste session. A missing browser, failed screenshot, or failed visual review is a precise blocker; do not repeat the same preflight or claim visual inspection without reading both screenshots.
-- Leave the screenshots available until you have Read them; the SDK and parent remove `.takyon-preflight/` before durable workspace sync. A missing tool/browser executable, failed screenshot, unread screenshot, or unverified viewport is BLOCKED, not success.
-- Use only local loopback URLs. Browser rendering is verification, never provider access, deployment, or an external network call.
-"""
 _TASTE_PREFLIGHT_DIRNAME = ".takyon-preflight"
 
 
@@ -283,13 +265,6 @@ def _remove_taste_preflight_artifacts(workspace_path: Path) -> None:
         )
 
 
-TASTE_LANDING_IMAGE_CONTRACT = """Taste landing generated-asset contract (HARD):
-- This same Taste session has one additional tool: `business_generate_site_image`. It is bound to this business, Safebox money-gated, and capped at exactly two distinct successful image slugs; it returns only local `/generated/<slug>.png` paths.
-- After the Design Read and before completing the landing, call it for exactly TWO art-directed images: one real hero visual and one supporting visual. Use the brief, chosen foundation, palette, crop, material, lighting, and exact page role in each prompt. No baked-in text, UI labels, logos, watermarks, browser chrome, fake product controls, generic filler, or stock hotlinks.
-- Render both returned paths in `src/screens/landing.tsx` as real `<img>` elements. Mark the hero image `data-takyon-landing-asset="hero"` and the other `data-takyon-landing-asset="supporting"`. The brand logo, favicon, inline SVG, CSS-only art, and div-based fake screenshot do not count.
-- Persist both asset roles, slugs, prompts, paths, crops, and the reason each belongs to the Design Read in `DESIGN.md`. On an attached/retried run, inspect `.takyon/site-images/` and reuse already generated assets instead of spending again.
-- The landing cannot publish unless two distinct generated PNG receipts/files exist, both paths are used in the landing, and one is marked as the hero. Typography-only is not an allowed exception.
-"""
 MOBILE_APP_BUILD_GATE_CONTRACT = """Mobile app build gate (HARD):
 - This is a customer-facing iOS app workspace (Expo SDK 54, managed). Diagnosing an error is NOT done; only a green verify is done.
 - Before you finish, you MUST run and confirm green, yourself, with Bash — do not assume:
@@ -317,29 +292,6 @@ WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - Do not recreate the workspace path inside itself. If the workspace is `product/site`, write `index.html`, `app/page.tsx`, or `package.json`, not `product/site/index.html` or `product/site/app/page.tsx`.
 - If an instruction mentions the workspace path, interpret it as the current working directory unless it explicitly asks for a different business-relative path.
 """
-_WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
-    "claude-refresh-audit": ("When To Use", "Audit Method", "Design Audit", "Fix Priority", "Rules"),
-    "taste-frontend": (
-        "Design Read",
-        "Fluid Composition",
-        "Design System",
-        "Product UI",
-        "Assets",
-        "Anti-Slop",
-        "Preflight",
-    ),
-    "design-taste-frontend": (
-        "Design Read",
-        "Fluid Composition",
-        "Design System",
-        "Product UI",
-        "Assets",
-        "Anti-Slop",
-        "Preflight",
-    ),
-}
-_TASTE_GUIDANCE_SKILL_NAMES = frozenset({"taste-frontend", "design-taste-frontend"})
-_WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS: dict[str, tuple[str, ...]] = {}
 _PUBLIC_ASSET_MEDIA_TYPES: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -441,7 +393,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
             "The pinned Vite SPA forbids product-side server entrypoints: no `express`/`fastify`/`hono`/`koa`, no `src/app/**/route.ts`, no `pages/api/*`, and no `next.config.*`; backend logic lives only in product/site/actions/<name>.ts.",
             "Client code must not call `/generate` directly; browser AI flows call createActionRunner/invokeAction, and the named action reaches the generate rail over ctx.base_url + ctx.session_token.",
             "Drive customer-triggered actions through the shared runtime client's createActionRunner(name): disable the trigger while the runner is pending, render the truthful error message by kind, and on budget errors offer the upgrade path via the provided checkoutUrl; never retry-loop a 402, never hide it, and never fake or simulate an action result client-side.",
-            "For every action result consumed by UI, define one explicit JSON schema and keep the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer on identical field types. Use useDecodedActionRunner(name, taggedDecoder). Either pass value => decodeActionResult(value, valueDecoder), where valueDecoder returns the normalized value or null/throws, or pass a named DecodedActionResult<T> decoder that validates and returns both ok:false and ok:true outcomes. AppKit always renders a global invalid_result alert; also render the runner error contextually. Never silently discard a successful action payload.",
+            "For every action result consumed by UI, define one explicit normalized JSON schema with identical field types across the generation prompt, action-boundary validator/normalizer and return value, TypeScript decoder, renderer, saveRecord({data}) payload, and record.data reopen decoder/renderer. Never maintain producer, UI, and persisted variants with different field types. Use useDecodedActionRunner(name, taggedDecoder). Either pass value => decodeActionResult(value, valueDecoder), where valueDecoder returns the normalized value or null/throws, or pass a named DecodedActionResult<T> decoder that validates and returns both ok:false and ok:true outcomes. Raw casts and unconditional ok:true returns are invalid. AppKit always renders a global invalid_result alert; also render the runner error contextually. Never silently discard a successful action payload.",
             "Schedule-triggered actions persist their output through the records rail; show customers what happened since they left by reading existing records (listRecords), not by polling or fabricating an activity feed.",
         ],
     },
@@ -1975,61 +1927,6 @@ def _projection_freshness(
     }
 
 
-def _normalize_guidance_skills(raw: Any) -> list[str]:
-    if raw is None:
-        return []
-    values = [raw] if isinstance(raw, str) else list(raw) if isinstance(raw, (list, tuple, set)) else []
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        text = str(value or "").strip()
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append(text)
-    return normalized
-
-
-# Initial public landings opt explicitly into full Taste. Later product work inherits the durable
-# Taste-authored DESIGN.md without injecting a second design template or reopening art direction.
-_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS: tuple[str, ...] = ()
-
-
-def _layer_product_design_guidance(skills: list[str]) -> list[str]:
-    """Preserve an explicit list; no legacy design template is auto-added or reordered."""
-    return list(skills)
-
-
-def _resolve_worker_guidance_skills(
-    args: dict[str, Any],
-    workspace_raw: str,
-    *,
-    surface: dict[str, Any] | None = None,
-    instruction: str = "",
-) -> tuple[list[str], str]:
-    is_product_surface = (
-        _workspace_needs_runtime_ui_contract(workspace_raw)
-        or _workspace_needs_customer_ai_copy_contract(workspace_raw)
-    )
-    if "guidance_skills" in args:
-        explicit = _normalize_guidance_skills(args.get("guidance_skills"))
-        if is_product_surface:
-            return (
-                _layer_product_design_guidance(explicit),
-                "used explicit customer-facing guidance exactly as requested",
-            )
-        return explicit, "used explicit guidance_skills from caller"
-    if is_product_surface:
-        return (
-            list(_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS),
-            "preserved the established Taste DESIGN.md without extra design guidance",
-        )
-    return [], ""
-
-
 def _normalize_runtime_features(raw: Any, *, strict: bool = False) -> list[str]:
     if raw is None:
         return []
@@ -3136,14 +3033,49 @@ def _runtime_rails_for_owner(surface: dict[str, Any] | None, owner_skill: str) -
     return rails
 
 
-def _workspace_needs_runtime_ui_contract(workspace_raw: str) -> bool:
-    normalized = workspace_raw.strip("/").lower()
+def _workspace_is_canonical_product_site(workspace_raw: str) -> bool:
+    """Return whether the path belongs to the one canonical web publication authority."""
+
+    normalized = str(workspace_raw or "").strip("/").lower()
     return normalized == "product/site" or normalized.startswith("product/site/")
+
+
+def _workspace_needs_runtime_ui_contract(workspace_raw: str) -> bool:
+    return _workspace_is_canonical_product_site(workspace_raw)
+
+
+def _resolve_claude_agent_surface_refresh(
+    workspace_rel: str,
+    requested: Any,
+) -> bool:
+    """Resolve the publication side effect without letting another product path impersonate it.
+
+    ``refresh_surface`` publishes the canonical web product rooted at ``product/site``.  Product
+    siblings (mobile source, assets, or arbitrary scratch paths) are valid coding workspaces, but
+    they are not alternate publication authorities.  Historically every ``product/*`` path
+    defaulted this flag on while the session-authority preflight only recognized ``product/site``;
+    a caller could therefore select ``product/anything`` and reach publication without the guard.
+    """
+    normalized = str(workspace_rel or "").strip("/").lower()
+    # Publication authority must not depend on the materialization helper.  Tests and alternate
+    # runtimes may replace that helper, but they may never turn product/site into a non-authority
+    # workspace (or grant authority to a sibling).
+    canonical_site = _workspace_is_canonical_product_site(normalized)
+    product_workspace = normalized == "product" or normalized.startswith("product/")
+    if canonical_site:
+        return _boolish(requested, default=True)
+    resolved = _boolish(requested, default=False)
+    if product_workspace and resolved:
+        raise TakyonError(
+            "refresh_surface is restricted to the canonical product/site workspace; "
+            f"refusing publication authority for {workspace_rel!r}"
+        )
+    return resolved
 
 
 def _canonical_product_surface_source_path(source_path: str) -> str:
     normalized = _safe_relpath(source_path or "product/site", field="source_path").as_posix()
-    if _workspace_needs_runtime_ui_contract(normalized):
+    if _workspace_is_canonical_product_site(normalized):
         return "product/site"
     return normalized
 
@@ -3997,7 +3929,6 @@ _STARTER_OWNED_REFRESH_FILES = (
     "src/lib/interaction-sounds.ts",
     "src/components/action-error-announcer.tsx",
     "src/components/site-navigation.tsx",
-    "src/components/social-proof-marquee.tsx",
     "src/components/subscription-cancellation.tsx",
     "src/screens/app-layout.tsx",
     "src/screens/support.tsx",
@@ -4218,7 +4149,7 @@ def _subuser_app_worker_contract_block(
             "- Browser code reaches backend behavior through the shared `useDecodedActionRunner(name, taggedDecoder)` hook, which wraps the runtime client's action runner; do not call legacy `useActionRunner`, `invokeAction`, or `createActionRunner` directly in a requested customer workflow or invent a second backend path.",
             "- Inside a product action, ctx IS the runtime client (same API as the browser): call ctx.generate(...)/ctx.invokeAction(...)/ctx.saveRecord(...)/ctx.listRecords(...) like the browser; copy product/site/actions/_example-generate.ts (it calls `const data = await ctx.generate({ max_tokens, system, messages }); return { reply: data.text };`). No filesystem write, no shell, no provider credentials in product source.",
             "- Never fake or simulate an action result client-side just to keep the UI moving; if the backend action is missing or blocked, surface the exact blocker truthfully.",
-            "- For every UI-consumed action, define one explicit JSON result schema and use identical field types in the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer. Call `useDecodedActionRunner(name, taggedDecoder)`. Either use `value => decodeActionResult(value, valueDecoder)`, where valueDecoder returns the normalized value or null/throws, or a named `DecodedActionResult<T>` decoder that validates and returns both `ok: false` and `ok: true` outcomes. AppKit always renders a global `invalid_result` alert; also render the runner error contextually. Never silently discard a successful action payload.",
+            "- For every UI-consumed action, define one explicit normalized JSON result schema with identical field types across the generation prompt, action-boundary validator/normalizer and return value, TypeScript decoder, renderer, `saveRecord({ data })` payload, and `record.data` reopen decoder/renderer. Never maintain producer, UI, and persisted variants with different field types. Call `useDecodedActionRunner(name, taggedDecoder)`. Either use `value => decodeActionResult(value, valueDecoder)`, where valueDecoder returns the normalized value or null/throws, or a named `DecodedActionResult<T>` decoder that validates and returns both `ok: false` and `ok: true` outcomes. Raw casts and unconditional `ok: true` returns are invalid. AppKit always renders a global `invalid_result` alert; also render the runner error contextually. Never silently discard a successful action payload.",
             "- Schedule-only actions self-declare in the action file with `export const trigger = \"schedule\"` and `export const schedule = \"<cron>\"`; HTTP is the default when no trigger is exported.",
             "",
         ]
@@ -4272,7 +4203,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Mutation UX must have one effective action per state. A revision result gets one update control wired to `saveRecord({ ref: existing.ref, data: completeUpdatedData })`; never render the create-save control inside that revision result. After update/delete, reconcile the returned record or await the records refresh before showing success, so the visible detail cannot revert to stale data. Every delete requires an explicit customer confirmation before `deleteRecord(ref)`.",
         "- Use the bundled runtime-client TypeScript signatures directly. Never cast `saveRecord`, `getRecord`, or `deleteRecord` through `any`/`unknown` to bypass the create-vs-update RecordRef contract.",
         "- Backend actions compile in the server action environment, not the browser environment. Type every handler as `(payload: TakyonActionPayload, ctx: TakyonActionContext)`; do not annotate either parameter as `any`, and do not use DOM/WebWorker globals that the action type environment does not provide.",
-        "- Every action result consumed by UI has one explicit JSON schema. Keep the generation prompt, action-boundary validator/normalizer, TypeScript decoder, and renderer on identical field types. Call `useDecodedActionRunner(name, taggedDecoder)`. Either use `value => decodeActionResult(value, valueDecoder)`, where valueDecoder returns the normalized value or null/throws, or a named `DecodedActionResult<T>` decoder that validates and returns both `ok: false` and `ok: true` outcomes. AppKit always renders a global `invalid_result` alert; also render the runner error contextually. Never silently discard a successful action payload.",
+        "- Every action result consumed by UI has one explicit normalized JSON schema with identical field types across the generation prompt, action-boundary validator/normalizer and return value, TypeScript decoder, renderer, `saveRecord({ data })` payload, and `record.data` reopen decoder/renderer. Never maintain producer, UI, and persisted variants with different field types. Call `useDecodedActionRunner(name, taggedDecoder)`. Either use `value => decodeActionResult(value, valueDecoder)`, where valueDecoder returns the normalized value or null/throws, or a named `DecodedActionResult<T>` decoder that validates and returns both `ok: false` and `ok: true` outcomes. Raw casts and unconditional `ok: true` returns are invalid. AppKit always renders a global `invalid_result` alert; also render the runner error contextually. Never silently discard a successful action payload.",
         "- Scaffold-owned and force-rewritten from the bundled scaffold on EVERY product build/kit materialize — never edit these; any change to them is silently reverted before the build: "
         + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
         + ". If a screen needs a helper these files do not export, add it to a NEW worker-owned module under `src/lib/` (different filename) or define it in the screen itself.",
@@ -4282,7 +4213,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Public nested pages such as FAQ, privacy, terms, articles, and guides must not show Open app or Subscribe CTAs. Use `BackButton` on nested pages; the only public conversion surfaces are the landing's Log in/Sign up actions and the pricing page.",
         "- Treat the signed-in product as a full-width application workspace. Do not wrap the primary `/app` workflow in a narrow centered marketing container or a single small card; use the available viewport for the real workflow while preserving readable inner regions.",
         "- Every created or generated customer artifact must survive tab and route changes: persist it through `saveRecord(...)`, render lists from `listRecords(...)`/`useRecords(...)`, and keep stale successful records visible if a refresh transiently fails. Component-local action results and browser storage are not durable product state.",
-        "- The landing must show polished, product-specific UI visuals as the visitor scrolls (real representations of the workflow, not generic icon cards) and a prominent proof section. The canonical route in `src/main.tsx` renders `SocialProofMarquee` outside the worker-owned landing, so every signed-out landing keeps truthful Coscale portfolio proof even when `src/screens/landing.tsx` is redesigned. Quantified outcome claims must come from verified research or real product data; never fabricate statistics, testimonials, or customer counts.",
+        "- The worker-owned landing decides whether and how a proof section fits the brief. Never inject generic platform portfolio proof outside that landing. Quantified outcome claims must come from verified research or real product data; never fabricate statistics, testimonials, or customer counts.",
         "- The public header is a visually separated, full-viewport-width banner (border/background/shadow with responsive edge padding) and remains structurally static within signed-out and signed-in states. Do not constrain it to the landing content width or vary its options by public page.",
         "- Pricing may display only the exact published plan price, billing interval, and usage limits exported in `surfaceContext.plans`; never invent a promotion, introductory price, discount, trial, feature allowance, or quota that checkout/billing does not enforce. Use `defaultPlanPriceLabel()` and `defaultPlanLimitLabels()`. For action-backed features, `unlimited`, `as many as you need`, `as many as your workflow needs`, `no limits`, and equivalent unbounded paraphrases are false unless the exact plan allowance is actually unbounded.",
         "- Keep the canonical AppKit interaction-sound installer in `src/lib/interaction-sounds.ts`; it provides a quiet click sound for enabled buttons as progressive enhancement and must never block an interaction.",
@@ -4371,7 +4302,12 @@ def _read_taste_design_contract(workspace_path: Path) -> tuple[dict[str, Any], s
 
 
 def _read_taste_landing_asset_contract(workspace_path: Path) -> tuple[dict[str, Any], str]:
-    """Require two real, generated, visibly used landing images before Taste may publish."""
+    """Require a real Safebox-generated asset that the landing actually uses.
+
+    Native Taste owns the art direction and decides how many images the composition needs. The
+    platform verifies provenance and use; it must not impose the retired two-image/hero-supporting
+    template or private data attributes that the native skill was never told to emit.
+    """
     root = Path(workspace_path).resolve()
     receipts_dir = root / ".takyon" / "site-images"
     landing_path = root / "src" / "screens" / "landing.tsx"
@@ -4418,56 +4354,22 @@ def _read_taste_landing_asset_contract(workspace_path: Path) -> tuple[dict[str, 
         return {
             "valid_generated_images": list(assets.values()),
         }, (
-            "Taste landing asset contract invalid: exactly two distinct Safebox-generated PNG assets "
-            f"are required; found {len(assets)}."
+            "Taste landing asset contract invalid: Taste v2 requires at least two distinct "
+            f"Safebox-generated PNG assets when image generation is available; found {len(assets)}."
         )
 
     used_paths = [public_path for public_path in assets if public_path in landing_source]
-    direct_roles: dict[str, str] = {}
-    declared_roles: set[str] = set()
-    image_tags = re.findall(r"<img\b[^>]*>", landing_source, flags=re.IGNORECASE | re.DOTALL)
-    for image_tag in image_tags:
-        role_match = re.search(
-            r"data-takyon-landing-asset\s*=\s*[\"'](hero|supporting)[\"']",
-            image_tag,
-            flags=re.IGNORECASE,
-        )
-        if role_match is None:
-            continue
-        role = role_match.group(1).lower()
-        declared_roles.add(role)
-        for public_path in assets:
-            if public_path in image_tag:
-                direct_roles[public_path] = role
-                break
-    if len(used_paths) < 2 or not {"hero", "supporting"}.issubset(declared_roles):
+    if len(used_paths) < 2:
         return {
             "valid_generated_images": list(assets.values()),
             "used_paths": used_paths,
-            "declared_roles": sorted(declared_roles),
         }, (
-            "Taste landing asset contract invalid: src/screens/landing.tsx must render two distinct "
-            "generated paths as real <img> elements marked hero and supporting."
+            "Taste landing asset contract invalid: src/screens/landing.tsx must use at least two "
+            "distinct Safebox-generated asset paths."
         )
-    hero_path = next(
-        (path for path, role in direct_roles.items() if role == "hero"),
-        used_paths[0],
-    )
-    supporting_path = next(
-        (
-            path
-            for path, role in direct_roles.items()
-            if role == "supporting" and path != hero_path
-        ),
-        next(path for path in used_paths if path != hero_path),
-    )
-    selected_paths = [hero_path, supporting_path]
     return {
-        "assets": [
-            {**assets[path], "role": "hero" if path == hero_path else "supporting"}
-            for path in selected_paths
-        ],
-        "hero_path": hero_path,
+        "assets": [assets[path] for path in used_paths],
+        "used_paths": used_paths,
     }, ""
 
 
@@ -5844,6 +5746,7 @@ def _claude_agent_non_docker_worker_env(business: str, operator_user_id: str) ->
             f"configured (set {_CLAUDE_AGENT_BROKER_URL_ENV} or {safebox._SAFEBOX_REMOTE_URL_ENV} to the "
             "safebox ROOT, e.g. http://10.116.0.2:8000)"
         )
+    claude_config_dir = _shared_claude_config_dir(_repo_root())
     session_token = _mint_claude_agent_operator_session_token(business, operator_user_id)
     if not session_token:
         raise TakyonError(
@@ -5855,6 +5758,7 @@ def _claude_agent_non_docker_worker_env(business: str, operator_user_id: str) ->
         "ANTHROPIC_BASE_URL": broker_base_url,
         "ANTHROPIC_API_KEY": session_token,
         "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent",
+        "CLAUDE_CONFIG_DIR": str(claude_config_dir),
         # Claude Code can emit experimental Anthropic beta fields such as
         # context_management. Some org/provider paths reject those fields, so
         # keep the brokered worker on the stable Messages API shape.
@@ -5872,8 +5776,120 @@ def _claude_agent_non_docker_worker_env(business: str, operator_user_id: str) ->
 _PRODUCT_WORKER_RUNTIME_FILES = (
     "package.json",
     "package-lock.json",
+    "plugins/takyon/taste_publication_gate.py",
     "scripts/takyon-claude-agent-task.mjs",
+    "skills/creative/taste-frontend/SKILL.md",
 )
+
+_NATIVE_TASTE_SKILL_NAME = "design-taste-frontend"
+_NATIVE_TASTE_SKILL_SHA256 = "aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89"
+_NATIVE_TASTE_SKILL_RELATIVE_PATH = Path("skills/creative/taste-frontend/SKILL.md")
+_NATIVE_TASTE_SKILL_LINK_TARGET = Path("../../skills/creative/taste-frontend")
+
+
+def _verify_canonical_native_taste_skill(skill_file: Path) -> str:
+    """Fail closed unless ``skill_file`` is the pinned native Taste skill."""
+    try:
+        content = skill_file.read_bytes()
+    except OSError as exc:
+        raise TakyonError(f"canonical native Taste skill is unavailable: {skill_file}: {exc}") from exc
+    digest = hashlib.sha256(content).hexdigest()
+    if digest != _NATIVE_TASTE_SKILL_SHA256:
+        raise TakyonError(
+            "canonical native Taste skill digest mismatch: "
+            f"expected {_NATIVE_TASTE_SKILL_SHA256}, got {digest}"
+        )
+    head = content[:4096].decode("utf-8", errors="strict")
+    if not re.search(
+        r"\A---\s*\n(?:(?!---\s*$).)*?^name:\s*design-taste-frontend\s*$.*?^---\s*$",
+        head,
+        flags=re.MULTILINE | re.DOTALL,
+    ):
+        raise TakyonError("canonical native Taste skill frontmatter name is invalid")
+    return digest
+
+
+def _verify_native_taste_skill_install(
+    *,
+    config_dir: Path,
+    canonical_skill_dir: Path,
+    expected_link_target: Path | None = None,
+) -> Path:
+    """Verify one Claude Code native install resolves to the pinned runtime skill."""
+    config = config_dir.resolve()
+    canonical = canonical_skill_dir.resolve()
+    _verify_canonical_native_taste_skill(canonical / "SKILL.md")
+    native = config / "skills" / _NATIVE_TASTE_SKILL_NAME
+    try:
+        metadata = native.lstat()
+    except OSError as exc:
+        raise TakyonError(f"native Taste skill install is unavailable: {native}: {exc}") from exc
+    if not stat.S_ISLNK(metadata.st_mode):
+        raise TakyonError(f"native Taste skill install must be a symlink: {native}")
+    if expected_link_target is not None and Path(os.readlink(native)) != expected_link_target:
+        raise TakyonError(
+            f"native Taste skill link target mismatch: expected {expected_link_target}, "
+            f"got {os.readlink(native)}"
+        )
+    try:
+        resolved = native.resolve(strict=True)
+    except OSError as exc:
+        raise TakyonError(f"native Taste skill install is broken: {native}: {exc}") from exc
+    if resolved != canonical:
+        raise TakyonError(
+            f"native Taste skill install resolves outside the canonical runtime skill: {resolved}"
+        )
+    _verify_canonical_native_taste_skill(native / "SKILL.md")
+    return config
+
+
+def _shared_claude_config_dir(repo_root: Path) -> Path:
+    """Install Taste once in the operator's shared, writable Claude Code config.
+
+    The config lives under the active canonical ``TAKYON_HOME`` and never under a business or
+    session workspace. The link points at the immutable runtime source and is replaced atomically
+    if an older release left a stale link behind.
+    """
+    canonical_skill_dir = (repo_root.resolve() / _NATIVE_TASTE_SKILL_RELATIVE_PATH.parent)
+    _verify_canonical_native_taste_skill(canonical_skill_dir / "SKILL.md")
+    config_dir = (get_takyon_home().expanduser().resolve() / ".claude")
+    skills_dir = config_dir / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(config_dir, 0o700)
+        os.chmod(skills_dir, 0o700)
+    except OSError:
+        pass
+    native = skills_dir / _NATIVE_TASTE_SKILL_NAME
+    desired_target = Path(os.path.relpath(canonical_skill_dir, start=skills_dir))
+    temporary: Path | None = None
+    try:
+        if native.is_symlink() and Path(os.readlink(native)) == desired_target:
+            return _verify_native_taste_skill_install(
+                config_dir=config_dir,
+                canonical_skill_dir=canonical_skill_dir,
+                expected_link_target=desired_target,
+            )
+        if native.exists() and not native.is_symlink():
+            raise TakyonError(f"native Taste skill install path is not a symlink: {native}")
+        temporary = skills_dir / f".{_NATIVE_TASTE_SKILL_NAME}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        temporary.symlink_to(desired_target, target_is_directory=True)
+        os.replace(temporary, native)
+    except TakyonError:
+        raise
+    except OSError as exc:
+        raise TakyonError(f"could not install shared native Taste skill at {native}: {exc}") from exc
+    finally:
+        if temporary is not None and temporary.is_symlink():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+    return _verify_native_taste_skill_install(
+        config_dir=config_dir,
+        canonical_skill_dir=canonical_skill_dir,
+        expected_link_target=desired_target,
+    )
 
 
 def _product_worker_runtime_snapshot(repo_root: Path) -> Path:
@@ -5897,6 +5913,16 @@ def _product_worker_runtime_snapshot(repo_root: Path) -> Path:
             candidate = path / relative
             if not candidate.is_file() or hashlib.sha256(candidate.read_bytes()).hexdigest() != digest:
                 raise TakyonError(f"product worker release cache is corrupt: {relative}")
+        skill_digest = (manifest.get("files") or {}).get(
+            _NATIVE_TASTE_SKILL_RELATIVE_PATH.as_posix()
+        )
+        if skill_digest != _NATIVE_TASTE_SKILL_SHA256:
+            raise TakyonError("product worker release cache is missing the pinned native Taste skill")
+        _verify_native_taste_skill_install(
+            config_dir=path / ".claude",
+            canonical_skill_dir=path / _NATIVE_TASTE_SKILL_RELATIVE_PATH.parent,
+            expected_link_target=_NATIVE_TASTE_SKILL_LINK_TARGET,
+        )
         if not (path / "node_modules" / "@anthropic-ai" / "claude-agent-sdk" / "package.json").is_file():
             raise TakyonError("product worker release cache is missing the Claude Agent SDK")
         return path
@@ -5944,6 +5970,20 @@ def _product_worker_runtime_snapshot(repo_root: Path) -> Path:
             destination = staging / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(content)
+        _verify_canonical_native_taste_skill(
+            staging / _NATIVE_TASTE_SKILL_RELATIVE_PATH
+        )
+        native_skills_dir = staging / ".claude" / "skills"
+        native_skills_dir.mkdir(parents=True, exist_ok=True)
+        (native_skills_dir / _NATIVE_TASTE_SKILL_NAME).symlink_to(
+            _NATIVE_TASTE_SKILL_LINK_TARGET,
+            target_is_directory=True,
+        )
+        _verify_native_taste_skill_install(
+            config_dir=staging / ".claude",
+            canonical_skill_dir=staging / _NATIVE_TASTE_SKILL_RELATIVE_PATH.parent,
+            expected_link_target=_NATIVE_TASTE_SKILL_LINK_TARGET,
+        )
         npm = _resolve_runtime_executable("npm")
         if not npm:
             raise TakyonError("npm runtime unavailable for exact product worker release")
@@ -6005,6 +6045,7 @@ class _SiteImageWorkerBridge:
         business: str,
         idempotency_prefix: str,
         root: Path,
+        trusted_asset_digests: Mapping[str, str] | None = None,
     ) -> None:
         self.store = store
         self.business = _slugify(business)
@@ -6020,7 +6061,13 @@ class _SiteImageWorkerBridge:
         )
         self._handled: set[str] = set()
         self._successful_slugs: set[str] = set()
+        self._generated_this_run: set[str] = set()
         self._asset_snapshots: dict[str, tuple[bytes, str]] = {}
+        self._trusted_asset_digests = {
+            str(path): str(digest).lower()
+            for path, digest in dict(trusted_asset_digests or {}).items()
+            if str(path).startswith("/generated/") and re.fullmatch(r"[0-9a-f]{64}", str(digest).lower())
+        }
         self._attempts = 0
 
     def _business_file_without_sync(self, relative: str) -> Path:
@@ -6070,6 +6117,18 @@ class _SiteImageWorkerBridge:
             )
         return len(self._asset_snapshots)
 
+    def authoritative_asset_digests(self) -> dict[str, str]:
+        """Return only parent-observed creative-rail outputs, never worker-written claims."""
+
+        return {
+            f"/generated/{slug}.png": hashlib.sha256(image).hexdigest()
+            for slug, (image, _receipt_text) in sorted(self._asset_snapshots.items())
+        }
+
+    @property
+    def generated_this_run_count(self) -> int:
+        return len(self._generated_this_run)
+
     def start(self) -> None:
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         self.responses_dir.mkdir(parents=True, exist_ok=True)
@@ -6093,6 +6152,8 @@ class _SiteImageWorkerBridge:
                     and prior.get("success")
                     and str(prior.get("public_path") or "") == f"/generated/{slug}.png"
                     and asset_path.is_file()
+                    and self._trusted_asset_digests.get(f"/generated/{slug}.png")
+                    == hashlib.sha256(asset_path.read_bytes()).hexdigest()
                 ):
                     try:
                         self._capture_asset_snapshot(slug)
@@ -6175,7 +6236,13 @@ class _SiteImageWorkerBridge:
             self.business,
             f"product/site/public/generated/{slug}.png",
         )
-        if slug not in self._successful_slugs and receipt_path.exists() and asset_path.exists():
+        if (
+            slug not in self._successful_slugs
+            and receipt_path.exists()
+            and asset_path.exists()
+            and self._trusted_asset_digests.get(f"/generated/{slug}.png")
+            == hashlib.sha256(asset_path.read_bytes()).hexdigest()
+        ):
             try:
                 prior = json.loads(receipt_path.read_text(encoding="utf-8"))
             except Exception:
@@ -6188,7 +6255,7 @@ class _SiteImageWorkerBridge:
                 else:
                     self._successful_slugs.add(slug)
         if slug not in self._successful_slugs and len(self._successful_slugs) >= _SITE_IMAGE_BRIDGE_MAX_IMAGES:
-            raise TakyonError("Taste landing site-image cap is exactly two distinct images")
+            raise TakyonError("Taste landing site-image cap is at most two distinct images")
 
         raw_result = _handle_business_generate_site_image_with_store(
             {
@@ -6214,6 +6281,7 @@ class _SiteImageWorkerBridge:
             raise TakyonError("site-image handler returned an unexpected public path")
         self._capture_asset_snapshot(slug)
         self._successful_slugs.add(slug)
+        self._generated_this_run.add(slug)
         return {
             "success": True,
             "slug": slug,
@@ -6259,6 +6327,7 @@ def _site_image_worker_bridge(
     business: str,
     idempotency_prefix: str,
     parent_dir: Path,
+    trusted_asset_digests: Mapping[str, str] | None = None,
 ):
     parent = Path(parent_dir).resolve()
     parent.mkdir(parents=True, exist_ok=True)
@@ -6277,6 +6346,7 @@ def _site_image_worker_bridge(
         business=business,
         idempotency_prefix=idempotency_prefix,
         root=root,
+        trusted_asset_digests=trusted_asset_digests,
     )
     bridge.start()
     try:
@@ -6285,6 +6355,222 @@ def _site_image_worker_bridge(
         stopped = bridge.close()
         if stopped:
             shutil.rmtree(root, ignore_errors=True)
+
+
+_OFFICIAL_TASTE_PUBLICATION_GATE_IDS = frozenset(
+    {
+        "zero_visible_dashes",
+        "canonical_preflight_evidence",
+        "section_layout_diversity",
+        "image_plan_and_asset_integrity",
+        "hero_first_viewport",
+        "single_visual_system",
+    }
+)
+
+
+def _product_site_worker_requires_taste(workspace_rel: str) -> bool:
+    return _workspace_is_canonical_product_site(workspace_rel)
+
+
+def _load_validated_taste_design_snapshot(workspace_path: Path) -> TasteDesignSnapshot | None:
+    """Load the immutable Taste handoff; a corrupt handoff is never treated as a new site."""
+
+    try:
+        snapshot = load_design_snapshot(workspace_path)
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise TakyonError(f"Taste design snapshot is invalid: {exc}") from exc
+    if snapshot is None:
+        return None
+    required_dials = {"DESIGN_VARIANCE", "MOTION_INTENSITY", "VISUAL_DENSITY"}
+    valid_assets = len(snapshot.assets) >= 2 and all(
+        re.fullmatch(r"/generated/[a-z0-9]+(?:-[a-z0-9]+)*\.png", str(path))
+        and re.fullmatch(r"[0-9a-f]{64}", str(digest).lower())
+        for path, digest in snapshot.assets.items()
+    )
+    if (
+        snapshot.version != 1
+        or not re.fullmatch(r"[0-9a-f]{64}", snapshot.design_sha256.lower())
+        or not re.fullmatch(r"[0-9a-f]{64}", snapshot.landing_sha256.lower())
+        or not re.fullmatch(r"[0-9a-f]{64}", snapshot.tokens_sha256.lower())
+        or not re.fullmatch(r"[0-9a-f]{64}", snapshot.design_read_sha256.lower())
+        or not re.fullmatch(r"[0-9a-f]{64}", snapshot.foundation_sha256.lower())
+        or set(snapshot.dials) != required_dials
+        or any(int(value) < 1 or int(value) > 10 for value in snapshot.dials.values())
+        or not snapshot.tokens
+        or not valid_assets
+    ):
+        raise TakyonError(
+            f"Taste design snapshot is invalid: {DESIGN_SNAPSHOT_RELATIVE_PATH} is incomplete"
+        )
+    return snapshot
+
+
+def _taste_render_inspection_from_worker(
+    workspace_path: Path,
+    raw: Mapping[str, Any],
+) -> RenderInspection:
+    """Rebase the helper's container path onto the parent-owned workspace safely."""
+
+    root = workspace_path.resolve()
+    scratch = (root / _TASTE_PREFLIGHT_DIRNAME).resolve()
+    raw_path = str(raw.get("screenshot_path") or "").strip()
+    if raw_path.startswith("/workspace/"):
+        candidate = (root / raw_path.removeprefix("/workspace/")).resolve()
+    else:
+        supplied = Path(raw_path)
+        candidate = supplied.resolve() if supplied.is_absolute() else (root / supplied).resolve()
+    if scratch not in (candidate, *candidate.parents):
+        raise TakyonError("Taste render receipt points outside the reserved preflight directory")
+    return RenderInspection.from_mapping({**dict(raw), "screenshot_path": str(candidate)})
+
+
+def _validate_taste_worker_publication(
+    *,
+    workspace_path: Path,
+    sdk_result: Mapping[str, Any],
+    baseline_snapshot: TasteDesignSnapshot | None,
+    site_image_bridge: Any,
+    initial_pass: bool,
+) -> tuple[dict[str, Any], str]:
+    """Validate native skill, rendered evidence, assets, and the immutable design handoff."""
+
+    receipt: dict[str, Any] = {
+        "version": 1,
+        "passed": False,
+        "initial_pass": bool(initial_pass),
+        "baseline_snapshot_present": baseline_snapshot is not None,
+        "snapshot_path": DESIGN_SNAPSHOT_RELATIVE_PATH,
+    }
+    skill_receipt = sdk_result.get("skill_receipt")
+    if not isinstance(skill_receipt, Mapping):
+        return receipt, "product/site publication refused: native Taste skill receipt is missing"
+    receipt["skill_sha256"] = str(skill_receipt.get("installed_sha256") or "")
+    receipt["model"] = str(skill_receipt.get("actual_model") or skill_receipt.get("model") or "")
+    receipt["duration_ms"] = skill_receipt.get("duration_ms")
+    receipt["usage"] = skill_receipt.get("usage")
+    if (
+        skill_receipt.get("required") is not True
+        or skill_receipt.get("installed") is not True
+        or skill_receipt.get("discovered") is not True
+        or skill_receipt.get("included") is not True
+        or str(skill_receipt.get("included_source") or "") != "userSettings"
+        or skill_receipt.get("native_use") is not True
+        or int(skill_receipt.get("native_use_events") or 0) < 1
+        or skill_receipt.get("prompt_body_absent") is not True
+        or str(skill_receipt.get("installed_sha256") or "").lower()
+        != _NATIVE_TASTE_SKILL_SHA256
+    ):
+        return receipt, (
+            "product/site publication refused: native Taste was not installed, discovered, "
+            "included from user settings, and successfully invoked"
+        )
+
+    evidence = sdk_result.get("taste_publication_evidence")
+    if (
+        not isinstance(evidence, Mapping)
+        or evidence.get("submitted") is not True
+        or evidence.get("passed") is not True
+    ):
+        return receipt, "product/site publication refused: rendered Taste publication evidence is missing"
+    official_gates = evidence.get("official_gates")
+    if not isinstance(official_gates, Mapping) or set(official_gates) != _OFFICIAL_TASTE_PUBLICATION_GATE_IDS:
+        return receipt, "product/site publication refused: official Taste gate evidence is incomplete"
+    if any(
+        not isinstance(item, Mapping)
+        or item.get("passed") is not True
+        or not str(item.get("evidence") or "").strip()
+        or not str(item.get("source") or "").strip()
+        for item in official_gates.values()
+    ):
+        return receipt, "product/site publication refused: an official Taste gate lacks passing evidence"
+    if site_image_bridge is None:
+        return receipt, "product/site publication refused: authoritative site-image bridge is unavailable"
+
+    try:
+        restored_count = int(site_image_bridge.restore_generated_assets())
+        generated_this_run_count = int(site_image_bridge.generated_this_run_count)
+        authoritative_assets = {
+            str(path): str(digest).lower()
+            for path, digest in site_image_bridge.authoritative_asset_digests().items()
+        }
+    except Exception as exc:
+        return receipt, f"product/site publication refused: authoritative asset restore failed: {exc}"
+    receipt["restored_asset_count"] = restored_count
+    receipt["generated_this_run_count"] = generated_this_run_count
+    receipt["authoritative_asset_digests"] = authoritative_assets
+    if initial_pass and generated_this_run_count < 2:
+        return receipt, (
+            "product/site publication refused: the initial Taste pass did not generate two "
+            "authoritative assets in this worker run"
+        )
+
+    raw_asset_inspections = evidence.get("asset_inspections")
+    if not isinstance(raw_asset_inspections, Mapping):
+        return receipt, "product/site publication refused: asset visual inspections are missing"
+    asset_inspections = {
+        str(public_path): (
+            value
+            if isinstance(value, AssetVisualInspection)
+            else AssetVisualInspection.from_mapping(value)
+        )
+        for public_path, value in raw_asset_inspections.items()
+        if isinstance(value, (AssetVisualInspection, Mapping))
+    }
+    evidence_asset_digests = {
+        public_path: inspection.image_sha256.lower()
+        for public_path, inspection in asset_inspections.items()
+    }
+    receipt["evidence_asset_digests"] = evidence_asset_digests
+    if evidence_asset_digests != authoritative_assets:
+        return receipt, (
+            "product/site publication refused: Taste asset evidence does not match the "
+            "parent-authoritative creative bridge outputs"
+        )
+
+    renders = evidence.get("render_inspections")
+    preflight_evidence = evidence.get("preflight_evidence")
+    if not isinstance(renders, Mapping) or not isinstance(preflight_evidence, Mapping):
+        return receipt, "product/site publication refused: rendered Taste inspection is incomplete"
+    desktop_raw = renders.get("desktop")
+    mobile_raw = renders.get("mobile")
+    if not isinstance(desktop_raw, Mapping) or not isinstance(mobile_raw, Mapping):
+        return receipt, "product/site publication refused: desktop/mobile Taste renders are missing"
+    try:
+        desktop = _taste_render_inspection_from_worker(workspace_path, desktop_raw)
+        mobile = _taste_render_inspection_from_worker(workspace_path, mobile_raw)
+        gate_result = validate_taste_publication(
+            workspace_path,
+            desktop=desktop,
+            mobile=mobile,
+            asset_inspections=asset_inspections,
+            preflight_evidence=preflight_evidence,
+            baseline_snapshot=baseline_snapshot,
+        )
+    except Exception as exc:
+        return receipt, f"product/site publication refused: Taste publication gate failed: {exc}"
+    receipt["gate"] = gate_result.to_dict()
+    if not gate_result.passed or gate_result.snapshot is None:
+        return receipt, (
+            "product/site publication refused: "
+            + (gate_result.blocker or "Taste publication gate produced no design snapshot")
+        )
+    if dict(gate_result.snapshot.assets) != authoritative_assets:
+        return receipt, (
+            "product/site publication refused: validated Taste snapshot assets do not match "
+            "the parent-authoritative creative bridge outputs"
+        )
+    if initial_pass:
+        try:
+            snapshot_path = write_design_snapshot(workspace_path, gate_result.snapshot)
+        except OSError as exc:
+            return receipt, f"product/site publication refused: could not persist Taste snapshot: {exc}"
+        receipt["snapshot_written"] = True
+        receipt["snapshot_file"] = str(snapshot_path)
+    else:
+        receipt["snapshot_written"] = False
+    receipt["passed"] = True
+    return receipt, ""
 
 
 def _run_claude_agent_task_in_docker(
@@ -6320,6 +6606,7 @@ def _run_claude_agent_task_in_docker(
         "model": worker_model,
         "cwd": "/workspace",
         "root": "/workspace",
+        "claudeConfigDir": "/repo/.claude",
         **(
             {"siteImageBridgeDir": _SITE_IMAGE_BRIDGE_CONTAINER_DIR}
             if bridge_host_dir is not None
@@ -6406,6 +6693,7 @@ def _run_claude_agent_task_in_docker(
     # SDK child forces any Bash/terminal work to execute locally inside the same container rather
     # than trying to spin up a second Docker layer that inherits host-Mac cwd mount config.
     env_args.extend(["-e", "TAKYON_CLAUDE_AGENT_IN_DOCKER=1"])
+    env_args.extend(["-e", "CLAUDE_CONFIG_DIR=/repo/.claude"])
     sdk_mount_args, sdk_env = _docker_claude_worker_binary_mounts(
         docker_exe=docker, repo_root=runtime_snapshot
     )
@@ -6480,6 +6768,11 @@ def _run_claude_agent_task_in_docker(
         "/home:rw,exec,size=512m",
         "--tmpfs",
         "/tmp:rw,exec,size=384m",
+        # Claude Code needs writable session/config state, while the canonical native skill remains
+        # release-pinned and read-only. Overlay only the config root, then restore its skills subtree
+        # from the immutable release snapshot as a nested read-only bind.
+        "--tmpfs",
+        "/repo/.claude:rw,nosuid,nodev,noexec,mode=1777,size=64m",
         *sdk_mount_args,
         *identity_mount_args,
         *npm_cache_mount_args,
@@ -6488,6 +6781,8 @@ def _run_claude_agent_task_in_docker(
         f"type=bind,src={workspace_path},dst=/workspace",
         "--mount",
         f"type=bind,src={runtime_snapshot},dst=/repo,readonly",
+        "--mount",
+        f"type=bind,src={runtime_snapshot / '.claude' / 'skills'},dst=/repo/.claude/skills,readonly",
         "-w",
         "/repo",
         *user_args,
@@ -6533,175 +6828,10 @@ def _build_sandbox_resource_args() -> list[str]:
     return args
 
 
-def _find_guidance_skill_file(identifier: str) -> Path | None:
-    raw_identifier = str(identifier or "").strip()
-    if not raw_identifier:
-        return None
-    identifier = raw_identifier.lstrip("/")
-    identifier_path = Path(raw_identifier).expanduser()
-    scan_dirs = list(get_all_skills_dirs())
-    bundled_skills_dir = Path(__file__).resolve().parents[2] / "skills"
-    if bundled_skills_dir.is_dir() and bundled_skills_dir not in scan_dirs:
-        scan_dirs.append(bundled_skills_dir)
-
-    if identifier_path.is_absolute():
-        if identifier_path.is_dir():
-            candidate = identifier_path / "SKILL.md"
-            if candidate.exists():
-                return candidate
-        elif identifier_path.name == "SKILL.md" and identifier_path.exists():
-            return identifier_path
-
-    for skills_dir in scan_dirs:
-        direct = skills_dir / identifier / "SKILL.md"
-        if direct.exists():
-            return direct
-
-    for skills_dir in scan_dirs:
-        for candidate in skills_dir.rglob("SKILL.md"):
-            try:
-                raw = candidate.read_text(encoding="utf-8")
-                frontmatter, _ = parse_frontmatter(raw)
-            except Exception:
-                continue
-            name = str(frontmatter.get("name") or candidate.parent.name).strip()
-            try:
-                rel_dir = str(candidate.parent.relative_to(skills_dir)).replace("\\", "/")
-            except ValueError:
-                rel_dir = candidate.parent.name
-            if identifier in {name, candidate.parent.name, rel_dir}:
-                return candidate
-    return None
-
-
 def _normalize_heading_text(value: str) -> str:
     text = value.replace("`", "").strip()
     text = re.sub(r"^\d+(?:\.\d+)*\.?\s*", "", text)
     return re.sub(r"\s+", " ", text).lower()
-
-
-def _excerpt_guidance_skill(content: str, *, section_titles: tuple[str, ...], max_chars: int = 12_000) -> str:
-    body = str(content or "").strip()
-    if not body:
-        return ""
-
-    lines = body.splitlines()
-    heading_re = re.compile(r"^(#{1,6})\s+(.*)$")
-    intro_end = len(lines)
-    title_lines: list[str] = []
-    intro_lines: list[str] = []
-    if lines:
-        title_lines.append(lines[0])
-        for idx in range(1, len(lines)):
-            if heading_re.match(lines[idx]):
-                intro_end = idx
-                break
-            intro_lines.append(lines[idx])
-
-    wanted = {_normalize_heading_text(title) for title in section_titles}
-    sections: list[str] = []
-    idx = intro_end
-    while idx < len(lines):
-        match = heading_re.match(lines[idx])
-        if not match:
-            idx += 1
-            continue
-        level = len(match.group(1))
-        title = match.group(2)
-        start = idx
-        idx += 1
-        while idx < len(lines):
-            next_match = heading_re.match(lines[idx])
-            if next_match and len(next_match.group(1)) <= level:
-                break
-            idx += 1
-        if _normalize_heading_text(title) in wanted:
-            sections.extend(lines[start:idx])
-            sections.append("")
-
-    excerpt_parts: list[str] = []
-    if title_lines:
-        excerpt_parts.extend(title_lines)
-    if intro_lines:
-        excerpt_parts.append("")
-        excerpt_parts.extend(intro_lines)
-    if sections:
-        excerpt_parts.append("")
-        excerpt_parts.extend(sections)
-    excerpt = "\n".join(excerpt_parts).strip()
-    if not excerpt:
-        excerpt = body
-    if len(excerpt) > max_chars:
-        excerpt = excerpt[:max_chars].rstrip() + "\n...[truncated]"
-    return excerpt
-
-
-def _excerpt_guidance_design_reference(skill_file: Path, skill_name: str) -> str:
-    design_file = skill_file.parent / "DESIGN.md"
-    if not design_file.exists():
-        return ""
-    section_titles = _WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS.get(skill_name.lower(), ())
-    if not section_titles:
-        return ""
-    body = design_file.read_text(encoding="utf-8")
-    excerpt = _excerpt_guidance_skill(body, section_titles=section_titles, max_chars=6_000)
-    if not excerpt:
-        return ""
-    return (
-        f"[Hermes design reference: {skill_name} / DESIGN.md]\n"
-        "Treat these as concrete visual implementation details for the chosen design system. "
-        "Favor them over generic landing-page instincts.\n\n"
-        f"{excerpt}"
-    ).strip()
-
-
-def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[str], str]:
-    resolved_names: list[str] = []
-    blocks: list[str] = []
-    for identifier in skill_identifiers:
-        skill_file = _find_guidance_skill_file(identifier)
-        if skill_file is None:
-            raise TakyonError(
-                f"guidance skill '{identifier}' was requested for business_claude_agent_task but is not installed"
-            )
-        raw = skill_file.read_text(encoding="utf-8")
-        frontmatter, body = parse_frontmatter(raw)
-        skill_name = str(frontmatter.get("name") or skill_file.parent.name).strip() or skill_file.parent.name
-        resolved_names.append(skill_name)
-        normalized_skill_name = skill_name.lower()
-        section_titles = _WORKER_GUIDANCE_SKILL_SECTIONS.get(normalized_skill_name, ())
-        # Taste is one end-to-end implementation skill (design read → implementation → complete
-        # preflight), not a planning excerpt.  Preserve the byte-complete body regardless of whether
-        # callers use the legacy local id or upstream's canonical frontmatter name.
-        excerpt = (
-            str(body or "").strip()
-            if normalized_skill_name in _TASTE_GUIDANCE_SKILL_NAMES
-            else _excerpt_guidance_skill(body, section_titles=section_titles)
-        )
-        if normalized_skill_name in _TASTE_GUIDANCE_SKILL_NAMES:
-            preamble = (
-                "Use Taste as the complete landing/editorial implementation skill: perform its "
-                "Design Read, implement in this same worker session, and complete its full preflight. "
-                "Do not reduce it to a planning summary or assume another design skill is present. "
-                "Before finishing, write DESIGN.md in the workspace with a nonempty `# Design Read` "
-                "section and explicit `DESIGN_VARIANCE: N`, `MOTION_INTENSITY: N`, and "
-                "`VISUAL_DENSITY: N` values (each 1-10); this is the durable handoff to later workers."
-            )
-        else:
-            preamble = (
-                "Follow this guidance when it improves the artifact quality or UX. "
-                "Business state, workspace boundaries, runtime truth, and the Hermes no-pretend contract override this guidance if they conflict."
-            )
-        block = (
-            f"[Hermes guidance skill: {skill_name}]\n"
-            f"{preamble}\n\n"
-            f"{excerpt}"
-        )
-        blocks.append(block.strip())
-        design_reference = _excerpt_guidance_design_reference(skill_file, skill_name)
-        if design_reference:
-            blocks.append(design_reference)
-    return resolved_names, "\n\n".join(blocks).strip()
 
 
 def _microusd_to_cents(value: int | float | None) -> int:
@@ -9473,9 +9603,14 @@ def _requested_workflow_completeness_markers(
                 )
             )
         action_sources: list[str] = []
+        action_source_entries: list[tuple[str, str]] = []
         for action_path in sorted((root / "actions").glob("*.ts"))[:20]:
             try:
-                action_sources.append(action_path.read_text(encoding="utf-8"))
+                action_source = action_path.read_text(encoding="utf-8")
+                action_sources.append(action_source)
+                action_source_entries.append(
+                    (action_path.relative_to(root).as_posix(), action_source)
+                )
             except (OSError, UnicodeDecodeError):
                 continue
         if not any(re.search(r"\bctx\s*\.\s*generate\s*\(", text) for text in action_sources):
@@ -9519,6 +9654,12 @@ def _requested_workflow_completeness_markers(
             checked_source = re.sub(r"/\*.*?\*/", "", source_text, flags=re.DOTALL)
             checked_source = re.sub(r"//.*$", "", checked_source, flags=re.MULTILINE)
             checked_source_entries.append((relative_path, checked_source))
+        checked_action_entries: list[tuple[str, str]] = []
+        for relative_path, source_text in action_source_entries:
+            checked_source = re.sub(r"/\*.*?\*/", "", source_text, flags=re.DOTALL)
+            checked_source = re.sub(r"//.*$", "", checked_source, flags=re.MULTILINE)
+            checked_action_entries.append((relative_path, checked_source))
+        checked_sources_by_path = dict(checked_source_entries + checked_action_entries)
 
         def function_body_start(source_text: str, definition: re.Match[str]) -> int:
             parameter_start = source_text.find(
@@ -9589,36 +9730,28 @@ def _requested_workflow_completeness_markers(
                 cursor += 1
             return -1
 
-        def named_tagged_decoder_is_validated(call_arguments: str) -> bool:
-            decoder_match = re.fullmatch(
-                r"\s*(['\"])[a-z][a-z0-9_-]{0,63}\1\s*,\s*"
-                r"(?P<decoder>[A-Za-z_$][A-Za-z0-9_$]*)\s*,?\s*",
-                call_arguments,
-                re.IGNORECASE,
-            )
-            if not decoder_match:
-                return False
-            decoder_name = decoder_match.group("decoder")
-            for _relative_path, source_text in checked_source_entries:
+        def callable_source(
+            symbol: str,
+        ) -> tuple[str, str, str] | None:
+            """Find a named function/arrow without requiring a product-specific symbol spelling."""
+            for relative_path, source_text in checked_sources_by_path.items():
                 definition = re.search(
-                    rf"\bfunction\s+{re.escape(decoder_name)}(?:\s*<[^>]+>)?\s*\(",
+                    rf"\bfunction\s+{re.escape(symbol)}(?:\s*<[^>]+>)?\s*\(",
                     source_text,
                 )
-                decoder_source = ""
+                callable_text = ""
                 if definition:
                     block_start = function_body_start(source_text, definition)
                     block_end = (
-                        _typescript_balanced_end(
-                            source_text, block_start, "{", "}"
-                        )
+                        _typescript_balanced_end(source_text, block_start, "{", "}")
                         if block_start >= 0
                         else -1
                     )
                     if block_end >= 0:
-                        decoder_source = source_text[block_start : block_end + 1]
-                if not decoder_source:
+                        callable_text = source_text[block_start : block_end + 1]
+                if not callable_text:
                     assignment = re.search(
-                        rf"\b(?:const|let)\s+{re.escape(decoder_name)}\b[^;=\n]{{0,1000}}=\s*",
+                        rf"\b(?:const|let)\s+{re.escape(symbol)}\b[^;=\n]{{0,1000}}=\s*",
                         source_text,
                     )
                     if assignment:
@@ -9638,28 +9771,171 @@ def _requested_workflow_completeness_markers(
                                     source_text, expression_start, "{", "}"
                                 )
                                 if block_end >= 0:
-                                    decoder_source = source_text[
+                                    callable_text = source_text[
                                         expression_start : block_end + 1
                                     ]
                             else:
                                 semicolon = source_text.find(";", expression_start)
                                 if semicolon >= 0:
-                                    decoder_source = source_text[
+                                    callable_text = source_text[
                                         expression_start : semicolon + 1
                                     ]
-                if re.search(r"\bdecodeActionResult\s*\(", decoder_source):
-                    return True
+                if callable_text:
+                    return relative_path, callable_text, source_text
+            return None
+
+        def schema_validation_fingerprint(source_text: str) -> dict[str, str]:
+            """Extract general field/type evidence from runtime checks, not decoder names."""
+            fingerprint: dict[str, str] = {}
+            descriptor_fields: dict[str, str] = {}
+            descriptor_pattern = re.compile(
+                r"\b(?:const|let)\s+(?P<variable>[A-Za-z_$][\w$]*)\s*=\s*"
+                r"(?:Object\s*\.\s*getOwnPropertyDescriptor\s*\([^,]+,\s*|"
+                r"Reflect\s*\.\s*get\s*\([^,]+,\s*)"
+                r"(['\"])(?P<field>[A-Za-z_$][\w$]*)\2",
+                re.DOTALL,
+            )
+            for match in descriptor_pattern.finditer(source_text):
+                descriptor_fields[match.group("variable")] = match.group("field")
+
+            direct_type = re.compile(
+                r"\btypeof\s+(?:\([^;\n]{0,180}\)\s*)?"
+                r"[A-Za-z_$][\w$]*(?:\s*\?\s*)?\s*(?:\.\s*|\[\s*['\"])"
+                r"(?P<field>[A-Za-z_$][\w$]*)['\"]?\s*\]?\s*"
+                r"(?:===|!==|==|!=)\s*(['\"])(?P<kind>string|number|boolean)\2"
+            )
+            reverse_type = re.compile(
+                r"(['\"])(?P<kind>string|number|boolean)\1\s*"
+                r"(?:===|!==|==|!=)\s*\btypeof\s+"
+                r"[A-Za-z_$][\w$]*(?:\s*\?\s*)?\s*(?:\.\s*|\[\s*['\"])"
+                r"(?P<field>[A-Za-z_$][\w$]*)['\"]?\s*\]?"
+            )
+            for pattern in (direct_type, reverse_type):
+                for match in pattern.finditer(source_text):
+                    fingerprint[match.group("field")] = match.group("kind")
+            for variable, field_name in descriptor_fields.items():
+                variable_type = re.search(
+                    rf"\btypeof\s+{re.escape(variable)}\s*(?:===|!==|==|!=)\s*"
+                    r"(['\"])(string|number|boolean)\1",
+                    source_text,
+                )
+                if variable_type:
+                    fingerprint[field_name] = variable_type.group(2)
+                elif re.search(
+                    rf"\bArray\s*\.\s*isArray\s*\(\s*{re.escape(variable)}\s*\)",
+                    source_text,
+                ):
+                    fingerprint[field_name] = "array"
+            array_property = re.compile(
+                r"\bArray\s*\.\s*isArray\s*\(\s*"
+                r"[A-Za-z_$][\w$]*(?:\s*\?\s*)?\s*(?:\.\s*|\[\s*['\"])"
+                r"(?P<field>[A-Za-z_$][\w$]*)['\"]?\s*\]?\s*\)"
+            )
+            for match in array_property.finditer(source_text):
+                fingerprint[match.group("field")] = "array"
+            return fingerprint
+
+        def has_raw_type_assertion(source_text: str) -> bool:
+            # `value as unknown as T` is still an unchecked assertion; the old gate accidentally
+            # exempted its first `as unknown` and therefore accepted the complete double cast.
+            source_without_strings = re.sub(
+                r"(['\"`])(?:\\.|(?!\1).)*\1",
+                "",
+                source_text,
+                flags=re.DOTALL,
+            )
+            return re.search(
+                r"\bas\s+(?!const\b|never\b)[A-Za-z_$][A-Za-z0-9_$<>,.\[\] |&?]*|"
+                r"<[A-Za-z_$][A-Za-z0-9_$<>,.\[\] |&?]*>\s*"
+                r"(?:value|result|data|payload|candidate)\b",
+                source_without_strings,
+            ) is not None
+
+        def validated_decoder(
+            symbol: str,
+            *,
+            tagged: bool,
+        ) -> tuple[bool, dict[str, str], str]:
+            located = callable_source(symbol)
+            if located is None:
+                return False, {}, ""
+            _relative_path, decoder_source, defining_source = located
+            if has_raw_type_assertion(decoder_source):
+                return False, {}, decoder_source
+            nested = re.search(
+                r"\bdecodeActionResult\s*\([^,]+,\s*"
+                r"(?P<decoder>[A-Za-z_$][A-Za-z0-9_$]*)\s*\)",
+                decoder_source,
+                re.DOTALL,
+            )
+            if nested:
+                return validated_decoder(nested.group("decoder"), tagged=False)
+            has_validation = re.search(
+                r"\btypeof\b|\binstanceof\b|\bArray\s*\.\s*isArray\s*\(|"
+                r"\b(?:is|validate|guard)[A-Z_$][A-Za-z0-9_$]*\s*\(|"
+                r"\.\s*(?:safeParse|parse)\s*\(",
+                decoder_source,
+            ) is not None
+            fingerprint = schema_validation_fingerprint(defining_source)
+            if tagged:
                 has_reject = re.search(r"\bok\s*:\s*false\b", decoder_source) is not None
                 has_accept = re.search(r"\bok\s*:\s*true\b", decoder_source) is not None
-                has_validation = re.search(
-                    r"\btypeof\b|\binstanceof\b|\bArray\s*\.\s*isArray\s*\(|"
-                    r"\b(?:is|validate|guard)[A-Z_$][A-Za-z0-9_$]*\s*\(|"
-                    r"\.\s*(?:safeParse|parse)\s*\(",
+                return (
+                    has_reject and has_accept and has_validation and bool(fingerprint),
+                    fingerprint,
                     decoder_source,
-                ) is not None
-                if has_reject and has_accept and has_validation:
-                    return True
-            return False
+                )
+            has_reject = re.search(
+                r"\bthrow\b|\breturn\s+(?:null|undefined)\b|\?\s*[^:;]+\s*:\s*(?:null|undefined)\b",
+                decoder_source,
+                re.DOTALL,
+            ) is not None
+            return (
+                has_reject and has_validation and bool(fingerprint),
+                fingerprint,
+                decoder_source,
+            )
+
+        def strict_decoder_contract(
+            call_arguments: str,
+        ) -> tuple[str, str, bool, dict[str, str]] | None:
+            call_match = re.match(
+                r"\s*(['\"])(?P<action>[a-z][a-z0-9_-]{0,63})\1\s*,\s*"
+                r"(?P<decoder>.+?)\s*,?\s*$",
+                call_arguments,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if not call_match:
+                return None
+            decoder_expression = call_match.group("decoder")
+            inline = re.search(
+                r"\bdecodeActionResult\s*\([^,]+,\s*"
+                r"(?P<decoder>[A-Za-z_$][A-Za-z0-9_$]*)\s*\)",
+                decoder_expression,
+                re.DOTALL,
+            )
+            tagged = inline is None
+            if inline:
+                decoder_symbol = inline.group("decoder")
+            else:
+                named = re.fullmatch(
+                    r"\s*(?P<decoder>[A-Za-z_$][A-Za-z0-9_$]*)\s*",
+                    decoder_expression,
+                )
+                if named is None:
+                    return None
+                decoder_symbol = named.group("decoder")
+            valid, fingerprint, _decoder_source = validated_decoder(
+                decoder_symbol, tagged=tagged
+            )
+            return (
+                call_match.group("action").lower(),
+                decoder_symbol,
+                valid,
+                fingerprint,
+            )
+
+        strict_contracts: list[tuple[str, str, dict[str, str], str]] = []
 
         for relative_path, checked_source in checked_source_entries:
             if direct_action_pattern.search(checked_source):
@@ -9689,9 +9965,8 @@ def _requested_workflow_completeness_markers(
                 )
             for strict_match in strict_runner_pattern.finditer(checked_source):
                 strict_arguments = _typescript_call_arguments(checked_source, strict_match)
-                if not re.search(
-                    r"\bdecodeActionResult\s*\(", strict_arguments
-                ) and not named_tagged_decoder_is_validated(strict_arguments):
+                contract = strict_decoder_contract(strict_arguments)
+                if contract is None or not contract[2]:
                     gaps.append(
                         (
                             relative_path,
@@ -9700,6 +9975,11 @@ def _requested_workflow_completeness_markers(
                             "outcomes; raw casts or unconditional ok results do not prove schema parity",
                         )
                     )
+                    continue
+                action_name, decoder_symbol, _valid, fingerprint = contract
+                strict_contracts.append(
+                    (action_name, decoder_symbol, fingerprint, relative_path)
+                )
         if referenced_actions and not any(
             strict_runner_pattern.search(source_text)
             for _relative_path, source_text in checked_source_entries
@@ -9711,6 +9991,148 @@ def _requested_workflow_completeness_markers(
                     "successful action payloads are not protected from producer/consumer schema drift",
                 )
             )
+
+        def decoder_reads_record_data(source_text: str, decoder_symbol: str) -> bool:
+            for decoder_call in re.finditer(
+                rf"\b{re.escape(decoder_symbol)}\s*\(", source_text
+            ):
+                if re.search(
+                    r"\.\s*data\b",
+                    _typescript_call_arguments(source_text, decoder_call),
+                ):
+                    return True
+            for wrapper_call in re.finditer(
+                r"\bdecodeActionResult\s*\(", source_text
+            ):
+                arguments = _typescript_call_arguments(source_text, wrapper_call)
+                if re.search(r"\.\s*data\b", arguments) and re.search(
+                    rf"\b{re.escape(decoder_symbol)}\b", arguments
+                ):
+                    return True
+            return False
+
+        def schema_fields_reach_jsx(fingerprint: dict[str, str]) -> bool:
+            if not fingerprint:
+                return False
+            for relative_path, source_text in checked_source_entries:
+                if not relative_path.endswith(".tsx"):
+                    continue
+                jsx_start = re.search(
+                    r"<(?:[a-z][a-z0-9-]*|[A-Z][A-Za-z0-9_$]*)\b",
+                    source_text,
+                )
+                if jsx_start is None:
+                    continue
+                jsx_source = source_text[jsx_start.start() :]
+                if any(
+                    re.search(rf"\.\s*{re.escape(field_name)}\b", jsx_source)
+                    for field_name in fingerprint
+                ):
+                    return True
+            return False
+
+        action_sources_by_name = {
+            Path(relative_path).stem.lower(): source_text
+            for relative_path, source_text in checked_action_entries
+            if not Path(relative_path).stem.startswith("_")
+        }
+        for action_name, decoder_symbol, fingerprint, relative_path in strict_contracts:
+            action_source = action_sources_by_name.get(action_name, "")
+            if not action_source:
+                continue
+            generated_tail = action_source[
+                action_source.find("ctx.generate") + len("ctx.generate") :
+            ]
+            shared_decoder_after_generate = re.search(
+                rf"\b{re.escape(decoder_symbol)}\s*\(", generated_tail
+            ) is not None
+            action_fingerprint = schema_validation_fingerprint(action_source)
+            schema_matches_action = bool(fingerprint) and all(
+                action_fingerprint.get(field_name) == field_type
+                for field_name, field_type in fingerprint.items()
+            )
+            action_rejects_invalid = re.search(
+                r"\bthrow\b|\breturn\s+(?:null|undefined)\b",
+                generated_tail,
+            ) is not None
+            action_has_raw_assertion = has_raw_type_assertion(generated_tail)
+            if action_has_raw_assertion:
+                schema_matches_action = False
+            if action_has_raw_assertion or (
+                not shared_decoder_after_generate
+                and not (schema_matches_action and action_rejects_invalid)
+            ):
+                gaps.append(
+                    (
+                        f"actions/{action_name}.ts",
+                        "action output is not validated and normalized against the same field/type "
+                        "schema used by its tagged UI decoder before return",
+                    )
+                )
+            if not any(
+                decoder_reads_record_data(source_text, decoder_symbol)
+                for _source_path, source_text in checked_source_entries
+            ):
+                gaps.append(
+                    (
+                        relative_path,
+                        "reopened record.data is not passed through the same action-result decoder "
+                        "before the customer artifact is rendered",
+                    )
+                )
+            if not schema_fields_reach_jsx(fingerprint):
+                gaps.append(
+                    (
+                        relative_path,
+                        "validated action-result fields do not reach a typed JSX renderer",
+                    )
+                )
+
+        def save_data_expression(
+            source_text: str,
+            save_match: re.Match[str],
+        ) -> str:
+            arguments = _typescript_call_arguments(source_text, save_match).strip()
+            object_text = arguments
+            if not object_text.startswith("{"):
+                variable = re.fullmatch(r"([A-Za-z_$][\w$]*)", object_text)
+                if variable is None:
+                    return ""
+                prefix = source_text[: save_match.start()]
+                declarations = list(
+                    re.finditer(
+                        rf"\b(?:const|let|var)\s+{re.escape(variable.group(1))}\s*=\s*\{{",
+                        prefix,
+                    )
+                )
+                if not declarations:
+                    return ""
+                object_text = "{" + prefix[declarations[-1].end() :]
+            for field_text in _typescript_top_level_object_fields(object_text):
+                if re.fullmatch(r"data", field_text.strip()):
+                    return "data"
+                data_field = re.match(r"data\s*:\s*(?P<value>.+)$", field_text, re.DOTALL)
+                if data_field:
+                    value = data_field.group("value").strip()
+                    if value == "{}" or re.fullmatch(r"\{\s*\}", value):
+                        return ""
+                    return value
+            return ""
+
+        for relative_path, source_text in checked_source_entries:
+            save_calls = list(re.finditer(r"\bsaveRecord\s*\(", source_text))
+            if save_calls and any(
+                not save_data_expression(source_text, save_match)
+                for save_match in save_calls
+            ):
+                gaps.append(
+                    (
+                        relative_path,
+                        "saveRecord(...) does not persist the complete normalized action result in "
+                        "a non-empty top-level data field",
+                    )
+                )
+
         authored_sources.extend(action_sources)
         has_save = any(re.search(r"\bsaveRecord\s*\(", text) for text in authored_sources)
         has_reopen = any(
@@ -11023,34 +11445,6 @@ def _worker_surface_contract_retry_instruction(
                 - Reason: {reason}
                 - Continue from the current workspace state instead of restarting from scratch.
                 - Align the source you already built with the updated contract, then stop once contract and code agree.
-                """
-            ).strip(),
-        ]
-    )
-
-
-def _claude_agent_hit_turn_cap(error_text: str) -> bool:
-    clean = str(error_text or "").strip().lower()
-    return "reached maximum number of turns" in clean
-
-
-def _worker_turn_cap_retry_instruction(
-    base_instruction: str,
-    *,
-    prior_max_turns: int,
-    next_max_turns: int,
-    attempt_number: int,
-) -> str:
-    return "\n\n".join(
-        [
-            base_instruction.rstrip(),
-            dedent(
-                f"""
-                Hermes automatic continuation retry ({attempt_number} of 2):
-                - The previous worker attempt hit the Claude SDK turn cap at {int(prior_max_turns)} turns before finishing.
-                - Continue from the current workspace state instead of restarting from scratch.
-                - Focus only on the smallest remaining work needed to complete the task, then stop.
-                - The next attempt has a higher turn budget ({int(next_max_turns)} turns); do not spend it re-reading or redoing work that already exists.
                 """
             ).strip(),
         ]
@@ -36935,15 +37329,9 @@ def _defer_claude_agent_task_to_worker(args: dict) -> str | None:
     _require_api_access({"action": "agent.record", "business": business, "requires_api": ["anthropic"]})
     # Freeze session-dependent semantics NOW: the worker process has no session binding, so the
     # refresh_surface default must be resolved with THIS caller's context and passed explicitly.
-    normalized_workspace = workspace_rel.strip("/").lower()
-    workspace_targets_product_surface = (
-        normalized_workspace == "product"
-        or normalized_workspace.startswith("product/")
-        or normalized_workspace in {"site", "website"}
-    )
-    refresh_surface = _boolish(
+    refresh_surface = _resolve_claude_agent_surface_refresh(
+        workspace_rel,
         args.get("refresh_surface"),
-        default=workspace_targets_product_surface,
     )
     customer_facing = _workspace_needs_customer_ai_copy_contract(workspace_rel)
     timeout_ms = _clamp_int(
@@ -36967,8 +37355,10 @@ def _defer_claude_agent_task_to_worker(args: dict) -> str | None:
     if explicit_wait:
         wait_seconds = max(0.0, _clamp_int(wait_ms_raw, default=0, minimum=0, maximum=3_600_000) / 1000.0)
     else:
-        # Worst case: one bounded turn-cap continuation doubles the SDK run + surface refresh, plus claim slack.
-        wait_seconds = 2.0 * (timeout_ms / 1000.0 + float(refresh_timeout_seconds)) + 120.0
+        # One coding-worker invocation plus one surface refresh and claim slack. Deterministic
+        # failures and the SDK's first API retry are terminal, so the attach window must not retain
+        # the obsolete two-attempt multiplier.
+        wait_seconds = timeout_ms / 1000.0 + float(refresh_timeout_seconds) + 120.0
     return _run_operator_task_on_worker(
         store=store,
         business=business,
@@ -37256,21 +37646,46 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
     # writer lease. Keep the existing product-mutation ban at the public entrypoint now that the
     # owned implementation sits behind those seams.
     _refuse_on_autonomous_wake("product edits")
-    deferred = _defer_claude_agent_task_to_worker(args)
+    try:
+        workspace_raw = str(args.get("workspace") or "product/site").strip() or "product/site"
+        workspace_rel = _canonical_business_output_relpath(workspace_raw, field="workspace")
+        refresh_surface = _resolve_claude_agent_surface_refresh(
+            workspace_rel,
+            args.get("refresh_surface"),
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+    normalized_args = {
+        **args,
+        "workspace": workspace_rel,
+        "refresh_surface": refresh_surface,
+    }
+    deferred = _defer_claude_agent_task_to_worker(normalized_args)
     if deferred is not None:
         return deferred
+    if (
+        refresh_surface
+        and _blocks_session_bound_authority_op()
+    ):
+        return tool_error(
+            "product worker requires a trusted surface refresh, but this session did not route "
+            "through the authority worker plane; refusing before the coding worker starts",
+            success=False,
+            blocker="product_worker_authority_preflight_failed",
+        )
     store = _store()
     business = _resolved_business_slug(args, required=True)
     # Authorization precedes lock acquisition so an unauthorized caller cannot hold another
     # tenant's writer lane as a denial-of-service primitive.
     store.enforce_operator_business_access(business)
     with _hold_business_product_writer_lease(store, business=business):
-        return _handle_business_claude_agent_task_owned(args)
+        return _handle_business_claude_agent_task_owned(normalized_args)
 
 
 def _handle_business_claude_agent_task_owned(args: dict) -> str:
     """Run a general Claude Agent SDK worker inside one business filesystem."""
     _refuse_on_autonomous_wake("product edits")
+    parent_started_ns = time.monotonic_ns()
     store = _store()
     business = ""
     workspace_rel = "."
@@ -37278,14 +37693,66 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
     idempotency_key = ""
     worker_instruction = ""
     model = ""
-    resolved_guidance_skills: list[str] = []
     operator_user_id = ""
     operator_budget: dict[str, Any] = {}
     worker_invoked = False
+    worker_actual_cents: int | None = None
+    sdk_result: dict[str, Any] = {}
+    taste_skill_required = False
+    worker_release_sha = ""
+
+    def _parent_duration_ms() -> int:
+        return max(0, int((time.monotonic_ns() - parent_started_ns) / 1_000_000))
+
+    def _reported_usage() -> Mapping[str, Any] | None:
+        top_level = sdk_result.get("usage")
+        if isinstance(top_level, Mapping):
+            return top_level
+        receipt = sdk_result.get("skill_receipt")
+        if isinstance(receipt, Mapping) and isinstance(receipt.get("usage"), Mapping):
+            return receipt.get("usage")
+        return None
+
+    def _ensure_worker_telemetry(error_text: str = "") -> dict[str, Any]:
+        """Attach a parent-owned receipt even when the child never emitted valid JSON."""
+        existing = sdk_result.get("skill_receipt")
+        receipt = dict(existing) if isinstance(existing, Mapping) else {}
+        receipt.setdefault("name", _NATIVE_TASTE_SKILL_NAME)
+        receipt.setdefault("required", bool(taste_skill_required))
+        receipt.setdefault("model", model or None)
+        receipt.setdefault("requested_model", model or None)
+        receipt.setdefault("actual_model", None)
+        duration = receipt.get("duration_ms")
+        if not isinstance(duration, (int, float)) or isinstance(duration, bool):
+            receipt["duration_ms"] = _parent_duration_ms()
+        usage = _reported_usage()
+        if not isinstance(receipt.get("usage"), Mapping):
+            receipt["usage"] = usage
+        if not existing:
+            receipt.setdefault("installed", None)
+            receipt.setdefault("included", None)
+            receipt.setdefault("native_use", None)
+            receipt.setdefault(
+                "error",
+                error_text or "worker exited before a complete SDK skill receipt",
+            )
+        sdk_result["skill_receipt"] = receipt
+        if not isinstance(sdk_result.get("usage"), Mapping):
+            sdk_result["usage"] = receipt.get("usage")
+        sdk_result.setdefault("model", model or None)
+        sdk_result.setdefault("runtime_release_sha", worker_release_sha or None)
+        sdk_result["parent_duration_ms"] = _parent_duration_ms()
+        return receipt
+
+    def _reported_duration_ms() -> int:
+        receipt = _ensure_worker_telemetry()
+        value = receipt.get("duration_ms")
+        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else _parent_duration_ms()
 
     def _record_worker_failure(error_text: str) -> dict[str, Any] | None:
         if not business or not idempotency_key:
             return None
+        _ensure_worker_telemetry(error_text)
         try:
             return store.commit(
                 scope=f"business:{business}",
@@ -37300,9 +37767,15 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                             "source": "claude-agent-sdk",
                             "workspace": workspace_rel,
                             "model": model,
-                            "guidance_skills": resolved_guidance_skills,
                             "summary": "",
                             "error": error_text,
+                            "duration_ms": _reported_duration_ms(),
+                            "parent_duration_ms": sdk_result.get("parent_duration_ms"),
+                            "usage": _reported_usage(),
+                            "runtime_release_sha": worker_release_sha or None,
+                            "skill_receipt": sdk_result.get("skill_receipt"),
+                            "taste_publication_evidence": sdk_result.get("taste_publication_evidence"),
+                            "taste_publication_receipt": sdk_result.get("taste_publication_receipt"),
                             "surface_refresh": None,
                         },
                     }
@@ -37337,16 +37810,10 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
         load_takyon_env()
         _require_api_access({"action": "agent.record", "business": business, "requires_api": ["anthropic"]})
         normalized_workspace = workspace_rel.strip("/").lower()
-        workspace_targets_product_surface = (
-            normalized_workspace == "product"
-            or normalized_workspace.startswith("product/")
-            or normalized_workspace in {"site", "website"}
-        )
+        workspace_targets_product_surface = _workspace_is_canonical_product_site(workspace_rel)
         # The mobile app workspace (product/app on a mobile_app business) has its OWN build/verify
-        # lane (Expo typecheck + the credit-gated store publish) — the web surface refresh is
-        # Vite-only and can never run against an Expo tree, so it is FORCED off here (an explicit
-        # refresh_surface=true from web habit would otherwise run the Vite pipeline on the Expo
-        # tree and fail the whole delegated task after the worker succeeded).
+        # lane (Expo typecheck + the credit-gated store publish). The canonical resolver defaults
+        # web publication off there and refuses an explicit attempt to turn it on.
         mobile_app_workspace = False
         if _workspace_is_mobile_app_dir(workspace_rel):
             _arch_leaf = _archetype_leaf()
@@ -37359,15 +37826,22 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                 # An out-of-registry row value (version skew) degrades to the web path rather than
                 # hard-failing the delegated task.
                 mobile_app_workspace = False
-        if mobile_app_workspace:
-            refresh_surface = False
-        else:
-            refresh_surface = _boolish(
-                args.get("refresh_surface"),
-                default=workspace_targets_product_surface,
-            )
+        refresh_surface = _resolve_claude_agent_surface_refresh(
+            workspace_rel,
+            args.get("refresh_surface"),
+        )
         docker_isolated_worker = _should_run_claude_agent_in_docker(workspace_rel)
         customer_facing_product_workspace = _workspace_needs_customer_ai_copy_contract(workspace_rel)
+        taste_skill_required = _product_site_worker_requires_taste(workspace_rel)
+        from .claim_scope import runtime_release_sha
+
+        try:
+            worker_release_sha = runtime_release_sha(runtime_root=_repo_root())
+        except Exception as exc:
+            raise TakyonError(
+                "coding worker release preflight failed before budget reservation or process launch: "
+                f"{exc}"
+            ) from exc
         reuse_session_workspace = bool(
             docker_isolated_worker
             and worker_session_bound
@@ -37436,12 +37910,7 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
         # per-call overrides that disagree are refused, and missing configuration has no implicit
         # Claude/provider fallback.
         model = _resolve_claude_agent_model(args.get("model"))
-        guidance_skills: list[str] = []
-        guidance_selection_reason = ""
-        resolved_guidance_skills: list[str] = []
-        guidance_block = ""
         worker_invoked = False
-        worker_actual_cents: int | None = None
         install_surface = _boolish(args.get("install"), default=True)
         refresh_timeout_seconds = _clamp_int(
             args.get("refresh_timeout_seconds"),
@@ -37449,14 +37918,13 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             minimum=15,
             maximum=900,
         )
-        sdk_result: dict[str, Any] = {}
         surface_refresh: dict[str, Any] | None = None
         worker_attempts = 0
         active_max_turns = max_turns
         turn_cap_retries: list[dict[str, int]] = []
-        surface_build_retries: list[dict[str, str]] = []
         agent_record: dict[str, Any] | None = None
-        taste_guidance_active = False
+        initial_landing_design_pass = False
+        baseline_taste_snapshot: TasteDesignSnapshot | None = None
         with workspace_context as mounted_context, ExitStack() as scoped_workspaces:
             active_store = store
             mounted_home = None
@@ -37475,27 +37943,6 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             surface_for_worker = app.get("surface") or app.get("surface_contract") or {}
             if not isinstance(surface_for_worker, dict):
                 surface_for_worker = {}
-            guidance_skills, guidance_selection_reason = _resolve_worker_guidance_skills(
-                args,
-                workspace_rel,
-                surface=surface_for_worker,
-                instruction=instruction,
-            )
-            try:
-                resolved_guidance_skills, guidance_block = _compose_worker_guidance_block(guidance_skills)
-            except TakyonError:
-                # An explicit caller request for a missing guidance skill must fail loud. The
-                # auto-selected default design packs degrade to no guidance when a design skill is
-                # not installed, rather than failing the whole product build.
-                if "guidance_skills" in args:
-                    raise
-                resolved_guidance_skills, guidance_block = [], ""
-                guidance_selection_reason = "design packs unavailable; proceeded without guidance"
-            taste_guidance_active = bool(
-                _TASTE_GUIDANCE_SKILL_NAMES.intersection(
-                    name.lower() for name in resolved_guidance_skills
-                )
-            )
             if refresh_surface and workspace_targets_product_surface:
                 _enforce_canonical_product_surface_source_path(
                     business=business,
@@ -37516,6 +37963,12 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                 raise TakyonError(f"workspace is not a directory: {workspace_rel}")
             if business_root not in (workspace_path, *workspace_path.parents):
                 raise TakyonError("workspace escaped business root")
+            if taste_skill_required:
+                baseline_taste_snapshot = _load_validated_taste_design_snapshot(workspace_path)
+            initial_landing_design_pass = bool(
+                taste_skill_required
+                and baseline_taste_snapshot is None
+            )
             if _workspace_needs_runtime_ui_contract(workspace_rel):
                 surface_for_worker = _materialized_surface_for_workspace(
                     workspace_path,
@@ -37561,8 +38014,6 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             )
             def build_worker_instruction(current_surface: dict[str, Any] | None) -> str:
                 worker_instruction_parts = [instruction.rstrip(), business_brief_context]
-                if guidance_block:
-                    worker_instruction_parts.append(guidance_block)
                 if _workspace_needs_customer_ai_copy_contract(workspace_rel):
                     worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
                     # The web build gate demands `npm run build` — the Expo tree has no build
@@ -37570,9 +38021,6 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                     worker_instruction_parts.append(
                         MOBILE_APP_BUILD_GATE_CONTRACT if mobile_app_workspace else PRODUCT_BUILD_GATE_CONTRACT
                     )
-                if taste_guidance_active and _workspace_needs_runtime_ui_contract(workspace_rel):
-                    worker_instruction_parts.append(TASTE_LANDING_IMAGE_CONTRACT)
-                    worker_instruction_parts.append(TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT)
                 if mobile_app_workspace:
                     worker_instruction_parts.append(MOBILE_APP_WORKER_CONTRACT)
                     worker_instruction_parts.append(
@@ -37581,8 +38029,6 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         + "`. The platform-owned cancellation component consumes it; worker-owned UI must not duplicate cancellation timing or refund copy."
                     )
                 if _workspace_needs_runtime_ui_contract(workspace_rel):
-                    worker_instruction_parts.append(PUBLIC_LANDING_COMPOSITION_CONTRACT)
-                    worker_instruction_parts.append(PRODUCT_VISUAL_CRAFT_CONTRACT)
                     runtime_ui_contract = _runtime_ui_contract_block(current_surface)
                     if runtime_ui_contract:
                         worker_instruction_parts.append(runtime_ui_contract)
@@ -37648,21 +38094,25 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             )
             scoped_workspaces.enter_context(worker_progress_binding)
             site_image_bridge: _SiteImageWorkerBridge | None = None
-            if taste_guidance_active and _workspace_needs_runtime_ui_contract(workspace_rel):
+            if taste_skill_required:
                 site_image_bridge = scoped_workspaces.enter_context(
                     _site_image_worker_bridge(
                         store=active_store,
                         business=business,
                         idempotency_prefix=idempotency_key,
                         parent_dir=business_root.parent.parent / ".takyon-worker-bridges",
+                        trusted_asset_digests=(
+                            baseline_taste_snapshot.assets
+                            if baseline_taste_snapshot is not None
+                            else {}
+                        ),
                     )
                 )
-            # ONE wall-clock budget for the entire coding task.  Turn-cap, build-fix, and Docker
-            # bind retries all consume this same deadline; no retry receives a fresh timeout.  The
-            # caller chooses the total (bootstrap passes 900s), while timeout-partial validation may
-            # still run afterward under the ownership fence to determine whether the source is
-            # already complete and publishable.
+            # ONE wall-clock budget for the coding invocation. Only Docker prestart bind retries
+            # share it; those happen before a model request. The first SDK API retry and every
+            # deterministic worker/build failure are terminal.
             worker_deadline = time.monotonic() + (float(timeout_ms) / 1000.0)
+            worker_run_started_monotonic = time.monotonic()
 
             def _remaining_worker_timeout_ms() -> int:
                 remaining_ms = int((worker_deadline - time.monotonic()) * 1000)
@@ -37774,9 +38224,13 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         # the mint (there is no raw-key fallback to inject here anymore).
                         worker_env = _claude_agent_non_docker_worker_env(business, operator_user_id)
                         worker_env.update(_claude_agent_model_aliases(model))
+                        host_payload = {
+                            **attempt_payload,
+                            "claudeConfigDir": worker_env["CLAUDE_CONFIG_DIR"],
+                        }
                         proc = _run_claude_agent_task_process(
                             run_cmd=[node, str(script)],
-                            payload=attempt_payload,
+                            payload=host_payload,
                             cwd=str(_repo_root()),
                             timeout_ms=_remaining_worker_timeout_ms(),
                             env=worker_env,
@@ -37802,28 +38256,68 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         active_store,
                         f"preserving timed-out Claude worker source for business:{business}",
                     )
-                    if taste_guidance_active:
+                    if taste_skill_required:
+                        # Product/site source has no publish authority without the same worker's
+                        # native-skill and rendered-publication receipts. Never make a timed-out,
+                        # unvalidated tree durable merely because it happens to compile later.
                         _remove_taste_preflight_artifacts(workspace_path)
-                    try:
-                        partial_sync_status = active_store._sync_business_workspace_remote(business)
-                    except Exception:
-                        partial_sync_status = "partial_sync_failed"
+                        partial_sync_status = "not_synced_unvalidated_product_site"
+                    else:
+                        try:
+                            partial_sync_status = active_store._sync_business_workspace_remote(business)
+                        except Exception:
+                            partial_sync_status = "partial_sync_failed"
                     sdk_result = {
                         "success": False,
                         "blocked": True,
                         "timed_out": True,
+                        "model": model,
+                        "usage": None,
+                        "actual_cost_cents": None,
+                        "runtime_release_sha": worker_release_sha or None,
                         "worker_timeout_ms": int(timeout_ms),
                         "partial_workspace_sync_status": partial_sync_status,
                         "error": _truncate_text(
                             f"Claude worker timed out after {int(timeout_ms)}ms. Partial workspace edits "
-                            f"are preserved in canonical source (sync {partial_sync_status}); do NOT cold "
-                            "re-delegate from scratch — inspect the preserved partial and continue from it.",
+                            + (
+                                "were refused durable sync because product/site Taste proof was incomplete."
+                                if taste_skill_required
+                                else f"are preserved in canonical source (sync {partial_sync_status})."
+                            ),
                             8000,
                         ),
+                        "skill_receipt": {
+                            "name": _NATIVE_TASTE_SKILL_NAME,
+                            "required": taste_skill_required,
+                            "model": model,
+                            "actual_model": None,
+                            "duration_ms": max(
+                                0,
+                                int((time.monotonic() - worker_run_started_monotonic) * 1000),
+                            ),
+                            "usage": None,
+                            "installed": None,
+                            "included": None,
+                            "native_use": None,
+                            "error": "worker timed out before a complete SDK receipt",
+                        },
+                        "taste_publication_receipt": (
+                            {
+                                "version": 1,
+                                "passed": False,
+                                "initial_pass": bool(initial_landing_design_pass),
+                                "baseline_snapshot_present": baseline_taste_snapshot is not None,
+                                "snapshot_path": DESIGN_SNAPSHOT_RELATIVE_PATH,
+                                "blocker": "worker timed out before rendered Taste proof completed",
+                            }
+                            if taste_skill_required
+                            else None
+                        ),
                     }
+                    _ensure_worker_telemetry("worker timed out before a complete SDK receipt")
                     timeout_line = (
-                        f"Claude worker timed out for {workspace_rel}; partial edits preserved "
-                        f"(sync {partial_sync_status})."
+                        f"Claude worker timed out for {workspace_rel}; partial sync status: "
+                        f"{partial_sync_status}."
                     )
                     _record_claude_agent_runtime_event(
                         business=business,
@@ -37835,11 +38329,10 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                     proc = None
                     stdout = ""
                     stderr = ""
-                # The SDK helper removes this after the same Taste session has Read both PNGs. This
-                # parent-side pass is the forced-timeout/crash backstop and runs before every later
-                # durable sync or read-back comparison.
-                if taste_guidance_active:
-                    _remove_taste_preflight_artifacts(workspace_path)
+                except Exception:
+                    if taste_skill_required:
+                        _remove_taste_preflight_artifacts(workspace_path)
+                    raise
                 if proc is not None:
                     stdout = proc.stdout.strip()
                     stderr = proc.stderr.strip()
@@ -37848,6 +38341,25 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         sdk_result = parsed_result if isinstance(parsed_result, dict) else {"success": False, "raw_stdout": _truncate_text(stdout)}
                     except json.JSONDecodeError:
                         sdk_result = {"success": False, "raw_stdout": _truncate_text(stdout)}
+                    if not isinstance(sdk_result.get("skill_receipt"), Mapping):
+                        sdk_result["skill_receipt"] = {
+                            "name": _NATIVE_TASTE_SKILL_NAME,
+                            "required": taste_skill_required,
+                            "model": model,
+                            "actual_model": None,
+                            "duration_ms": max(
+                                0,
+                                int((time.monotonic() - worker_run_started_monotonic) * 1000),
+                            ),
+                            "usage": sdk_result.get("usage"),
+                            "installed": None,
+                            "included": None,
+                            "native_use": None,
+                            "error": "worker exited without a complete SDK skill receipt",
+                        }
+                    _ensure_worker_telemetry(
+                        str(sdk_result.get("error") or "worker exited without a complete SDK receipt")
+                    )
                     try:
                         worker_actual_cents = int(sdk_result.get("actual_cost_cents"))
                     except (TypeError, ValueError, AttributeError):
@@ -37877,56 +38389,53 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                             "Claude Agent SDK output blocked because source files were written under a "
                             f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
                         )
-                if (sdk_result.get("success") or sdk_result.get("timed_out")) and taste_guidance_active:
-                    if site_image_bridge is not None:
-                        sdk_result["restored_taste_landing_assets"] = (
-                            site_image_bridge.restore_generated_assets()
-                        )
-                    design_contract, design_contract_blocker = _read_taste_design_contract(
-                        workspace_path
+                if proc is not None and taste_skill_required:
+                    failed_skill_receipt = (
+                        sdk_result.get("skill_receipt")
+                        if isinstance(sdk_result.get("skill_receipt"), Mapping)
+                        else {}
                     )
-                    if design_contract_blocker:
-                        # Preserve the one Taste session's source for honest human review, but fail
-                        # closed before refresh/publish and never start a second stateless Taste
-                        # worker merely to recreate the missing handoff.
-                        try:
-                            blocked_sync_status = active_store._sync_business_workspace_remote(
-                                business
+                    taste_receipt: dict[str, Any] = {
+                        "version": 1,
+                        "passed": False,
+                        "initial_pass": bool(initial_landing_design_pass),
+                        "baseline_snapshot_present": baseline_taste_snapshot is not None,
+                        "snapshot_path": DESIGN_SNAPSHOT_RELATIVE_PATH,
+                        "blocker": str(sdk_result.get("error") or "Claude Agent SDK worker failed"),
+                        "model": str(
+                            failed_skill_receipt.get("actual_model")
+                            or failed_skill_receipt.get("model")
+                            or model
+                        ),
+                        "duration_ms": failed_skill_receipt.get("duration_ms"),
+                        "usage": failed_skill_receipt.get("usage"),
+                    }
+                    taste_blocker = ""
+                    try:
+                        if sdk_result.get("success"):
+                            taste_receipt, taste_blocker = _validate_taste_worker_publication(
+                                workspace_path=workspace_path,
+                                sdk_result=sdk_result,
+                                baseline_snapshot=baseline_taste_snapshot,
+                                site_image_bridge=site_image_bridge,
+                                initial_pass=initial_landing_design_pass,
                             )
-                        except Exception as sync_exc:
-                            blocked_sync_status = f"failed: {sync_exc}"
-                        sdk_result = {
-                            **sdk_result,
-                            "success": False,
-                            "blocked": True,
-                            "blocker": "taste_design_contract_invalid",
-                            "error": design_contract_blocker,
-                            "taste_design_contract": None,
-                            "workspace_sync_status": blocked_sync_status,
-                        }
-                    else:
-                        sdk_result["taste_design_contract"] = design_contract
-                        asset_contract, asset_contract_blocker = _read_taste_landing_asset_contract(
-                            workspace_path
-                        )
-                        if asset_contract_blocker:
-                            try:
-                                blocked_sync_status = active_store._sync_business_workspace_remote(
-                                    business
-                                )
-                            except Exception as sync_exc:
-                                blocked_sync_status = f"failed: {sync_exc}"
+                            if taste_blocker:
+                                taste_receipt["blocker"] = taste_blocker
+                        sdk_result["taste_publication_receipt"] = taste_receipt
+                        if taste_blocker:
                             sdk_result = {
                                 **sdk_result,
                                 "success": False,
                                 "blocked": True,
-                                "blocker": "taste_landing_asset_contract_invalid",
-                                "error": asset_contract_blocker,
-                                "taste_landing_asset_contract": asset_contract,
-                                "workspace_sync_status": blocked_sync_status,
+                                "blocker": "taste_publication_gate_failed",
+                                "error": taste_blocker,
                             }
-                        else:
-                            sdk_result["taste_landing_asset_contract"] = asset_contract
+                    finally:
+                        # Helper stdout is parsed and its digest-bound screenshots are validated
+                        # before this parent-owned scratch is removed. No preflight artifact may
+                        # enter durable business state.
+                        _remove_taste_preflight_artifacts(workspace_path)
                 if sdk_result.get("success"):
                     # The SDK summary often contains the worker's internal design deliberation
                     # ("Now I have full context... Reading this as... Dial: variance=..."). Preserve
@@ -38035,19 +38544,19 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         else:
                             workspace_path = canonical_workspace_path
                 surface_refresh = None
-                # A timed-out attempt whose partial synced to canonical is judged by the SAME
+                # A timed-out invocation whose partial synced to canonical is judged by the SAME
                 # tsc/build-gated refresh as a successful pass: if the partial passes, it publishes
                 # and the tool result carries the durable truth (site LIVE) so the CEO continues the
-                # remaining product steps (logo and final app/account pass) instead of wrapping up blind; if it fails,
-                # the exact build blockers surface and the bounded warm build-retry below gets one
-                # shot at finishing on the still-warm scratch workspace.
+                # remaining product steps (logo and final app/account pass) instead of wrapping up
+                # blind; if it fails, the exact build blocker is terminal for this invocation.
                 publishable_partial = (
                     bool(sdk_result.get("timed_out"))
+                    and not taste_skill_required
                     and str(sdk_result.get("partial_workspace_sync_status") or "") == "synced"
                     and customer_facing_product_workspace
                     and not str(sdk_result.get("blocker") or "").strip()
                     and (
-                        not taste_guidance_active
+                        not initial_landing_design_pass
                         or isinstance(sdk_result.get("taste_design_contract"), dict)
                     )
                 )
@@ -38082,11 +38591,6 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         receipt_path=f"metrics/receipts/product-surface/{receipt_id}.json",
                         refresh_source="business_claude_agent_task",
                     )
-                    surface_refresh = {
-                        **surface_refresh,
-                        "guidance_skills": resolved_guidance_skills,
-                        "guidance_selection_reason": guidance_selection_reason,
-                    }
                     active_store._sync_business_workspace_remote(business)
                     if publishable_partial and not sdk_result.get("success") and not str(surface_refresh.get("blocker") or "").strip():
                         # blocker == "" is the exact published-and-passed predicate of
@@ -38115,94 +38619,15 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                             detail=published_line,
                             line=published_line,
                         )
-                should_retry_turn_cap = (
-                    not sdk_result.get("success")
-                    and customer_facing_product_workspace
-                    and not taste_guidance_active
-                    and len(turn_cap_retries) < 1
-                    and _claude_agent_hit_turn_cap(sdk_result.get("error") or "")
-                )
-                if should_retry_turn_cap:
-                    next_max_turns: int | None = None
-                    if active_max_turns < 60:
-                        next_max_turns = 60
-                    elif active_max_turns < 90:
-                        next_max_turns = 90
-                    if next_max_turns and next_max_turns > active_max_turns:
-                        turn_cap_retries.append({"from": int(active_max_turns), "to": int(next_max_turns)})
-                        retry_note = (
-                            f"Claude worker hit the turn cap at {active_max_turns} turns; "
-                            f"retrying once with {next_max_turns} turns."
-                        )
-                        _record_claude_agent_runtime_event(
-                            business=business,
-                            workspace_rel=workspace_rel,
-                            status="output",
-                            detail=retry_note,
-                            line=retry_note,
-                        )
-                        active_worker_instruction = _worker_turn_cap_retry_instruction(
-                            worker_instruction,
-                            prior_max_turns=active_max_turns,
-                            next_max_turns=next_max_turns,
-                            attempt_number=worker_attempts + 1,
-                        )
-                        active_max_turns = next_max_turns
-                        continue
-                # Warm in-session retry on a fixable build/typecheck failure: rather than bail to the
-                # CEO (which re-delegates a fresh COLD worker pass), feed the exact build error back to
-                # the agent on the SAME warm workspace so it fixes its own defect in one pass. Bounded
-                # to two warm retries; forbidden-source / durability blockers are NOT retried here (they
-                # fall through to the normal blocked path).
-                should_retry_surface_build = (
-                    bool(surface_refresh)
-                    and surface_refresh.get("status") == "failed"
-                    and not _surface_refresh_has_forbidden_source_blockers(surface_refresh)
-                    and customer_facing_product_workspace
-                    and not taste_guidance_active
-                    and len(surface_build_retries) < 2
-                )
-                if should_retry_surface_build:
-                    build_error = str((surface_refresh or {}).get("error") or "product build/typecheck failed").strip()
-                    surface_build_retries.append({"error": _truncate_text(build_error, 2000)})
-                    retry_note = (
-                        "Product build/typecheck failed on the canonical read-back; retrying once on the "
-                        "warm workspace so the worker fixes it in-session instead of restarting."
-                    )
-                    _record_claude_agent_runtime_event(
-                        business=business,
-                        workspace_rel=workspace_rel,
-                        status="output",
-                        detail=retry_note,
-                        line=retry_note,
-                    )
-                    active_worker_instruction = "\n\n".join(
-                        [
-                            worker_instruction.rstrip(),
-                            "Hermes automatic build-fix retry (attempt "
-                            + str(worker_attempts + 1)
-                            + "): the product workspace was rebuilt from canonical source and "
-                            "`npm run build` / `npm run typecheck` FAILED. Exact error:\n"
-                            + _truncate_text(build_error, 4000)
-                            + "\n\nContinue from the current workspace state (do NOT restart). Fix ONLY the "
-                            "files causing the error above. Both `npm run build` and `npm run typecheck` must "
-                            "pass before you finish — run them and confirm green. Do not leave unused "
-                            "variables or imports; `tsc --noEmit` rejects them.",
-                        ]
-                    )
-                    continue
                 break
-            # Warm-retry budget exhausted but the customer-facing product build is STILL failing on a
-            # non-forbidden build/typecheck error: the worker diagnosed-but-did-not-fix. Classify this
-            # as BLOCKED (not a generic publish failure) so _claude_agent_summary_is_blocked flags it and
-            # ceo.md rule #8's anti-re-delegation guard routes it to a hand-patch instead of a cold
-            # re-delegation loop. Forbidden-source blockers are handled by the dedicated block below.
+            # A deterministic build/typecheck failure is terminal for this worker call. The worker
+            # already owned the build gate inside its one session; launching another model call with
+            # unchanged source repeats the same state, spends again, and hides the first exact error.
             surface_build_still_failed = (
                 bool(surface_refresh)
                 and surface_refresh.get("status") == "failed"
                 and not _surface_refresh_has_forbidden_source_blockers(surface_refresh)
                 and customer_facing_product_workspace
-                and bool(surface_build_retries)
             )
             if surface_build_still_failed:
                 sdk_result["blocked"] = True
@@ -38210,7 +38635,7 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                 exhausted_build_error = (
                     _surface_refresh_exact_blocker(surface_refresh or {})
                     or str((surface_refresh or {}).get("error") or "").strip()
-                    or "product build/typecheck still failing after warm retries"
+                    or "product build/typecheck failed"
                 )
                 exhausted_blocked_summary = _blocked_message(exhausted_build_error)
                 if not _claude_agent_summary_is_blocked(sdk_result.get("summary")):
@@ -38221,6 +38646,7 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                 blocked_summary = _blocked_message(_surface_refresh_exact_blocker(surface_refresh or {}))
                 if not _claude_agent_summary_is_blocked(sdk_result.get("summary")):
                     sdk_result["summary"] = blocked_summary
+            _ensure_worker_telemetry(str(sdk_result.get("error") or ""))
             status = "completed" if sdk_result.get("success") else "failed"
             if sdk_result.get("blocked"):
                 status = "blocked"
@@ -38230,7 +38656,7 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             # A completed Taste worker can still hit a deterministic platform/source publish gate.
             # That is machine-fixable platform truth, not evidence that Taste timed out or failed.
             taste_review_required = bool(
-                taste_guidance_active
+                initial_landing_design_pass
                 and (
                     bool(sdk_result.get("timed_out"))
                     or not bool(sdk_result.get("success"))
@@ -38269,7 +38695,6 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                                 "operator_task": dict(operator_task),
                                 "source": "taste_worker",
                                 "workspace": workspace_rel,
-                                "guidance_skills": resolved_guidance_skills,
                                 "timed_out": bool(sdk_result.get("timed_out")),
                                 "blocker": taste_review_blocker,
                                 "review_required": True,
@@ -38299,8 +38724,15 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         "source": "claude-agent-sdk",
                         "workspace": workspace_rel,
                         "model": model,
-                        "guidance_skills": resolved_guidance_skills,
-                        "guidance_selection_reason": guidance_selection_reason,
+                        "actual_model": (
+                            sdk_result.get("skill_receipt", {}).get("actual_model")
+                            if isinstance(sdk_result.get("skill_receipt"), Mapping)
+                            else None
+                        ),
+                        "duration_ms": _reported_duration_ms(),
+                        "parent_duration_ms": sdk_result.get("parent_duration_ms"),
+                        "usage": _reported_usage(),
+                        "runtime_release_sha": worker_release_sha or None,
                         "summary": sdk_result.get("summary") or "",
                         "error": sdk_result.get("error") or None,
                         "blocked": bool(sdk_result.get("blocked")),
@@ -38312,6 +38744,9 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         "workspace_sync_status": sdk_result.get("workspace_sync_status"),
                         "workspace_durability": sdk_result.get("workspace_durability"),
                         "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
+                        "skill_receipt": sdk_result.get("skill_receipt"),
+                        "taste_publication_evidence": sdk_result.get("taste_publication_evidence"),
+                        "taste_publication_receipt": sdk_result.get("taste_publication_receipt"),
                         "taste_design_contract": sdk_result.get("taste_design_contract"),
                         "review_required": bool(sdk_result.get("review_required")),
                         "review_blocker": sdk_result.get("review_blocker"),
@@ -38343,7 +38778,7 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
         try:
             from . import cost_events
 
-            _sdk_usage = sdk_result.get("usage") if isinstance(sdk_result.get("usage"), dict) else {}
+            _sdk_usage = dict(_reported_usage() or {})
             cost_events.record_operator_event_autoconn(
                 event_kind=cost_events.KIND_LLM_CALL,
                 business_slug=business,
@@ -38379,8 +38814,15 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             "workspace": workspace_rel,
             "source": "claude-agent-sdk",
             "model": model,
-            "guidance_skills": resolved_guidance_skills,
-            "guidance_selection_reason": guidance_selection_reason,
+            "actual_model": (
+                sdk_result.get("skill_receipt", {}).get("actual_model")
+                if isinstance(sdk_result.get("skill_receipt"), Mapping)
+                else None
+            ),
+            "duration_ms": _reported_duration_ms(),
+            "parent_duration_ms": sdk_result.get("parent_duration_ms"),
+            "usage": _reported_usage(),
+            "runtime_release_sha": worker_release_sha or None,
             "blocked": bool(sdk_result.get("blocked")) or status == "blocked",
             "budget": operator_budget,
             "operator_budget": operator_budget,
@@ -38392,6 +38834,9 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             "actual_cost_cents": worker_actual_cents,
             "workspace_sync_status": sdk_result.get("workspace_sync_status"),
             "workspace_durability": sdk_result.get("workspace_durability"),
+            "skill_receipt": sdk_result.get("skill_receipt"),
+            "taste_publication_evidence": sdk_result.get("taste_publication_evidence"),
+            "taste_publication_receipt": sdk_result.get("taste_publication_receipt"),
             "taste_design_contract": sdk_result.get("taste_design_contract"),
             "timed_out": bool(sdk_result.get("timed_out")),
             "review_required": bool(sdk_result.get("review_required")),
@@ -38423,6 +38868,7 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             return tool_error(error_text, **result_payload)
         return tool_result(result_payload)
     except Exception as exc:
+        _ensure_worker_telemetry(str(exc))
         if operator_budget and operator_budget.get("reservation_key"):
             try:
                 _finalize_operator_task_budget(
@@ -38435,7 +38881,25 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             except Exception:
                 pass
         _record_worker_failure(str(exc))
-        return tool_error(str(exc), success=False)
+        return tool_error(
+            str(exc),
+            success=False,
+            business=business or None,
+            workspace=workspace_rel,
+            model=model or None,
+            actual_model=(
+                sdk_result.get("skill_receipt", {}).get("actual_model")
+                if isinstance(sdk_result.get("skill_receipt"), Mapping)
+                else None
+            ),
+            duration_ms=_reported_duration_ms(),
+            parent_duration_ms=sdk_result.get("parent_duration_ms"),
+            usage=_reported_usage(),
+            runtime_release_sha=worker_release_sha or None,
+            skill_receipt=sdk_result.get("skill_receipt"),
+            taste_publication_evidence=sdk_result.get("taste_publication_evidence"),
+            taste_publication_receipt=sdk_result.get("taste_publication_receipt"),
+        )
 
 
 # ===========================================================================
@@ -40400,7 +40864,6 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "workspace": {"type": "string", "description": "Business-relative workspace directory under one of product/, distribution/, research/, metrics/ (default 'product/site'). Edits product/site source with file/code tools; NOT for market research (research runs inline via takyon-market-research)."},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
-                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to inject exactly as requested. Use full design-taste-frontend for the initial landing. Later product work should omit guidance and inherit the Taste-authored DESIGN.md without reopening art direction. The injected App Kit behavior contract remains authoritative."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 60 for product/site work and 12 otherwise"},

@@ -15,6 +15,7 @@ SCAFFOLD = Path(takyon_core.__file__).resolve().parent / "subuser_app_kit" / "sc
 MOBILE_SCAFFOLD = Path(takyon_core.__file__).resolve().parent / "mobile_app_kit" / "scaffold"
 HERMES_ROOT = Path(takyon_core.__file__).resolve().parents[2]
 TASTE_SKILL = HERMES_ROOT / "skills" / "creative" / "taste-frontend" / "SKILL.md"
+TASTE_UPSTREAM = HERMES_ROOT / "skills" / "creative" / "taste-frontend" / "UPSTREAM.md"
 PRODUCT_SKILL = HERMES_ROOT / "skills" / "takyon" / "takyon-product" / "SKILL.md"
 DESIGN_COMMAND = HERMES_ROOT / "plugins" / "takyon" / "harness" / "commands" / "design.md"
 
@@ -117,10 +118,11 @@ def test_action_result_schema_drift_becomes_a_visible_runner_error():
     assert "`useDecodedActionRunner(name, taggedDecoder)`" in contract
     assert "named `DecodedActionResult<T>` decoder" in contract
     assert "global `invalid_result` alert" in contract
-    assert "one explicit JSON result schema" in prompt
+    assert "one explicit normalized JSON result schema" in prompt
     assert "`useDecodedActionRunner(name, taggedDecoder)`" in prompt
-    assert "including for boolean values" in prompt
-    assert "Never silently discard a successful action payload" in prompt
+    assert "`saveRecord({ data })` payload" in contract
+    assert "`record.data` reopen decoder/renderer" in contract
+    assert "Raw casts and unconditional `ok: true` returns are invalid" in contract
 
 
 def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_fluid():
@@ -133,7 +135,8 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     assert "Every delete requires an explicit customer confirmation" in contract
     assert "Never cast `saveRecord`, `getRecord`, or `deleteRecord`" in contract
     assert "as many as your workflow needs" in contract
-    assert "product-specific UI visuals" in contract
+    assert "worker-owned landing decides whether and how a proof section fits the brief" in contract
+    assert "generic platform portfolio proof" in contract
     assert "Quantified outcome claims" in contract
 
     prompt = turn_runtime._business_bootstrap_instruction(
@@ -143,24 +146,15 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     landing_pass = prompt.split("#### 2a. Build and publish the landing page", 1)[1].split(
         "#### 2a.1. Register Search Console", 1
     )[0]
-    assert 'guidance_skills: pass exactly ONE — "taste-frontend"' in landing_pass
-    assert '"claude-design" or any "claude-design-*"' in landing_pass
-    assert "emit its one-line Design Read" in landing_pass
-    assert "complete Taste's full preflight" in landing_pass
-    assert "`DESIGN_VARIANCE`, `MOTION_INTENSITY`, and `VISUAL_DENSITY`" in landing_pass
-    assert "persist that one-line Design Read" in landing_pass
-    assert "`product/site/DESIGN.md` as the canonical design source" in landing_pass
-    assert "business_render_landing_preflight" in landing_pass
-    assert "do not start Vite, Chromium, or agent-browser yourself" in landing_pass
-    assert "1440x900 and 390x844" in landing_pass
-    assert "no accidental early next-section intrusion" in landing_pass
+    assert "guidance_skills" not in landing_pass
+    assert "native `design-taste-frontend` skill" in landing_pass
+    assert "Safebox-gated image generation" in landing_pass
+    assert "bounded rendered-viewport preflight" in landing_pass
+    assert "durable `DESIGN.md` handoff" in landing_pass
     assert "max_turns: 60" in landing_pass
     assert "effort: medium" in landing_pass
     assert "timeout_ms: 900000" in landing_pass
-    assert "Do not start a fresh retry or a second Taste worker" in landing_pass
-    assert "without prescribing a section count or layout family" in prompt
-    assert "route graph and required public/auth behavior are immutable" in prompt
-    assert "business_generate_site_image" in prompt
+    assert "first API retry or any unchanged deterministic failure" in landing_pass
     assert "Persist every created/generated customer artifact" in prompt
     assert "bootstrap_final_product_pass: true" in prompt
     assert "Upgrade landing proof from the verified research" not in prompt
@@ -168,7 +162,7 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     assert "scheduled CEO wake rail" in prompt
 
 
-def test_bootstrap_uses_taste_once_then_inherits_brand_for_product_work():
+def test_bootstrap_uses_native_taste_without_prompt_body_guidance_injection():
     prompt = turn_runtime._business_bootstrap_instruction(
         "taste-once-test",
         "Build a SaaS where customers generate and save proposals",
@@ -178,21 +172,19 @@ def test_bootstrap_uses_taste_once_then_inherits_brand_for_product_work():
     product_pass = prompt.split("Then finish the access shell and account page", 1)[1].split(
         "#### 2c. Workflow verification gate", 1
     )[0]
-    assert "guidance_skills: pass exactly `[]`" in product_pass
-    assert "Do NOT pass Taste again" in product_pass
-    assert "do not use any Open Design template" in product_pass
-    assert "FIRST read the canonical `DESIGN.md` written by 2a" in product_pass
-    assert "then inspect `src/tokens.css`, the landing source, and existing assets" in product_pass
-    assert "Preserve the exact Design Read, three dial values" in product_pass
-    assert "fixed brand source of truth" in product_pass
-    assert 'guidance_skills: pass the SAME layered set used in 2a' not in prompt
-    assert "exactly like 2a" not in product_pass
+    assert "guidance_skills" not in prompt
+    assert "native `design-taste-frontend` skill" in product_pass
+    assert "read the durable `DESIGN.md`, landing source, tokens, and existing assets" in product_pass
+    assert "Honor the skill's own scope boundary" in product_pass
+    assert "do not apply marketing-page layout rules to the multi-step `/app` product UI" in product_pass
+    assert "Preserve the published landing direction" in product_pass
+    assert "not a requirement to spend or regenerate assets on every pass" in product_pass
     assert "`effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`" in product_pass
     assert "intentionally separate from the Taste landing's medium/60/900 bounds" in product_pass
     assert "#### 3a. Upgrade landing proof" not in prompt
 
 
-def test_taste_landing_requires_two_non_logo_images_and_keeps_logo_after_publish():
+def test_new_landing_requires_real_assets_and_keeps_logo_after_publish():
     prompt = turn_runtime._business_bootstrap_instruction(
         "taste-assets-test",
         "Build a SaaS where customers generate and save account briefs",
@@ -206,16 +198,8 @@ def test_taste_landing_requires_two_non_logo_images_and_keeps_logo_after_publish
     )[0]
     landing_lower = landing_pass.lower()
 
-    assert "exactly two" in landing_lower
-    assert "business_generate_site_image" in landing_pass
-    assert "after the design read" in landing_lower
-    assert "before finishing the landing" in landing_lower
-    assert "hero" in landing_lower
-    assert "supporting" in landing_lower
-    assert "required" in landing_lower
-    assert "never use the logo as either image" in landing_lower
-    assert "typography-led direction may use no generated image" not in landing_lower
-    assert "may use no generated image" not in landing_lower
+    assert "real, used generated assets" in landing_lower
+    assert "safebox-gated image generation" in landing_lower
 
     # Image generation is part of the continuous Taste-owned 2a call. The distinct logo workflow
     # remains after the first landing has published and is not a substitute for those site images.
@@ -238,10 +222,9 @@ def test_opted_in_animation_complements_generated_imagery_instead_of_replacing_i
     landing_pass = prompt.split("#### 2a. Build and publish the landing page", 1)[1].split(
         "#### 2a.1. Register Search Console", 1
     )[0]
-    animation = landing_pass.split("Landing hero animation", 1)[1]
-    assert "complement" in animation.lower()
-    assert "generated" in animation.lower()
-    assert "replaces a plain static hero image" not in animation.lower()
+    assert "explicitly requested continuous landing animation" in landing_pass
+    assert "reduced-motion-safe" in landing_pass
+    assert "without replacing the required generated assets" in landing_pass
 
 
 def test_bootstrap_keeps_named_cancellation_policy_out_of_worker_authored_copy():
@@ -274,14 +257,13 @@ def test_taste_skill_is_byte_exact_pinned_upstream_implementation():
 
 
 def test_taste_landing_worker_has_real_desktop_and_mobile_render_preflight():
-    contract = takyon_core.TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT
-    assert "Source inspection alone is not visual proof" in contract
-    assert "business_render_landing_preflight" in contract
-    assert "Do not start Vite, Chromium, or agent-browser with Bash" in contract
-    assert "1440x900" in contract
-    assert "390x844" in contract
-    assert "Read each image with the Read tool" in contract
-    assert "no accidental early next-section intrusion" in contract
+    source = Path(takyon_core.__file__).read_text(encoding="utf-8")
+    prompt = turn_runtime._business_bootstrap_instruction(
+        "native-taste-preflight", "Build a polished SaaS", "live", archetype="web_saas"
+    )
+    assert "TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT" not in source
+    assert "native `design-taste-frontend` skill" in prompt
+    assert "bounded rendered-viewport preflight" in prompt
     dockerfile = (
         HERMES_ROOT.parent / "deploy" / "argon-alpha-14" / "takyon-claude-worker.Dockerfile"
     ).read_text(encoding="utf-8")
@@ -304,24 +286,29 @@ def test_taste_render_scratch_cleanup_never_follows_symlinks(tmp_path):
     assert marker.read_text(encoding="utf-8") == "keep"
 
 
-def test_product_owner_and_design_command_route_taste_only_to_the_initial_landing():
+def test_product_owner_and_design_command_use_native_taste_for_every_worker():
     product = PRODUCT_SKILL.read_text(encoding="utf-8")
     command = DESIGN_COMMAND.read_text(encoding="utf-8")
 
     for text in (product, command):
-        assert 'guidance_skills: ["taste-frontend"]' in text or "`taste-frontend` skill explicitly and alone" in text
-        assert "`effort: medium`" in text
-        assert "`max_turns: 60`" in text
-        assert "`timeout_ms: 900000`" in text
-        assert "`guidance_skills: []`" in text
+        assert "design-taste-frontend" in text
+        assert "native Claude Code skill" in text
+        assert "every Agent SDK session" in text
+        assert "guidance_skills" in text
         assert "DESIGN.md" in text
-        assert "business_render_landing_preflight" in text
-        assert "agent-browser" in text
+        assert "1440x900" in text
+        assert "390x844" in text
 
-    assert 'guidance_skills: ["claude-design"]' not in product
-    assert "do not use an Open Design template" in product
+    assert 'guidance_skills: ["taste-frontend"]' not in product
+    assert "guidance_skills: []" not in product
     assert "`effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`" in product
     assert "For every `product/site` design pass" not in command
+
+    upstream = TASTE_UPSTREAM.read_text(encoding="utf-8")
+    assert (
+        'npx skills add https://github.com/Leonxlnx/taste-skill --skill '
+        '"design-taste-frontend"'
+    ) in upstream
 
 
 def test_open_design_templates_and_dependencies_are_removed():
@@ -343,7 +330,7 @@ def test_open_design_templates_and_dependencies_are_removed():
 def test_navigation_component_is_force_refreshed_with_appkit_rails():
     assert "src/components/action-error-announcer.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/components/site-navigation.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
-    assert "src/components/social-proof-marquee.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
+    assert "src/components/social-proof-marquee.tsx" not in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/components/subscription-cancellation.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/lib/interaction-sounds.ts" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/screens/support.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
@@ -641,15 +628,14 @@ def test_mobile_subscription_conformance_requires_discoverable_profile_navigatio
     )
 
 
-def test_landing_has_truthful_coscale_social_proof_and_default_interaction_sounds():
-    proof = read("src/components/social-proof-marquee.tsx")
+def test_landing_has_no_forced_visual_module_and_keeps_default_interaction_sounds():
     main = read("src/main.tsx")
     sounds = read("src/lib/interaction-sounds.ts")
-    assert "SocialProofMarquee" in main
-    assert "PublicLandingRoute" in main
-    assert '<Route path="/" element={<PublicLandingRoute />} />' in main
-    assert "Used by professionals building with Coscale" in proof
-    assert "animate-proof-marquee" in proof
+    assert "SocialProofMarquee" not in main
+    assert "PublicLandingRoute" not in main
+    assert '<Route path="/" element={<LandingScreen />} />' in main
+    assert not (SCAFFOLD / "src/components/social-proof-marquee.tsx").exists()
+    assert "animate-proof-marquee" not in read("src/index.css")
     assert "installInteractionSounds" in main
     assert 'closest("button")' in sounds
 

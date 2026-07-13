@@ -38,13 +38,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="product/site",
         help="Business-relative workspace. Default: product/site",
     )
-    parser.add_argument(
-        "--guidance-skill",
-        dest="guidance_skills",
-        action="append",
-        default=[],
-        help="Optional guidance skill to distill into the worker prompt. Repeatable.",
-    )
     parser.add_argument("--budget-usd", type=float, default=None)
     parser.add_argument("--model", default="")
     parser.add_argument(
@@ -132,7 +125,6 @@ def main(argv: list[str] | None = None) -> int:
         "business": args.business,
         "workspace": args.workspace,
         "instruction": args.instruction,
-        "guidance_skills": args.guidance_skills,
         "refresh_surface": not args.no_refresh_surface,
         "install": not args.no_install,
         "reason": args.reason,

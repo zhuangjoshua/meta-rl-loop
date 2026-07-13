@@ -10,8 +10,16 @@ from pathlib import Path
 import pytest
 
 from plugins.takyon import core as takyon_core
+from plugins.takyon import claim_scope as takyon_claim_scope
 from plugins.takyon import storage as takyon_storage
 from plugins.takyon.core import handle_business_claude_agent_task
+
+
+def _mock_claude_worker_env(tmp_path: Path) -> dict[str, str]:
+    return {
+        "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent",
+        "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
+    }
 
 
 def test_docker_bind_retry_is_limited_to_prestart_mount_failure(tmp_path):
@@ -57,6 +65,25 @@ def _pin_test_coding_worker_model(monkeypatch):
         lambda *_args, **_kwargs: nullcontext(),
     )
     monkeypatch.setattr(takyon_core, "_product_worker_runtime_snapshot", lambda root: root)
+    monkeypatch.setattr(
+        takyon_claim_scope,
+        "runtime_release_sha",
+        lambda **_kwargs: "e" * 40,
+    )
+    monkeypatch.setattr(takyon_core, "_blocks_session_bound_authority_op", lambda: False)
+    monkeypatch.setattr(
+        takyon_core,
+        "_validate_taste_worker_publication",
+        lambda **kwargs: (
+            {
+                "version": 1,
+                "passed": True,
+                "initial_pass": bool(kwargs.get("initial_pass")),
+                "baseline_snapshot_present": kwargs.get("baseline_snapshot") is not None,
+            },
+            "",
+        ),
+    )
 
 
 class _FakeConn:
@@ -215,7 +242,7 @@ def test_claude_agent_task_uses_broader_defaults_and_pinned_model_for_product_si
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -256,6 +283,119 @@ def test_claude_agent_model_has_no_implicit_fallback(monkeypatch):
 
     with pytest.raises(takyon_core.TakyonError, match="no fallback model is available"):
         takyon_core._resolve_claude_agent_model()
+
+
+@pytest.mark.parametrize("workspace", ["product/app", "product/assets", "product/other"])
+def test_product_sibling_cannot_request_web_surface_publication(workspace, monkeypatch):
+    touched_store = False
+
+    def unexpected_store():
+        nonlocal touched_store
+        touched_store = True
+        raise AssertionError("publication authority must be refused before store or worker access")
+
+    monkeypatch.setattr(takyon_core, "_defer_claude_agent_task_to_worker", lambda _args: None)
+    monkeypatch.setattr(takyon_core, "_store", unexpected_store)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "authority-proof",
+                "workspace": workspace,
+                "instruction": "publish this as the web product",
+                "refresh_surface": True,
+                "idempotency_key": f"refuse-{workspace.replace('/', '-')}",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "restricted to the canonical product/site workspace" in result["error"]
+    assert touched_store is False
+
+
+def test_surface_refresh_defaults_only_for_canonical_product_site():
+    assert takyon_core._resolve_claude_agent_surface_refresh("product/site", None) is True
+    assert takyon_core._resolve_claude_agent_surface_refresh("product/site/src", None) is True
+    assert takyon_core._resolve_claude_agent_surface_refresh("product/app", None) is False
+    assert takyon_core._resolve_claude_agent_surface_refresh("product/assets", None) is False
+
+
+@pytest.mark.parametrize("docker_isolated", [False, True])
+def test_dirty_runtime_release_stops_before_budget_or_worker_process(
+    tmp_path,
+    monkeypatch,
+    docker_isolated,
+):
+    class _RecordingStore(_FakeStore):
+        def __init__(self, root: Path):
+            super().__init__(root)
+            self.commits: list[dict[str, object]] = []
+
+        def commit(self, **kwargs):
+            self.commits.append(dict(kwargs))
+            return {"success": True}
+
+    store = _RecordingStore(tmp_path)
+    reserve_calls: list[dict[str, object]] = []
+    process_calls: list[dict[str, object]] = []
+    runtime_calls: list[str] = []
+
+    def dirty_release(**_kwargs):
+        raise RuntimeError("refusing worker claim from modified runtime worktree")
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "release-proof")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_should_run_claude_agent_in_docker",
+        lambda _workspace_rel: docker_isolated,
+    )
+    monkeypatch.setattr(takyon_claim_scope, "runtime_release_sha", dirty_release)
+    monkeypatch.setattr(
+        takyon_core,
+        "_reserve_operator_task_budget",
+        lambda **kwargs: reserve_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_run_claude_agent_task_process",
+        lambda **kwargs: process_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_resolve_runtime_executable",
+        lambda name: runtime_calls.append(name),
+    )
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "release-proof",
+                "workspace": "research/worker-proof",
+                "instruction": "edit one note",
+                "refresh_surface": False,
+                "idempotency_key": f"dirty-release-{docker_isolated}",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "release preflight failed before budget reservation or process launch" in result["error"]
+    assert reserve_calls == []
+    assert process_calls == []
+    assert runtime_calls == []
+    assert result["duration_ms"] >= 0
+    assert result["parent_duration_ms"] >= 0
+    assert result["skill_receipt"]["duration_ms"] >= 0
+    assert result["skill_receipt"]["usage"] is None
+    assert len(store.commits) == 1
+    record = store.commits[0]["operations"][0]["result"]
+    assert record["duration_ms"] >= 0
+    assert record["skill_receipt"]["duration_ms"] >= 0
+    assert record["usage"] is None
 
 
 def test_claude_agent_model_does_not_inherit_ceo_default(tmp_path, monkeypatch):
@@ -305,7 +445,7 @@ def test_claude_agent_task_clamps_explicit_product_site_turn_budget(tmp_path, mo
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -357,7 +497,7 @@ def test_claude_agent_task_budget_bounds_and_model_are_env_overridable(tmp_path,
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     # Omitted budget rides the env default; explicit budget above the stock 25 cap is allowed
@@ -397,7 +537,7 @@ def test_claude_agent_task_budget_bounds_and_model_are_env_overridable(tmp_path,
     assert payload["maxBudgetUsd"] == 40.0
 
 
-def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path, monkeypatch):
+def test_claude_agent_task_does_not_inject_product_site_guidance(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
 
@@ -424,16 +564,11 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
         lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        takyon_core,
-        "_compose_worker_guidance_block",
-        lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]" if skills else ""),
-    )
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -451,12 +586,12 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == []
-    assert result["guidance_selection_reason"] == "preserved the established Taste DESIGN.md without extra design guidance"
+    assert "guidance_skills" not in result
+    assert "guidance_selection_reason" not in result
     assert "[Hermes guidance skill: default-product-site]" not in instruction
 
 
-def test_claude_agent_task_includes_public_landing_composition_contract_for_product_site(tmp_path, monkeypatch):
+def test_claude_agent_task_omits_generic_landing_composition_wrapper(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
 
@@ -483,16 +618,11 @@ def test_claude_agent_task_includes_public_landing_composition_contract_for_prod
         lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        takyon_core,
-        "_compose_worker_guidance_block",
-        lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]" if skills else ""),
-    )
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -510,17 +640,12 @@ def test_claude_agent_task_includes_public_landing_composition_contract_for_prod
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert "Public landing composition floor:" in instruction
-    assert "small centered island" in instruction
-    assert "page-scale" in instruction
-    assert "selected design direction" in instruction
-    # Exact pixel/width prescriptions now live in the design packs, not this floor.
-    assert "1680px" not in instruction
-    assert "92vw" not in instruction
-    assert "58/42" not in instruction
+    assert "Public landing composition floor:" not in instruction
+    assert "small centered island" not in instruction
+    assert "selected design direction" not in instruction
 
 
-def test_claude_agent_task_includes_visual_craft_contract_for_product_site(tmp_path, monkeypatch):
+def test_claude_agent_task_omits_visual_craft_wrapper_but_keeps_business_brief(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
     strategy = tmp_path / "businesses" / "pupcoach" / "research" / "strategy.md"
@@ -554,16 +679,11 @@ def test_claude_agent_task_includes_visual_craft_contract_for_product_site(tmp_p
         lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        takyon_core,
-        "_compose_worker_guidance_block",
-        lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]" if skills else ""),
-    )
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -581,30 +701,13 @@ def test_claude_agent_task_includes_visual_craft_contract_for_product_site(tmp_p
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert "Product visual craft contract" in instruction
-    assert "Never use emoji as UI iconography" in instruction
-    assert "lucide-react" in instruction
-    assert "framer-motion" in instruction
-    assert "`MOTION_INTENSITY` 1-3 means NO automatic animation" in instruction
-    assert "`whileInView`" in instruction
-    assert "prefers-reduced-motion" in instruction
+    assert "Product visual craft contract" not in instruction
+    assert "`MOTION_INTENSITY` 1-3 means NO automatic animation" not in instruction
     assert "Runtime-injected canonical business brief" in instruction
     assert '"strategy_path": "research/strategy.md"' in instruction
     assert "Apartment dog owners" in instruction
     assert "Turn a barking log into a weekly training plan" in instruction
     assert "substitutes a generic or different audience" in instruction
-
-    # Every npm package the visual contract names MUST be pinned in the scaffold's own
-    # package.json: worker-added dependencies are force-restored away on every surface
-    # refresh, so a contract that names an unpinned dep instructs the worker into a
-    # guaranteed build failure.
-    scaffold_pkg = json.loads(
-        (Path(takyon_core.__file__).parent / "subuser_app_kit" / "scaffold" / "package.json").read_text(encoding="utf-8")
-    )
-    pinned = set(scaffold_pkg.get("dependencies") or {})
-    for named_dep in ("lucide-react", "framer-motion"):
-        assert named_dep in pinned
-
 
 def test_worker_business_brief_context_bounds_every_prompt_field(tmp_path):
     store = _FakeStore(tmp_path)
@@ -646,7 +749,7 @@ def test_mobile_worker_contract_bans_emoji_iconography():
     assert "or inline SVG" not in takyon_core.MOBILE_APP_WORKER_CONTRACT
 
 
-def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path, monkeypatch):
+def test_claude_agent_task_never_keyword_infers_prompt_guidance(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
     store = _FakeStore(
@@ -685,16 +788,11 @@ def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path,
         lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        takyon_core,
-        "_compose_worker_guidance_block",
-        lambda skills: (list(skills), "[Hermes guidance skill: inferred-product-site]" if skills else ""),
-    )
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -712,8 +810,8 @@ def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == []
-    assert result["guidance_selection_reason"] == "preserved the established Taste DESIGN.md without extra design guidance"
+    assert "guidance_skills" not in result
+    assert "guidance_selection_reason" not in result
     assert "[Hermes guidance skill: inferred-product-site]" not in instruction
 
 
@@ -758,7 +856,7 @@ def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -780,7 +878,7 @@ def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):
     assert finalize_calls[-1]["actual_cents"] == 137
 
 
-def test_claude_agent_task_respects_explicit_empty_guidance_for_product_site(tmp_path, monkeypatch):
+def test_claude_agent_task_result_has_no_guidance_metadata(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
 
@@ -807,12 +905,11 @@ def test_claude_agent_task_respects_explicit_empty_guidance_for_product_site(tmp
         lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
-    monkeypatch.setattr(takyon_core, "_compose_worker_guidance_block", lambda skills: (list(skills), ""))
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -821,7 +918,6 @@ def test_claude_agent_task_respects_explicit_empty_guidance_for_product_site(tmp
                 "business": "latexflow",
                 "workspace": "product/site",
                 "instruction": "Build the first honest product surface.",
-                "guidance_skills": [],
                 "idempotency_key": "workspace-explicit-empty-guidance",
                 "install": False,
                 "refresh_surface": False,
@@ -830,8 +926,8 @@ def test_claude_agent_task_respects_explicit_empty_guidance_for_product_site(tmp
     )
 
     assert result["success"] is True
-    assert result["guidance_skills"] == []
-    assert result["guidance_selection_reason"] == "used explicit customer-facing guidance exactly as requested"
+    assert "guidance_skills" not in result
+    assert "guidance_selection_reason" not in result
 
 
 def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_path, monkeypatch):
@@ -886,7 +982,7 @@ def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -1097,7 +1193,7 @@ def test_claude_agent_task_blocks_docker_product_site_when_canonical_readback_di
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -1197,7 +1293,7 @@ def test_claude_agent_task_refreshes_docker_product_site_from_canonical_readback
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -1959,7 +2055,7 @@ def test_claude_agent_task_returns_worker_failure_diagnostics(tmp_path, monkeypa
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -2023,7 +2119,7 @@ def test_claude_agent_task_preserves_worker_stderr_from_sdk_stdout(tmp_path, mon
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -2070,7 +2166,7 @@ def test_claude_agent_task_formats_signal_terminated_worker_error(tmp_path, monk
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -2088,9 +2184,14 @@ def test_claude_agent_task_formats_signal_terminated_worker_error(tmp_path, monk
     assert result["success"] is False
     assert result["worker_returncode"] == -15
     assert result["error"] == "Claude worker was interrupted by SIGTERM before completion"
+    assert result["duration_ms"] >= 0
+    assert result["parent_duration_ms"] >= 0
+    assert result["usage"] is None
+    assert result["skill_receipt"]["duration_ms"] >= 0
+    assert result["skill_receipt"]["usage"] is None
 
 
-def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_path, monkeypatch):
+def test_claude_agent_task_stops_on_first_product_turn_cap(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monotonic_ticks = iter((100.0, 101.0, 102.0, 103.0))
     monkeypatch.setattr(takyon_core.time, "monotonic", lambda: next(monotonic_ticks))
@@ -2110,19 +2211,16 @@ def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_
     def fake_process(*, payload: dict[str, object], **kwargs):
         captured_payloads.append(dict(payload))
         Path(str(payload["cwd"])).mkdir(parents=True, exist_ok=True)
-        if len(captured_payloads) == 1:
-            return types.SimpleNamespace(
-                returncode=1,
-                stdout=json.dumps(
-                    {
-                        "success": False,
-                        "error": "Error: Claude Code returned an error result: Reached maximum number of turns (20)",
-                    }
-                ),
-                stderr="",
-            )
-        Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
-        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(
+            returncode=1,
+            stdout=json.dumps(
+                {
+                    "success": False,
+                    "error": "Error: Claude Code returned an error result: Reached maximum number of turns (20)",
+                }
+            ),
+            stderr="",
+        )
 
     monkeypatch.setattr(takyon_core, "_store", lambda: store)
     monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
@@ -2142,7 +2240,7 @@ def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -2160,15 +2258,14 @@ def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_
         )
     )
 
-    assert result["success"] is True
-    assert [payload["maxTurns"] for payload in captured_payloads] == [20, 60]
+    assert result["success"] is False
+    assert [payload["maxTurns"] for payload in captured_payloads] == [20]
     assert captured_payloads[0]["timeoutMs"] == 900_000
-    assert 0 < captured_payloads[1]["timeoutMs"] < captured_payloads[0]["timeoutMs"]
-    assert result["worker_attempts"] == 2
-    assert result["turn_cap_retries"] == [{"from": 20, "to": 60}]
+    assert result["worker_attempts"] == 1
+    assert result["turn_cap_retries"] == []
     operations = store.commits[-1]["operations"]
     agent_record = next(op for op in operations if op.get("action") == "agent.record")
-    assert agent_record["result"]["turn_cap_retries"] == [{"from": 20, "to": 60}]
+    assert agent_record["result"]["turn_cap_retries"] == []
 
 
 def test_taste_task_never_restarts_fresh_session_after_turn_cap(tmp_path, monkeypatch):
@@ -2208,7 +2305,6 @@ def test_taste_task_never_restarts_fresh_session_after_turn_cap(tmp_path, monkey
                 "business": "latexflow",
                 "workspace": "product/site",
                 "instruction": "Implement and preflight the landing.",
-                "guidance_skills": ["taste-frontend"],
                 "idempotency_key": "taste-single-session-turn-cap",
                 "install": False,
                 "max_turns": 60,
@@ -2282,7 +2378,6 @@ def test_taste_task_never_restarts_fresh_session_after_build_blocker(tmp_path, m
                 "business": "latexflow",
                 "workspace": "product/site",
                 "instruction": "Implement and preflight the landing.",
-                "guidance_skills": ["taste-frontend"],
                 "idempotency_key": "taste-single-session-build-blocker",
                 "install": False,
                 "max_turns": 60,
@@ -2374,7 +2469,6 @@ def test_successful_taste_worker_with_policy_publish_blocker_is_not_human_review
                     "business": "proposalproof",
                     "workspace": "product/site",
                     "instruction": "Implement and preflight the landing.",
-                    "guidance_skills": ["taste-frontend"],
                     "idempotency_key": "taste-policy-publish-blocker",
                     "install": False,
                     "max_turns": 60,
@@ -2394,7 +2488,7 @@ def test_successful_taste_worker_with_policy_publish_blocker_is_not_human_review
     assert agent_record["result"]["review_required"] is False
 
 
-def test_taste_success_without_durable_design_contract_blocks_before_publish(tmp_path, monkeypatch):
+def test_taste_success_without_publication_receipt_blocks_before_publish(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = _FakeStore(tmp_path)
     process_calls: list[dict[str, object]] = []
@@ -2430,6 +2524,14 @@ def test_taste_success_without_durable_design_contract_blocks_before_publish(tmp
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
     monkeypatch.setattr(
         takyon_core,
+        "_validate_taste_worker_publication",
+        lambda **_kwargs: (
+            {"version": 1, "passed": False},
+            "product/site publication refused: native Taste skill receipt is missing",
+        ),
+    )
+    monkeypatch.setattr(
+        takyon_core,
         "_finalize_product_surface_refresh",
         lambda **_kwargs: pytest.fail("missing Taste contract must block before publish"),
     )
@@ -2440,7 +2542,6 @@ def test_taste_success_without_durable_design_contract_blocks_before_publish(tmp
                 "business": "latexflow",
                 "workspace": "product/site",
                 "instruction": "Implement and preflight the landing.",
-                "guidance_skills": ["design-taste-frontend"],
                 "idempotency_key": "taste-missing-design-contract",
                 "install": False,
                 "max_turns": 60,
@@ -2453,8 +2554,8 @@ def test_taste_success_without_durable_design_contract_blocks_before_publish(tmp
     assert result["success"] is False
     assert result["blocked"] is True
     assert result["worker_attempts"] == 1
-    assert result["taste_design_contract"] is None
-    assert "Taste design contract missing" in result["error"]
+    assert result["taste_publication_receipt"]["passed"] is False
+    assert "native Taste skill receipt is missing" in result["error"]
     assert len(process_calls) == 1
 
 
@@ -2523,7 +2624,6 @@ def test_taste_timeout_without_design_contract_stops_parent_for_human_review(
                     "business": "latexflow",
                     "workspace": "product/site",
                     "instruction": "Implement and preflight the landing.",
-                    "guidance_skills": ["taste-frontend"],
                     "idempotency_key": "taste-timeout-missing-design-contract",
                     "install": False,
                     "max_turns": 60,
@@ -2537,7 +2637,7 @@ def test_taste_timeout_without_design_contract_stops_parent_for_human_review(
     assert result["blocked"] is True
     assert result["timed_out"] is True
     assert result["review_required"] is True
-    assert "Taste design contract missing" in result["review_blocker"]
+    assert "Taste proof was incomplete" in result["review_blocker"]
     assert len(process_calls) == 1
     operations = store.commits[-1]["operations"]
     human_review_event = next(
@@ -2554,7 +2654,7 @@ def test_taste_timeout_without_design_contract_stops_parent_for_human_review(
     assert any(op.get("action") == "agent.record" for op in operations)
 
 
-def test_taste_timeout_published_partial_still_requires_human_review(tmp_path, monkeypatch):
+def test_taste_timeout_never_publishes_partial_and_requires_human_review(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
 
     class _CapturingStore(_FakeStore):
@@ -2629,7 +2729,6 @@ def test_taste_timeout_published_partial_still_requires_human_review(tmp_path, m
                     "business": "latexflow",
                     "workspace": "product/site",
                     "instruction": "Implement and preflight the landing.",
-                    "guidance_skills": ["taste-frontend"],
                     "idempotency_key": "taste-timeout-published-partial",
                     "install": False,
                     "max_turns": 60,
@@ -2640,7 +2739,8 @@ def test_taste_timeout_published_partial_still_requires_human_review(tmp_path, m
         )
 
     assert result["timed_out"] is True
-    assert result["surface_refresh"]["publish"]["status"] == "published"
+    assert result["surface_refresh"] is None
+    assert result["partial_workspace_sync_status"] == "not_synced_unvalidated_product_site"
     assert result["review_required"] is True
     operations = store.commits[-1]["operations"]
     event = next(
@@ -2815,23 +2915,27 @@ def test_claude_agent_task_registers_bounded_direct_chromium_taste_preflight():
     assert "const preflightDir = tastePreflightDir(cwd);" in text
     assert 'Object.freeze({ name: "desktop", width: 1440, height: 900 })' in text
     assert 'Object.freeze({ name: "mobile", width: 390, height: 844 })' in text
+    assert 'Object.freeze({ name: "hero-1280", width: 1280, height: 800 })' in text
     assert 'path.join(cwd, "node_modules", ".bin", "vite")' in text
     assert '["preview", "--host", "127.0.0.1"' in text
     assert '"--strictPort"' in text
     assert 'const TASTE_PREFLIGHT_CHROMIUM = "/usr/bin/chromium";' in text
-    assert "TASTE_PREFLIGHT_CHROMIUM," in text
-    assert "`--screenshot=${outputPath}`" in text
+    assert '"--remote-debugging-pipe"' in text
+    assert '"Page.captureScreenshot"' in text
+    assert '"Runtime.evaluate"' in text
+    assert "TASTE_RENDER_INSPECTION_JS" in text
+    assert "--screenshot=" not in text
     assert 'spawn("agent-browser"' not in text
 
     # Product-controlled Vite config and browser code must never inherit the SDK's operator-session
     # capability or provider-broker environment. Both children receive the same minimal env.
     assert "env: preflightChildEnv({ browserNone: true })" in text
-    assert "env: preflightChildEnv()," in text
+    assert "env: chromiumEnv || preflightChildEnv()," in text
     assert 'PATH: SANDBOX_PATH' in text
     assert 'HOME: "/tmp"' in text
     assert "env: { ...process.env" not in text
     assert "env: process.env" not in text
-    assert "const result = await renderLandingPreflight(cwd);" in text
+    assert "const result = await renderLandingPreflight(cwd, {" in text
     assert "isManualTastePreflightCommand(rawCommand)" in text
     assert "Taste landing preview/browser commands are disabled" in text
 
@@ -2840,7 +2944,9 @@ def test_claude_agent_task_registers_bounded_direct_chromium_taste_preflight():
     assert 'process.kill(-child.pid, signal)' in text
     assert "Always address the original process group once more" in text
     assert "await stopProcessTree(preview?.child);" in text
-    assert "await assertPngViewport(outputPath, viewport.width, viewport.height);" in text
+    assert "await pngEvidence(outputPath, viewport.width, viewport.height);" in text
+    assert '"business_submit_taste_publication_audit"' in text
+    assert '"mcp__takyon_site_image__business_submit_taste_publication_audit"' in text
 
 
 def test_claude_agent_task_script_passes_beta_disable_to_child_env():
@@ -2924,6 +3030,12 @@ def test_claude_agent_task_ignores_worker_surface_contract_patch_and_refreshes_o
         workspace = Path(str(payload["cwd"]))
         workspace.mkdir(parents=True, exist_ok=True)
         workspace.joinpath("index.html").write_text("<h1>Plannerly</h1>\n", encoding="utf-8")
+        workspace.joinpath("DESIGN.md").write_text(
+            "# Design Read\nEditorial planning workspace.\n\n"
+            "DESIGN_VARIANCE: 5\nMOTION_INTENSITY: 3\nVISUAL_DENSITY: 6\n",
+            encoding="utf-8",
+        )
+        _write_valid_taste_landing_assets(workspace)
         if len(captured_payloads) == 1:
             patch_path = workspace / "_takyon" / "worker-surface-contract.json"
             patch_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2971,7 +3083,7 @@ def test_claude_agent_task_ignores_worker_surface_contract_patch_and_refreshes_o
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(tmp_path),
     )
 
     result = json.loads(
@@ -3013,14 +3125,12 @@ def _patch_non_docker_product_site(monkeypatch, store, *, session_slug="latexflo
     monkeypatch.setattr(
         takyon_core,
         "_claude_agent_non_docker_worker_env",
-        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+        lambda business, operator_user_id: _mock_claude_worker_env(store.root),
     )
 
 
-def test_claude_agent_task_timeout_preserves_partial_and_blocks(tmp_path, monkeypatch):
-    """A wall-clock TimeoutExpired from the worker subprocess must NOT escape and discard the scratch:
-    the partial edits are synced to canonical and the result is blocked+timed_out (rides the existing
-    anti-re-delegation guard) instead of a cold failure."""
+def test_claude_agent_task_timeout_refuses_unvalidated_product_site_sync(tmp_path, monkeypatch):
+    """A product/site timeout is blocked and cannot sync or publish unvalidated partial source."""
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
 
     def fake_process(*, payload: dict[str, object], **kwargs):
@@ -3053,10 +3163,8 @@ def test_claude_agent_task_timeout_preserves_partial_and_blocks(tmp_path, monkey
     assert result["success"] is False
     assert result["blocked"] is True
     assert result["timed_out"] is True
-    assert result["partial_workspace_sync_status"] == "synced"
+    assert result["partial_workspace_sync_status"] == "not_synced_unvalidated_product_site"
     assert "timed out" in (result["error"] or "")
-    # The partial edit survives in the synced canonical workspace (not discarded).
-    assert (tmp_path / "businesses" / "latexflow" / "product" / "site" / "index.html").exists()
 
 
 def test_claude_agent_task_timeout_settles_estimate_not_double_charge(tmp_path, monkeypatch):
@@ -3099,9 +3207,8 @@ def test_claude_agent_task_timeout_settles_estimate_not_double_charge(tmp_path, 
     assert finalize_calls[-1]["actual_cents"] is None
 
 
-def test_claude_agent_task_timeout_runs_publish_gates_and_blocks_incomplete_partial(tmp_path, monkeypatch):
-    """A timed-out partial runs the canonical refresh/completeness gate, but an incomplete source
-    remains blocked instead of being promoted merely because the worker wrote files."""
+def test_claude_agent_task_timeout_never_runs_product_publish_gate(tmp_path, monkeypatch):
+    """A timed-out product/site worker cannot reach refresh or publication."""
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
 
     def fake_process(*, payload: dict[str, object], **kwargs):
@@ -3151,6 +3258,5 @@ def test_claude_agent_task_timeout_runs_publish_gates_and_blocks_incomplete_part
 
     assert result["success"] is False
     assert result["timed_out"] is True
-    assert refresh_calls
-    assert result["surface_refresh"]["publish"]["status"] == "blocked"
-    assert "incomplete" in result["surface_refresh"]["blocker"]
+    assert refresh_calls == []
+    assert result["surface_refresh"] is None

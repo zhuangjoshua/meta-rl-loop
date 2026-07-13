@@ -92,7 +92,8 @@ def test_bootstrap_prompt_requires_bold_landing_and_branded_appkit_auth_surface(
     assert "Keep /app present and wired through the existing Hermes app kit runtime rails for sign-in, subscription, account, and profile access." in prompt
     assert "This must NOT look like a generic starter kit, membership template, or placeholder SaaS shell." in prompt
     assert "If `Explicit product workflow requested: no`, do NOT build a bespoke product application, custom backend workflow, domain-specific dashboard, fake coach/product tabs, sample domain data, charts, or invented in-app flows in this pass." in prompt
-    assert "The landing page should be bold, visually opinionated, and unmistakably product-specific from the first pass, not timid, generic, or scaffold-like." in prompt
+    assert "Let the native Taste skill infer the appropriate visual intensity from the brief" in prompt
+    assert "bold, visually opinionated" not in prompt
     assert "Make the existing sign-in, subscription, account, and profile surfaces polished, branded, and customer-specific instead of generic starter UI." in prompt
     assert "The result should be publishable and product-specific on the first pass." in prompt
 

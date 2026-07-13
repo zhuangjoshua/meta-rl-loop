@@ -591,6 +591,50 @@ def test_requested_workflow_gate_rejects_buildable_unchanged_app_starter(tmp_pat
     assert "before publish" in blocker
 
 
+def _schema_action_source(function_name: str) -> str:
+    return (
+        f"export default async function {function_name}(payload, ctx) {{\n"
+        "  const generated = await ctx.generate({ system: 'Return JSON with summary as a string.', messages: [{ role: 'user', content: String(payload) }] });\n"
+        "  const parsed: unknown = JSON.parse(generated.text);\n"
+        "  if (!parsed || typeof parsed !== 'object') throw new Error('invalid result');\n"
+        "  const summary = Object.getOwnPropertyDescriptor(parsed, 'summary')?.value;\n"
+        "  if (typeof summary !== 'string') throw new Error('invalid result');\n"
+        "  return { summary };\n"
+        "}\n"
+    )
+
+
+def _schema_ui_source(
+    action_name: str,
+    extra: str = "",
+    *,
+    decoder_declaration: str | None = None,
+    decoder_symbol: str = "decodeArtifact",
+) -> str:
+    if decoder_declaration is None:
+        decoder_declaration = (
+            "type Artifact = { summary: string };\n"
+            "function decodeArtifact(value: unknown): { ok: false } | { ok: true; value: Artifact } {\n"
+            "  if (!value || typeof value !== 'object') return { ok: false };\n"
+            "  const summary = Object.getOwnPropertyDescriptor(value, 'summary')?.value;\n"
+            "  return typeof summary === 'string' ? { ok: true, value: { summary } } : { ok: false };\n"
+            "}\n"
+        )
+    return (
+        decoder_declaration
+        + f'const runner = useDecodedActionRunner("{action_name}", {decoder_symbol});\n'
+        "function ArtifactResult({ value }: { value: Artifact }) { return <p>{value.summary}</p>; }\n"
+        "async function generateSaveAndReopen() {\n"
+        "  const result = await runner.run({});\n"
+        "  if (!result) return null;\n"
+        "  await client.saveRecord({ record_type: 'artifact', data: result });\n"
+        "  const records = await client.listRecords({ type: 'artifact' });\n"
+        f"  return records.records.map((record) => {decoder_symbol}(record.data));\n"
+        "}\n"
+        + extra
+    )
+
+
 def test_requested_workflow_gate_accepts_action_generate_and_records_wiring(tmp_path, monkeypatch):
     from plugins.takyon import core as takyon_core
 
@@ -603,9 +647,31 @@ def test_requested_workflow_gate_accepts_action_generate_and_records_wiring(tmp_
     site_home.parent.mkdir(parents=True)
     action.parent.mkdir(parents=True)
     scaffold_home.write_text("export const AppHomeScreen = () => <main>Starter</main>;\n", encoding="utf-8")
+    site_home.write_text(_schema_ui_source("generate-proposal"), encoding="utf-8")
+    action.write_text(_schema_action_source("generateProposal"), encoding="utf-8")
+    monkeypatch.setattr(takyon_core, "_subuser_app_scaffold_source_dir", lambda: scaffold)
+    surface = {"metadata": {"workflow_completion_required": True}}
+
+    assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
+    assert takyon_core._requested_workflow_unfinished_blocker(
+        {"status": "passed", "inventory": {"risk_markers": []}}
+    ) == ""
+
+
+def test_requested_workflow_gate_rejects_cross_layer_schema_mismatch(tmp_path, monkeypatch):
+    from plugins.takyon import core as takyon_core
+
+    scaffold = tmp_path / "scaffold"
+    site = tmp_path / "product" / "site"
+    scaffold_home = scaffold / "src" / "screens" / "app-home.tsx"
+    site_home = site / "src" / "screens" / "app-home.tsx"
+    action = site / "actions" / "generate-proposal.ts"
+    scaffold_home.parent.mkdir(parents=True)
+    site_home.parent.mkdir(parents=True)
+    action.parent.mkdir(parents=True)
+    scaffold_home.write_text("export const AppHomeScreen = () => <main>Starter</main>;\n")
     site_home.write_text(
         'const runner = useDecodedActionRunner("generate-proposal", value => decodeActionResult(value, decodeProposal));\n'
-        "function ActionError() { return runner.error ? <p role='alert'>{runner.error.message}</p> : null; }\n"
         "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
         encoding="utf-8",
     )
@@ -617,12 +683,14 @@ def test_requested_workflow_gate_accepts_action_generate_and_records_wiring(tmp_
         encoding="utf-8",
     )
     monkeypatch.setattr(takyon_core, "_subuser_app_scaffold_source_dir", lambda: scaffold)
-    surface = {"metadata": {"workflow_completion_required": True}}
 
-    assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
-    assert takyon_core._requested_workflow_unfinished_blocker(
-        {"status": "passed", "inventory": {"risk_markers": []}}
-    ) == ""
+    markers = takyon_core._requested_workflow_completeness_markers(
+        site, {"metadata": {"workflow_completion_required": True}}
+    )
+    snippets = [marker["snippet"] for marker in markers]
+
+    assert any("neither inline decodeActionResult" in snippet for snippet in snippets)
+    assert any("non-empty top-level data field" in snippet for snippet in snippets)
 
 
 def test_requested_workflow_gate_requires_strict_decoded_action_runner(tmp_path, monkeypatch):
@@ -645,12 +713,7 @@ def test_requested_workflow_gate_requires_strict_decoded_action_runner(tmp_path,
         "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n"
     )
     site_home.write_text(incomplete, encoding="utf-8")
-    action.write_text(
-        "export default async function generateProposal(payload, ctx) {\n"
-        "  return ctx.generate({ messages: [{ role: 'user', content: String(payload) }] });\n"
-        "}\n",
-        encoding="utf-8",
-    )
+    action.write_text(_schema_action_source("generateProposal"), encoding="utf-8")
     (action.parent / "revise-proposal.ts").write_text(
         action.read_text(encoding="utf-8"), encoding="utf-8"
     )
@@ -669,7 +732,8 @@ def test_requested_workflow_gate_requires_strict_decoded_action_runner(tmp_path,
         encoding="utf-8",
     )
 
-    assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
+    opaque_inline = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any("neither inline decodeActionResult" in item["snippet"] for item in opaque_inline)
 
     site_home.write_text(
         'const runner = useDecodedActionRunner("generate-proposal", undefined);\n'
@@ -699,6 +763,31 @@ def test_requested_workflow_gate_requires_strict_decoded_action_runner(tmp_path,
     unvalidated = takyon_core._requested_workflow_completeness_markers(site, surface)
     assert any("neither inline decodeActionResult" in item["snippet"] for item in unvalidated)
 
+    site_home.write_text(
+        "function decodeProposal(value: unknown): { ok: false } | { ok: true; value: Proposal } {\n"
+        "  if (!value || typeof value !== 'object') return { ok: false };\n"
+        "  return { ok: true, value: value as Proposal };\n"
+        "}\n"
+        'const runner = useDecodedActionRunner("generate-proposal", decodeProposal);\n'
+        "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
+        encoding="utf-8",
+    )
+    raw_cast = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any("raw casts" in item["snippet"] for item in raw_cast)
+
+    site_home.write_text(
+        "function decodeProposal(value: unknown): { ok: false } | { ok: true; value: Proposal } {\n"
+        "  if (!value || typeof value !== 'object') return { ok: false };\n"
+        "  const summary = Object.getOwnPropertyDescriptor(value, 'summary')?.value;\n"
+        "  if (typeof summary !== 'string') return { ok: false };\n"
+        "  return { ok: true, value: value as unknown as Proposal };\n"
+        "}\n"
+        'const runner = useDecodedActionRunner("generate-proposal", decodeProposal);\n',
+        encoding="utf-8",
+    )
+    double_cast = takyon_core._requested_workflow_completeness_markers(site, surface)
+    assert any("raw casts" in item["snippet"] for item in double_cast)
+
     decoder = site / "src" / "lib" / "proposal-decoder.ts"
     decoder.parent.mkdir(parents=True)
     decoder.write_text(
@@ -706,26 +795,30 @@ def test_requested_workflow_gate_requires_strict_decoded_action_runner(tmp_path,
         "  value: { candidate?: unknown } | unknown,\n"
         "): { ok: false } | { ok: true; value: Proposal } {\n"
         "  if (!value || typeof value !== 'object') return { ok: false };\n"
-        "  return isProposal(value) ? { ok: true, value } : { ok: false };\n"
+        "  const summary = Object.getOwnPropertyDescriptor(value, 'summary')?.value;\n"
+        "  return typeof summary === 'string' ? { ok: true, value: { summary } } : { ok: false };\n"
         "}\n",
         encoding="utf-8",
     )
     site_home.write_text(
-        "import { decodeProposal } from '../lib/proposal-decoder';\n"
-        "const runner = useDecodedActionRunner(\n"
-        '  "generate-proposal",\n'
-        "  decodeProposal,\n"
-        ");\n"
-        "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
+        _schema_ui_source(
+            "generate-proposal",
+            decoder_declaration=(
+                "type Artifact = { summary: string };\n"
+                "import { decodeProposal } from '../lib/proposal-decoder';\n"
+            ),
+            decoder_symbol="decodeProposal",
+        ),
         encoding="utf-8",
     )
     assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
 
     decoder.write_text(
-        "export const decodeProposal = (value: unknown): DecodedActionResult<Proposal> =>\n"
-        "  value && typeof value === 'object' && isProposal(value)\n"
-        "    ? { ok: true, value }\n"
-        "    : { ok: false };\n",
+        "export const decodeProposal = (value: unknown): DecodedActionResult<Proposal> => {\n"
+        "  if (!value || typeof value !== 'object') return { ok: false };\n"
+        "  const summary = Object.getOwnPropertyDescriptor(value, 'summary')?.value;\n"
+        "  return typeof summary === 'string' ? { ok: true, value: { summary } } : { ok: false };\n"
+        "};\n",
         encoding="utf-8",
     )
     assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
@@ -752,18 +845,8 @@ def test_requested_record_mutations_require_ref_update_and_confirmed_delete(tmp_
     site_home.parent.mkdir(parents=True)
     action.parent.mkdir(parents=True)
     scaffold_home.write_text("export const AppHomeScreen = () => <main>Starter</main>;\n", encoding="utf-8")
-    site_home.write_text(
-        'const runner = useDecodedActionRunner("generate-brief", value => decodeActionResult(value, decodeBrief));\n'
-        "function ActionError() { return runner.error ? <p role='alert'>{runner.error.message}</p> : null; }\n"
-        "async function saveAndReopen() { await client.saveRecord({ record_type: 'brief', data: {} }); return client.listRecords({ type: 'brief' }); }\n",
-        encoding="utf-8",
-    )
-    action.write_text(
-        "export default async function generateBrief(payload, ctx) {\n"
-        "  return ctx.generate({ messages: [{ role: 'user', content: String(payload) }] });\n"
-        "}\n",
-        encoding="utf-8",
-    )
+    site_home.write_text(_schema_ui_source("generate-brief"), encoding="utf-8")
+    action.write_text(_schema_action_source("generateBrief"), encoding="utf-8")
     monkeypatch.setattr(takyon_core, "_subuser_app_scaffold_source_dir", lambda: scaffold)
     surface = {
         "metadata": {
@@ -781,14 +864,14 @@ def test_requested_record_mutations_require_ref_update_and_confirmed_delete(tmp_
     assert any("does not call deleteRecord" in snippet for snippet in snippets)
 
     site_home.write_text(
-        'const runner = useDecodedActionRunner("generate-brief", value => decodeActionResult(value, decodeBrief));\n'
-        "function ActionError() { return runner.error ? <p role='alert'>{runner.error.message}</p> : null; }\n"
-        "async function saveAndReopen() { await client.saveRecord({ record_type: 'brief', data: {} }); return client.listRecords({ type: 'brief' }); }\n"
-        "async function updateAndDelete(record, data) {\n"
-        "  const payload = { ref: record.ref, data };\n"
-        "  const result = await client.saveRecord(payload);\n"
-        "  await client.deleteRecord(record.ref);\n"
-        "}\n",
+        _schema_ui_source(
+            "generate-brief",
+            "async function updateAndDelete(record, data) {\n"
+            "  const payload = { ref: record.ref, data };\n"
+            "  const result = await client.saveRecord(payload);\n"
+            "  await client.deleteRecord(record.ref);\n"
+            "}\n",
+        ),
         encoding="utf-8",
     )
     unsafe_delete = takyon_core._requested_workflow_completeness_markers(site, surface)
@@ -826,24 +909,18 @@ def test_requested_record_revision_rejects_stale_detail_after_successful_update(
         "export const AppHomeScreen = () => <main>Starter</main>;\n",
         encoding="utf-8",
     )
-    stale_source = (
-        'const runner = useDecodedActionRunner("generate-brief", value => decodeActionResult(value, decodeBrief));\n'
-        "function ActionError() { return runner.error ? <p role='alert'>{runner.error.message}</p> : null; }\n"
+    stale_source = _schema_ui_source(
+        "generate-brief",
         "async function createAndList() { const created = await client.saveRecord({ record_type: 'brief', data: { external: { ref: 'not-a-record-update' } } }); setBrief(created); return client.listRecords({ type: 'brief' }); }\n"
         "async function revise(record, edited) {\n"
         "  const result = await client.saveRecord({ ref: record.ref, data: edited });\n"
         "  const updated = result.record ?? result;\n"
         "  setEditing(false);\n"
         "  setEdited(workOrderFromRecord(updated));\n"
-        "}\n"
+        "}\n",
     )
     site_home.write_text(stale_source, encoding="utf-8")
-    action.write_text(
-        "export default async function generateBrief(payload, ctx) {\n"
-        "  return ctx.generate({ messages: [{ role: 'user', content: String(payload) }] });\n"
-        "}\n",
-        encoding="utf-8",
-    )
+    action.write_text(_schema_action_source("generateBrief"), encoding="utf-8")
     monkeypatch.setattr(takyon_core, "_subuser_app_scaffold_source_dir", lambda: scaffold)
     surface = {
         "metadata": {
