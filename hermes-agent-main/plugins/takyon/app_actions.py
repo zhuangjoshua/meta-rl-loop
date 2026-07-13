@@ -1137,6 +1137,10 @@ def _canonical_action_handler_signature(source: str) -> bool:
                 segments.append([])
             else:
                 segments[-1].append(item)
+        # A trailing parameter comma is valid TypeScript and is emitted by common formatters.
+        # It does not add a third parameter, so do not reject an otherwise canonical handler.
+        if segments and not segments[-1]:
+            segments.pop()
         if len(segments) != 2:
             return False
         expected = ("TakyonActionPayload", "TakyonActionContext")

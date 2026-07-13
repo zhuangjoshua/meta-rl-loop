@@ -423,6 +423,24 @@ def test_action_bundle_allows_erased_platform_type_import(tmp_path):
     assert bundle["file_count"] == 2
 
 
+def test_action_bundle_allows_canonical_multiline_handler_with_trailing_parameter_comma(tmp_path):
+    root = tmp_path / "site"
+    (root / "actions").mkdir(parents=True)
+    (root / "actions" / "coach.ts").write_text(
+        "export default async function run(\n"
+        "  payload: TakyonActionPayload,\n"
+        "  ctx: TakyonActionContext,\n"
+        ") {\n"
+        "  return { prompt: payload.prompt, callable: ctx.isRailCallable('generate') };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    bundle = app_actions.build_action_bundle(root)
+
+    assert bundle["file_count"] == 1
+
+
 def test_action_bundle_resolves_extensionless_erased_typescript_import(tmp_path):
     root = tmp_path / "site"
     (root / "actions").mkdir(parents=True)
