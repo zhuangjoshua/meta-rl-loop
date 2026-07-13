@@ -70,17 +70,8 @@ from .app_runtime_constants import (
 )
 from .product_claims import (
     customer_feature_claims,
-    feature_claim_blocker,
+    feature_claim_warning,
     unsupported_feature_claims,
-)
-from .taste_publication_gate import (
-    AssetVisualInspection,
-    DESIGN_SNAPSHOT_RELATIVE_PATH,
-    RenderInspection,
-    TasteDesignSnapshot,
-    load_design_snapshot,
-    validate_taste_publication,
-    write_design_snapshot,
 )
 from . import (
     app_supabase_auth,
@@ -5775,10 +5766,11 @@ def _claude_agent_non_docker_worker_env(business: str, operator_user_id: str) ->
 _PRODUCT_WORKER_RUNTIME_FILES = (
     "package.json",
     "package-lock.json",
-    "plugins/takyon/taste_publication_gate.py",
     "scripts/takyon-claude-agent-task.mjs",
     "skills/creative/taste-frontend/SKILL.md",
 )
+
+DESIGN_SNAPSHOT_RELATIVE_PATH = ".takyon/taste-design-snapshot.json"
 
 _NATIVE_TASTE_SKILL_NAME = "design-taste-frontend"
 _NATIVE_TASTE_SKILL_SHA256 = "aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89"
@@ -5786,25 +5778,53 @@ _NATIVE_TASTE_SKILL_RELATIVE_PATH = Path("skills/creative/taste-frontend/SKILL.m
 _NATIVE_TASTE_SKILL_LINK_TARGET = Path("../../skills/creative/taste-frontend")
 
 
+def _native_taste_skill_advisory(detail: str) -> None:
+    """Emit non-blocking native Taste installation/verification telemetry."""
+
+    logging.getLogger("takyon.taste").warning("native Taste advisory: %s", detail)
+
+
+def _resolve_native_taste_path(path: Path, *, label: str) -> Path:
+    """Resolve a Taste-only path without turning a broken link into a worker blocker."""
+
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError) as exc:
+        _native_taste_skill_advisory(f"could not resolve {label} path {path}: {exc}")
+        return Path(os.path.abspath(os.fspath(path)))
+
+
 def _verify_canonical_native_taste_skill(skill_file: Path) -> str:
-    """Fail closed unless ``skill_file`` is the pinned native Taste skill."""
+    """Best-effort verify ``skill_file`` without making Taste a worker precondition."""
+
     try:
         content = skill_file.read_bytes()
     except OSError as exc:
-        raise TakyonError(f"canonical native Taste skill is unavailable: {skill_file}: {exc}") from exc
+        _native_taste_skill_advisory(
+            f"canonical native Taste skill is unavailable: {skill_file}: {exc}"
+        )
+        return ""
     digest = hashlib.sha256(content).hexdigest()
     if digest != _NATIVE_TASTE_SKILL_SHA256:
-        raise TakyonError(
+        _native_taste_skill_advisory(
             "canonical native Taste skill digest mismatch: "
             f"expected {_NATIVE_TASTE_SKILL_SHA256}, got {digest}"
         )
-    head = content[:4096].decode("utf-8", errors="strict")
+    try:
+        head = content[:4096].decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        _native_taste_skill_advisory(
+            f"canonical native Taste skill frontmatter is unreadable: {skill_file}: {exc}"
+        )
+        return digest
     if not re.search(
         r"\A---\s*\n(?:(?!---\s*$).)*?^name:\s*design-taste-frontend\s*$.*?^---\s*$",
         head,
         flags=re.MULTILINE | re.DOTALL,
     ):
-        raise TakyonError("canonical native Taste skill frontmatter name is invalid")
+        _native_taste_skill_advisory(
+            f"canonical native Taste skill frontmatter name is invalid: {skill_file}"
+        )
     return digest
 
 
@@ -5814,70 +5834,108 @@ def _verify_native_taste_skill_install(
     canonical_skill_dir: Path,
     expected_link_target: Path | None = None,
 ) -> Path:
-    """Verify one Claude Code native install resolves to the pinned runtime skill."""
-    config = config_dir.resolve()
-    canonical = canonical_skill_dir.resolve()
+    """Best-effort verify a Claude Code native Taste install and emit advisories."""
+
+    config = _resolve_native_taste_path(config_dir, label="Claude config")
+    canonical = _resolve_native_taste_path(canonical_skill_dir, label="canonical skill")
     _verify_canonical_native_taste_skill(canonical / "SKILL.md")
     native = config / "skills" / _NATIVE_TASTE_SKILL_NAME
     try:
         metadata = native.lstat()
     except OSError as exc:
-        raise TakyonError(f"native Taste skill install is unavailable: {native}: {exc}") from exc
+        _native_taste_skill_advisory(f"native Taste skill install is unavailable: {native}: {exc}")
+        return config
     if not stat.S_ISLNK(metadata.st_mode):
-        raise TakyonError(f"native Taste skill install must be a symlink: {native}")
-    if expected_link_target is not None and Path(os.readlink(native)) != expected_link_target:
-        raise TakyonError(
-            f"native Taste skill link target mismatch: expected {expected_link_target}, "
-            f"got {os.readlink(native)}"
-        )
+        _native_taste_skill_advisory(f"native Taste skill install must be a symlink: {native}")
+        return config
+    if expected_link_target is not None:
+        try:
+            actual_link_target = Path(os.readlink(native))
+        except OSError as exc:
+            _native_taste_skill_advisory(
+                f"native Taste skill link target is unreadable: {native}: {exc}"
+            )
+            return config
+        if actual_link_target != expected_link_target:
+            _native_taste_skill_advisory(
+                f"native Taste skill link target mismatch: expected {expected_link_target}, "
+                f"got {actual_link_target}"
+            )
     try:
         resolved = native.resolve(strict=True)
-    except OSError as exc:
-        raise TakyonError(f"native Taste skill install is broken: {native}: {exc}") from exc
+    except (OSError, RuntimeError) as exc:
+        _native_taste_skill_advisory(f"native Taste skill install is broken: {native}: {exc}")
+        return config
     if resolved != canonical:
-        raise TakyonError(
+        _native_taste_skill_advisory(
             f"native Taste skill install resolves outside the canonical runtime skill: {resolved}"
         )
+        return config
     _verify_canonical_native_taste_skill(native / "SKILL.md")
     return config
 
 
-def _shared_claude_config_dir(repo_root: Path) -> Path:
-    """Install Taste once in the operator's shared, writable Claude Code config.
+def _materialize_native_taste_skill_install(
+    *,
+    config_dir: Path,
+    canonical_skill_dir: Path,
+    expected_link_target: Path | None = None,
+) -> Path:
+    """Best-effort materialize the shared native Taste symlink without blocking workers."""
 
-    The config lives under the active canonical ``TAKYON_HOME`` and never under a business or
-    session workspace. The link points at the immutable runtime source and is replaced atomically
-    if an older release left a stale link behind.
-    """
-    canonical_skill_dir = (repo_root.resolve() / _NATIVE_TASTE_SKILL_RELATIVE_PATH.parent)
-    _verify_canonical_native_taste_skill(canonical_skill_dir / "SKILL.md")
-    config_dir = (get_takyon_home().expanduser().resolve() / ".claude")
-    skills_dir = config_dir / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    config = _resolve_native_taste_path(config_dir, label="Claude config")
+    canonical = _resolve_native_taste_path(canonical_skill_dir, label="canonical skill")
+    _verify_canonical_native_taste_skill(canonical / "SKILL.md")
+    skills_dir = config / "skills"
     try:
-        os.chmod(config_dir, 0o700)
+        skills_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as exc:
+        _native_taste_skill_advisory(
+            f"could not create shared native Taste skill directory {skills_dir}: {exc}"
+        )
+        return config
+    try:
+        os.chmod(config, 0o700)
         os.chmod(skills_dir, 0o700)
-    except OSError:
-        pass
+    except OSError as exc:
+        _native_taste_skill_advisory(
+            f"could not tighten shared native Taste skill directory permissions: {exc}"
+        )
+
     native = skills_dir / _NATIVE_TASTE_SKILL_NAME
-    desired_target = Path(os.path.relpath(canonical_skill_dir, start=skills_dir))
+    try:
+        desired_target = expected_link_target or Path(os.path.relpath(canonical, start=skills_dir))
+    except (OSError, ValueError) as exc:
+        _native_taste_skill_advisory(
+            f"could not derive shared native Taste skill link target for {native}: {exc}"
+        )
+        return config
     temporary: Path | None = None
     try:
-        if native.is_symlink() and Path(os.readlink(native)) == desired_target:
+        try:
+            metadata = native.lstat()
+        except FileNotFoundError:
+            metadata = None
+        if metadata is not None and not stat.S_ISLNK(metadata.st_mode):
+            _native_taste_skill_advisory(
+                f"native Taste skill install path is not a symlink and was left untouched: {native}"
+            )
             return _verify_native_taste_skill_install(
-                config_dir=config_dir,
-                canonical_skill_dir=canonical_skill_dir,
+                config_dir=config,
+                canonical_skill_dir=canonical,
                 expected_link_target=desired_target,
             )
-        if native.exists() and not native.is_symlink():
-            raise TakyonError(f"native Taste skill install path is not a symlink: {native}")
+        if metadata is not None and Path(os.readlink(native)) == desired_target:
+            return _verify_native_taste_skill_install(
+                config_dir=config,
+                canonical_skill_dir=canonical,
+                expected_link_target=desired_target,
+            )
         temporary = skills_dir / f".{_NATIVE_TASTE_SKILL_NAME}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
         temporary.symlink_to(desired_target, target_is_directory=True)
         os.replace(temporary, native)
-    except TakyonError:
-        raise
     except OSError as exc:
-        raise TakyonError(f"could not install shared native Taste skill at {native}: {exc}") from exc
+        _native_taste_skill_advisory(f"could not install shared native Taste skill at {native}: {exc}")
     finally:
         if temporary is not None and temporary.is_symlink():
             try:
@@ -5885,9 +5943,27 @@ def _shared_claude_config_dir(repo_root: Path) -> Path:
             except OSError:
                 pass
     return _verify_native_taste_skill_install(
+        config_dir=config,
+        canonical_skill_dir=canonical,
+        expected_link_target=desired_target,
+    )
+
+
+def _shared_claude_config_dir(repo_root: Path) -> Path:
+    """Best-effort install Taste in the operator's shared Claude Code config.
+
+    The config lives under the active canonical ``TAKYON_HOME`` and never under a business or
+    session workspace. The link points at the immutable runtime source and is replaced atomically
+    if an older release left a stale link behind.
+    """
+    canonical_skill_dir = (repo_root.resolve() / _NATIVE_TASTE_SKILL_RELATIVE_PATH.parent)
+    config_dir = _resolve_native_taste_path(
+        get_takyon_home().expanduser() / ".claude",
+        label="shared Claude config",
+    )
+    return _materialize_native_taste_skill_install(
         config_dir=config_dir,
         canonical_skill_dir=canonical_skill_dir,
-        expected_link_target=desired_target,
     )
 
 
@@ -5908,16 +5984,32 @@ def _product_worker_runtime_snapshot(repo_root: Path) -> Path:
             raise TakyonError(f"product worker release cache is incomplete for {release}: {exc}") from exc
         if manifest.get("release") != release:
             raise TakyonError(f"product worker release cache identity mismatch for {release}")
-        for relative, digest in (manifest.get("files") or {}).items():
+        manifest_files = manifest.get("files") or {}
+        if not isinstance(manifest_files, Mapping):
+            raise TakyonError(f"product worker release cache manifest is invalid for {release}")
+        taste_skill_relative = _NATIVE_TASTE_SKILL_RELATIVE_PATH.as_posix()
+        for relative, digest in manifest_files.items():
             candidate = path / relative
-            if not candidate.is_file() or hashlib.sha256(candidate.read_bytes()).hexdigest() != digest:
+            try:
+                valid = (
+                    candidate.is_file()
+                    and hashlib.sha256(candidate.read_bytes()).hexdigest() == digest
+                )
+            except OSError:
+                valid = False
+            if not valid and relative == taste_skill_relative:
+                _native_taste_skill_advisory(
+                    f"product worker release cache has an unavailable or changed native Taste skill: {candidate}"
+                )
+                continue
+            if not valid:
                 raise TakyonError(f"product worker release cache is corrupt: {relative}")
-        skill_digest = (manifest.get("files") or {}).get(
-            _NATIVE_TASTE_SKILL_RELATIVE_PATH.as_posix()
-        )
+        skill_digest = manifest_files.get(taste_skill_relative)
         if skill_digest != _NATIVE_TASTE_SKILL_SHA256:
-            raise TakyonError("product worker release cache is missing the pinned native Taste skill")
-        _verify_native_taste_skill_install(
+            _native_taste_skill_advisory(
+                "product worker release cache is missing the pinned native Taste skill"
+            )
+        _materialize_native_taste_skill_install(
             config_dir=path / ".claude",
             canonical_skill_dir=path / _NATIVE_TASTE_SKILL_RELATIVE_PATH.parent,
             expected_link_target=_NATIVE_TASTE_SKILL_LINK_TARGET,
@@ -5939,10 +6031,15 @@ def _product_worker_runtime_snapshot(repo_root: Path) -> Path:
             metadata = json.loads(before)
             if str(metadata.get("source_revision") or "").strip().lower() != release:
                 raise TakyonError("deployed runtime manifest does not match the claimed release")
-            source_files = {
-                relative: (root / relative).read_bytes()
-                for relative in _PRODUCT_WORKER_RUNTIME_FILES
-            }
+            for relative in _PRODUCT_WORKER_RUNTIME_FILES:
+                try:
+                    source_files[relative] = (root / relative).read_bytes()
+                except OSError as exc:
+                    if relative != _NATIVE_TASTE_SKILL_RELATIVE_PATH.as_posix():
+                        raise
+                    _native_taste_skill_advisory(
+                        f"native Taste skill was unavailable while snapshotting release {release}: {exc}"
+                    )
             if deploy_manifest.read_bytes() != before:
                 raise TakyonError("deployed runtime changed while snapshotting the product worker")
         else:
@@ -5957,28 +6054,36 @@ def _product_worker_runtime_snapshot(repo_root: Path) -> Path:
             prefix = root.relative_to(git_root).as_posix()
             for relative in _PRODUCT_WORKER_RUNTIME_FILES:
                 git_path = f"{prefix}/{relative}" if prefix else relative
-                shown = subprocess.run(
-                    ["git", "-C", str(git_root), "show", f"{release}:{git_path}"],
-                    capture_output=True,
-                    check=True,
-                    timeout=30,
-                )
-                source_files[relative] = shown.stdout
+                try:
+                    shown = subprocess.run(
+                        ["git", "-C", str(git_root), "show", f"{release}:{git_path}"],
+                        capture_output=True,
+                        check=True,
+                        timeout=30,
+                    )
+                    source_files[relative] = shown.stdout
+                except (OSError, subprocess.SubprocessError) as exc:
+                    if relative != _NATIVE_TASTE_SKILL_RELATIVE_PATH.as_posix():
+                        raise
+                    _native_taste_skill_advisory(
+                        f"native Taste skill was unavailable while snapshotting release {release}: {exc}"
+                    )
 
         for relative, content in source_files.items():
             destination = staging / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(content)
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(content)
+            except OSError as exc:
+                if relative != _NATIVE_TASTE_SKILL_RELATIVE_PATH.as_posix():
+                    raise
+                _native_taste_skill_advisory(
+                    f"native Taste skill could not be materialized in release {release}: {exc}"
+                )
         _verify_canonical_native_taste_skill(
             staging / _NATIVE_TASTE_SKILL_RELATIVE_PATH
         )
-        native_skills_dir = staging / ".claude" / "skills"
-        native_skills_dir.mkdir(parents=True, exist_ok=True)
-        (native_skills_dir / _NATIVE_TASTE_SKILL_NAME).symlink_to(
-            _NATIVE_TASTE_SKILL_LINK_TARGET,
-            target_is_directory=True,
-        )
-        _verify_native_taste_skill_install(
+        _materialize_native_taste_skill_install(
             config_dir=staging / ".claude",
             canonical_skill_dir=staging / _NATIVE_TASTE_SKILL_RELATIVE_PATH.parent,
             expected_link_target=_NATIVE_TASTE_SKILL_LINK_TARGET,
@@ -6356,98 +6461,45 @@ def _site_image_worker_bridge(
             shutil.rmtree(root, ignore_errors=True)
 
 
-_OFFICIAL_TASTE_PUBLICATION_GATE_IDS = frozenset(
-    {
-        "zero_visible_dashes",
-        "canonical_preflight_evidence",
-        "section_layout_diversity",
-        "image_plan_and_asset_integrity",
-        "hero_first_viewport",
-        "single_visual_system",
-    }
-)
-
-
 def _product_site_worker_requires_taste(workspace_rel: str) -> bool:
     return _workspace_is_canonical_product_site(workspace_rel)
 
 
-def _load_validated_taste_design_snapshot(workspace_path: Path) -> TasteDesignSnapshot | None:
-    """Load the immutable Taste handoff; a corrupt handoff is never treated as a new site."""
-
-    try:
-        snapshot = load_design_snapshot(workspace_path)
-    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
-        raise TakyonError(f"Taste design snapshot is invalid: {exc}") from exc
-    if snapshot is None:
-        return None
-    required_dials = {"DESIGN_VARIANCE", "MOTION_INTENSITY", "VISUAL_DENSITY"}
-    valid_assets = len(snapshot.assets) >= 2 and all(
-        re.fullmatch(r"/generated/[a-z0-9]+(?:-[a-z0-9]+)*\.png", str(path))
-        and re.fullmatch(r"[0-9a-f]{64}", str(digest).lower())
-        for path, digest in snapshot.assets.items()
-    )
-    if (
-        snapshot.version != 1
-        or not re.fullmatch(r"[0-9a-f]{64}", snapshot.design_sha256.lower())
-        or not re.fullmatch(r"[0-9a-f]{64}", snapshot.landing_sha256.lower())
-        or not re.fullmatch(r"[0-9a-f]{64}", snapshot.tokens_sha256.lower())
-        or not re.fullmatch(r"[0-9a-f]{64}", snapshot.design_read_sha256.lower())
-        or not re.fullmatch(r"[0-9a-f]{64}", snapshot.foundation_sha256.lower())
-        or set(snapshot.dials) != required_dials
-        or any(int(value) < 1 or int(value) > 10 for value in snapshot.dials.values())
-        or not snapshot.tokens
-        or not valid_assets
-    ):
-        raise TakyonError(
-            f"Taste design snapshot is invalid: {DESIGN_SNAPSHOT_RELATIVE_PATH} is incomplete"
-        )
-    return snapshot
-
-
-def _taste_render_inspection_from_worker(
-    workspace_path: Path,
-    raw: Mapping[str, Any],
-) -> RenderInspection:
-    """Rebase the helper's container path onto the parent-owned workspace safely."""
-
-    root = workspace_path.resolve()
-    scratch = (root / _TASTE_PREFLIGHT_DIRNAME).resolve()
-    raw_path = str(raw.get("screenshot_path") or "").strip()
-    if raw_path.startswith("/workspace/"):
-        candidate = (root / raw_path.removeprefix("/workspace/")).resolve()
-    else:
-        supplied = Path(raw_path)
-        candidate = supplied.resolve() if supplied.is_absolute() else (root / supplied).resolve()
-    if scratch not in (candidate, *candidate.parents):
-        raise TakyonError("Taste render receipt points outside the reserved preflight directory")
-    return RenderInspection.from_mapping({**dict(raw), "screenshot_path": str(candidate)})
-
-
-def _validate_taste_worker_publication(
+def _taste_worker_advisory_receipt(
     *,
-    workspace_path: Path,
     sdk_result: Mapping[str, Any],
-    baseline_snapshot: TasteDesignSnapshot | None,
-    site_image_bridge: Any,
+    baseline_snapshot: Any | None,
     initial_pass: bool,
-) -> tuple[dict[str, Any], str]:
-    """Validate native skill, rendered evidence, assets, and the immutable design handoff."""
+) -> dict[str, Any]:
+    """Record advisory Claude SDK telemetry for the best-effort native Taste install."""
 
     receipt: dict[str, Any] = {
         "version": 1,
         "passed": False,
+        "advisory": False,
+        "advisory_detail": "",
         "initial_pass": bool(initial_pass),
         "baseline_snapshot_present": baseline_snapshot is not None,
         "snapshot_path": DESIGN_SNAPSHOT_RELATIVE_PATH,
     }
     skill_receipt = sdk_result.get("skill_receipt")
     if not isinstance(skill_receipt, Mapping):
-        return receipt, "product/site publication refused: native Taste skill receipt is missing"
+        receipt["advisory"] = True
+        receipt["advisory_detail"] = "native Taste skill receipt is missing"
+        return receipt
     receipt["skill_sha256"] = str(skill_receipt.get("installed_sha256") or "")
     receipt["model"] = str(skill_receipt.get("actual_model") or skill_receipt.get("model") or "")
     receipt["duration_ms"] = skill_receipt.get("duration_ms")
     receipt["usage"] = skill_receipt.get("usage")
+    receipt["sdk_advisories"] = (
+        list(skill_receipt.get("advisories") or [])
+        if isinstance(skill_receipt.get("advisories"), list)
+        else []
+    )
+    try:
+        native_use_events = int(skill_receipt.get("native_use_events") or 0)
+    except (TypeError, ValueError):
+        native_use_events = 0
     if (
         skill_receipt.get("required") is not True
         or skill_receipt.get("installed") is not True
@@ -6455,127 +6507,22 @@ def _validate_taste_worker_publication(
         or skill_receipt.get("included") is not True
         or str(skill_receipt.get("included_source") or "") != "userSettings"
         or skill_receipt.get("native_use") is not True
-        or int(skill_receipt.get("native_use_events") or 0) < 1
+        or native_use_events < 1
         or skill_receipt.get("prompt_body_absent") is not True
+        or skill_receipt.get("prompt_distinctive_markers_absent") is not True
         or str(skill_receipt.get("installed_sha256") or "").lower()
         != _NATIVE_TASTE_SKILL_SHA256
     ):
-        return receipt, (
-            "product/site publication refused: native Taste was not installed, discovered, "
-            "included from user settings, and successfully invoked"
+        receipt["advisory"] = True
+        receipt["advisory_detail"] = (
+            "native Taste SDK receipt did not confirm installation, discovery, inclusion from "
+            "user settings, invocation, and prompt separation"
         )
+        return receipt
 
-    # Native skill use is the integration contract. Visual choices, generated imagery,
-    # screenshots, audits, and DESIGN.md are guidance owned by the design agent, not
-    # publication authority.
+    # Native Taste installation and SDK telemetry are guidance evidence, not publication authority.
     receipt["passed"] = True
-    return receipt, ""
-
-    evidence = sdk_result.get("taste_publication_evidence")
-    if (
-        not isinstance(evidence, Mapping)
-        or evidence.get("submitted") is not True
-        or evidence.get("passed") is not True
-    ):
-        return receipt, "product/site publication refused: rendered Taste publication evidence is missing"
-    official_gates = evidence.get("official_gates")
-    if not isinstance(official_gates, Mapping) or set(official_gates) != _OFFICIAL_TASTE_PUBLICATION_GATE_IDS:
-        return receipt, "product/site publication refused: official Taste gate evidence is incomplete"
-    if any(
-        not isinstance(item, Mapping)
-        or item.get("passed") is not True
-        or not str(item.get("evidence") or "").strip()
-        or not str(item.get("source") or "").strip()
-        for item in official_gates.values()
-    ):
-        return receipt, "product/site publication refused: an official Taste gate lacks passing evidence"
-    if site_image_bridge is None:
-        return receipt, "product/site publication refused: authoritative site-image bridge is unavailable"
-
-    try:
-        restored_count = int(site_image_bridge.restore_generated_assets())
-        generated_this_run_count = int(site_image_bridge.generated_this_run_count)
-        authoritative_assets = {
-            str(path): str(digest).lower()
-            for path, digest in site_image_bridge.authoritative_asset_digests().items()
-        }
-    except Exception as exc:
-        return receipt, f"product/site publication refused: authoritative asset restore failed: {exc}"
-    receipt["restored_asset_count"] = restored_count
-    receipt["generated_this_run_count"] = generated_this_run_count
-    receipt["authoritative_asset_digests"] = authoritative_assets
-    if initial_pass and generated_this_run_count < 2:
-        return receipt, (
-            "product/site publication refused: the initial Taste pass did not generate two "
-            "authoritative assets in this worker run"
-        )
-
-    raw_asset_inspections = evidence.get("asset_inspections")
-    if not isinstance(raw_asset_inspections, Mapping):
-        return receipt, "product/site publication refused: asset visual inspections are missing"
-    asset_inspections = {
-        str(public_path): (
-            value
-            if isinstance(value, AssetVisualInspection)
-            else AssetVisualInspection.from_mapping(value)
-        )
-        for public_path, value in raw_asset_inspections.items()
-        if isinstance(value, (AssetVisualInspection, Mapping))
-    }
-    evidence_asset_digests = {
-        public_path: inspection.image_sha256.lower()
-        for public_path, inspection in asset_inspections.items()
-    }
-    receipt["evidence_asset_digests"] = evidence_asset_digests
-    if evidence_asset_digests != authoritative_assets:
-        return receipt, (
-            "product/site publication refused: Taste asset evidence does not match the "
-            "parent-authoritative creative bridge outputs"
-        )
-
-    renders = evidence.get("render_inspections")
-    preflight_evidence = evidence.get("preflight_evidence")
-    if not isinstance(renders, Mapping) or not isinstance(preflight_evidence, Mapping):
-        return receipt, "product/site publication refused: rendered Taste inspection is incomplete"
-    desktop_raw = renders.get("desktop")
-    mobile_raw = renders.get("mobile")
-    if not isinstance(desktop_raw, Mapping) or not isinstance(mobile_raw, Mapping):
-        return receipt, "product/site publication refused: desktop/mobile Taste renders are missing"
-    try:
-        desktop = _taste_render_inspection_from_worker(workspace_path, desktop_raw)
-        mobile = _taste_render_inspection_from_worker(workspace_path, mobile_raw)
-        gate_result = validate_taste_publication(
-            workspace_path,
-            desktop=desktop,
-            mobile=mobile,
-            asset_inspections=asset_inspections,
-            preflight_evidence=preflight_evidence,
-            baseline_snapshot=baseline_snapshot,
-        )
-    except Exception as exc:
-        return receipt, f"product/site publication refused: Taste publication gate failed: {exc}"
-    receipt["gate"] = gate_result.to_dict()
-    if not gate_result.passed or gate_result.snapshot is None:
-        return receipt, (
-            "product/site publication refused: "
-            + (gate_result.blocker or "Taste publication gate produced no design snapshot")
-        )
-    if dict(gate_result.snapshot.assets) != authoritative_assets:
-        return receipt, (
-            "product/site publication refused: validated Taste snapshot assets do not match "
-            "the parent-authoritative creative bridge outputs"
-        )
-    if initial_pass:
-        try:
-            snapshot_path = write_design_snapshot(workspace_path, gate_result.snapshot)
-        except OSError as exc:
-            return receipt, f"product/site publication refused: could not persist Taste snapshot: {exc}"
-        receipt["snapshot_written"] = True
-        receipt["snapshot_file"] = str(snapshot_path)
-    else:
-        receipt["snapshot_written"] = False
-    receipt["passed"] = True
-    return receipt, ""
+    return receipt
 
 
 def _run_claude_agent_task_in_docker(
@@ -6756,6 +6703,17 @@ def _run_claude_agent_task_in_docker(
             "--mount",
             f"type=bind,src={bridge_root},dst={_SITE_IMAGE_BRIDGE_CONTAINER_DIR}",
         ]
+    taste_skills_dir = runtime_snapshot / ".claude" / "skills"
+    taste_skills_mount_args: list[str] = []
+    if taste_skills_dir.is_dir():
+        taste_skills_mount_args = [
+            "--mount",
+            f"type=bind,src={taste_skills_dir},dst=/repo/.claude/skills,readonly",
+        ]
+    else:
+        _native_taste_skill_advisory(
+            f"Docker worker is starting without the optional native Taste skill directory: {taste_skills_dir}"
+        )
 
     run_cmd = [
         docker,
@@ -6773,9 +6731,8 @@ def _run_claude_agent_task_in_docker(
         "/home:rw,exec,size=512m",
         "--tmpfs",
         "/tmp:rw,exec,size=384m",
-        # Claude Code needs writable session/config state, while the canonical native skill remains
-        # release-pinned and read-only. Overlay only the config root, then restore its skills subtree
-        # from the immutable release snapshot as a nested read-only bind.
+        # Claude Code needs writable session/config state. Overlay the config root and, when the
+        # best-effort Taste materialization succeeded, expose that release snapshot read-only.
         "--tmpfs",
         "/repo/.claude:rw,nosuid,nodev,noexec,mode=1777,size=64m",
         *sdk_mount_args,
@@ -6786,8 +6743,7 @@ def _run_claude_agent_task_in_docker(
         f"type=bind,src={workspace_path},dst=/workspace",
         "--mount",
         f"type=bind,src={runtime_snapshot},dst=/repo,readonly",
-        "--mount",
-        f"type=bind,src={runtime_snapshot / '.claude' / 'skills'},dst=/repo/.claude/skills,readonly",
+        *taste_skills_mount_args,
         "-w",
         "/repo",
         *user_args,
@@ -11054,12 +11010,6 @@ def _validate_product_surface_contract(
         if isinstance(item, dict)
     )
     kind = _surface_contract_kind(surface)
-    unsupported_claims = [
-        item for item in (inventory.get("unsupported_feature_claims") or [])
-        if isinstance(item, dict)
-    ]
-    if unsupported_claims:
-        return False, feature_claim_blocker(unsupported_claims[0])
     checkout_is_presented = (
         kind.get("checkout")
         or "billing_or_checkout" in risk_issues
@@ -11088,6 +11038,24 @@ def _validate_product_surface_contract(
             "plan allowance",
         )
     return True, ""
+
+
+def _append_advisory_product_claim_warnings(refresh: dict[str, Any]) -> dict[str, Any]:
+    inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
+    claim_warnings = [
+        feature_claim_warning(item)
+        for item in (inventory.get("unsupported_feature_claims") or [])
+        if isinstance(item, dict)
+    ]
+    if not claim_warnings:
+        return refresh
+    existing_warnings = refresh.get("warnings")
+    warnings = list(existing_warnings) if isinstance(existing_warnings, list) else []
+    warnings.extend(warning for warning in claim_warnings if warning not in warnings)
+    return {
+        **refresh,
+        "warnings": warnings,
+    }
 
 
 def _product_source_files(root: Path, *, limit: int = 200) -> list[str]:
@@ -25334,8 +25302,9 @@ def _finalize_product_surface_refresh(
         install=install,
         timeout_seconds=timeout_seconds,
     )
+    refresh = _append_advisory_product_claim_warnings(refresh)
+    inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
     if refresh.get("status") == "passed":
-        inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
         valid_surface, surface_error = _validate_product_surface_contract(inventory, surface)
         if not valid_surface:
             refresh = {
@@ -33578,7 +33547,7 @@ def _handle_business_generate_site_image_with_store(args: dict, store: "TakyonSt
         # invalidates its workspace mirror cache; the next business-root read may then hydrate the
         # current canonical revision with delete_local=True. Recording the event first could erase
         # these still-uncommitted files, leaving a successful creative charge/event but no image or
-        # receipt for the post-worker Taste gate.
+        # receipt for post-worker image telemetry.
         store._sync_business_workspace_remote(business)
         store.commit(
             scope=f"business:{business}/product:site-image/{slug}",
@@ -38066,7 +38035,7 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
         turn_cap_retries: list[dict[str, int]] = []
         agent_record: dict[str, Any] | None = None
         initial_landing_design_pass = False
-        baseline_taste_snapshot: TasteDesignSnapshot | None = None
+        baseline_taste_snapshot: Any | None = None
         with workspace_context as mounted_context, ExitStack() as scoped_workspaces:
             active_store = store
             mounted_home = None
@@ -38439,7 +38408,8 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                                 "initial_pass": bool(initial_landing_design_pass),
                                 "baseline_snapshot_present": baseline_taste_snapshot is not None,
                                 "snapshot_path": DESIGN_SNAPSHOT_RELATIVE_PATH,
-                                "blocker": "worker timed out before rendered Taste proof completed",
+                                "advisory": True,
+                                "advisory_detail": "worker timed out before complete Taste telemetry",
                             }
                             if taste_skill_required
                             else None
@@ -38541,27 +38511,14 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
                         "duration_ms": failed_skill_receipt.get("duration_ms"),
                         "usage": failed_skill_receipt.get("usage"),
                     }
-                    taste_blocker = ""
                     try:
                         if sdk_result.get("success"):
-                            taste_receipt, taste_blocker = _validate_taste_worker_publication(
-                                workspace_path=workspace_path,
+                            taste_receipt = _taste_worker_advisory_receipt(
                                 sdk_result=sdk_result,
                                 baseline_snapshot=baseline_taste_snapshot,
-                                site_image_bridge=site_image_bridge,
                                 initial_pass=initial_landing_design_pass,
                             )
-                            if taste_blocker:
-                                taste_receipt["blocker"] = taste_blocker
                         sdk_result["taste_publication_receipt"] = taste_receipt
-                        if taste_blocker:
-                            sdk_result = {
-                                **sdk_result,
-                                "success": False,
-                                "blocked": True,
-                                "blocker": "taste_publication_gate_failed",
-                                "error": taste_blocker,
-                            }
                     finally:
                         # Helper stdout is parsed and its digest-bound screenshots are validated
                         # before this parent-owned scratch is removed. No preflight artifact may

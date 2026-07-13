@@ -1,8 +1,7 @@
-"""Bounded, fail-closed checks for customer-visible product promises.
+"""Bounded advisory inventory for customer-visible product promises.
 
-The product surface is worker-authored, but the runtime owns the publish decision.  This module
-keeps marketing claims tied to observable source-level implementations instead of accepting labels
-as proof that a feature exists.
+These regex-based findings help operators compare marketing copy with source-level implementation
+evidence. They are deliberately advisory and never decide whether a product surface may publish.
 """
 
 from __future__ import annotations
@@ -140,7 +139,7 @@ def unsupported_feature_claims(root: Path, *, limit: int = 8) -> list[dict[str, 
     return findings
 
 
-def feature_claim_blocker(finding: dict[str, Any]) -> str:
+def feature_claim_warning(finding: dict[str, Any]) -> str:
     labels = {
         "pdf_export": "PDF export",
         "template_library": "a reusable template library",
@@ -149,7 +148,7 @@ def feature_claim_blocker(finding: dict[str, Any]) -> str:
     kind = str(finding.get("kind") or "feature")
     label = labels.get(kind, kind.replace("_", " "))
     return (
-        f"customer-facing source promises {label} at {finding.get('path')}:{finding.get('line')}, "
-        "but the functional product source contains no implementation evidence for that capability; "
-        "implement it in the customer workflow using the runtime-backed rails or remove the promise"
+        f"advisory copy scan: customer-facing source mentions {label} at "
+        f"{finding.get('path')}:{finding.get('line')}, but the bounded source scan found no "
+        "implementation evidence for that capability; verify the customer workflow"
     )

@@ -13,6 +13,7 @@ import pytest
 
 from plugins.takyon.core import (
     WORKER_CAPABILITY_CONTRACT,
+    _append_advisory_product_claim_warnings,
     _bounded_product_inventory,
     _scan_for_forbidden_product_backend_code,
     _scan_for_pinned_stack_client_generate_usage,
@@ -1549,7 +1550,7 @@ export function LandingScreen() {
     }
 
 
-def test_product_inventory_blocks_customer_feature_promises_without_implementation(tmp_path):
+def test_product_inventory_keeps_unsupported_copy_claims_advisory(tmp_path):
     business_root = tmp_path / "businesses" / "proposalflow"
     site = business_root / "product" / "site"
     landing = site / "src" / "screens" / "landing.tsx"
@@ -1572,9 +1573,39 @@ export function LandingScreen() {
         "template_library",
     }
     ok, blocker = _validate_product_surface_contract(inventory, {})
-    assert not ok
-    assert "promises PDF export" in blocker
-    assert "no implementation evidence" in blocker
+    assert ok is True
+    assert blocker == ""
+
+
+def test_refresh_adds_advisory_copy_warnings_without_changing_status():
+    refresh = {
+        "status": "passed",
+        "warnings": ["existing warning"],
+        "inventory": {
+            "unsupported_feature_claims": [
+                {
+                    "path": "src/screens/landing.tsx",
+                    "line": 12,
+                    "kind": "pdf_export",
+                },
+                {
+                    "path": "src/screens/landing.tsx",
+                    "line": 13,
+                    "kind": "markdown_export",
+                },
+            ]
+        },
+    }
+
+    updated = _append_advisory_product_claim_warnings(refresh)
+
+    assert updated["status"] == "passed"
+    assert updated["warnings"][0] == "existing warning"
+    assert len(updated["warnings"]) == 3
+    assert all(
+        warning.startswith("advisory copy scan:")
+        for warning in updated["warnings"][1:]
+    )
 
 
 def test_product_inventory_accepts_feature_promises_with_functional_evidence(tmp_path):

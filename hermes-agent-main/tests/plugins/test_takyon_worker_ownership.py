@@ -78,11 +78,9 @@ def test_product_worker_uses_an_immutable_claimed_release_snapshot(tmp_path, mon
         / "taste-frontend"
         / "SKILL.md"
     ).read_bytes()
-    taste_gate = (Path(core.__file__).resolve().parent / "taste_publication_gate.py").read_bytes()
     files = {
         "package.json": b'{"dependencies":{"@anthropic-ai/claude-agent-sdk":"1.0.0"}}',
         "package-lock.json": b'{"lockfileVersion":3,"packages":{}}',
-        "plugins/takyon/taste_publication_gate.py": taste_gate,
         "scripts/takyon-claude-agent-task.mjs": b"console.log('sealed');\n",
         "skills/creative/taste-frontend/SKILL.md": canonical_skill,
     }
@@ -114,11 +112,20 @@ def test_product_worker_uses_an_immutable_claimed_release_snapshot(tmp_path, mon
     assert (snapshot / "scripts" / "takyon-claude-agent-task.mjs").read_bytes() == files[
         "scripts/takyon-claude-agent-task.mjs"
     ]
-    assert (snapshot / "plugins" / "takyon" / "taste_publication_gate.py").read_bytes() == taste_gate
+    assert not (snapshot / "plugins" / "takyon" / "taste_publication_gate.py").exists()
     native = snapshot / ".claude" / "skills" / "design-taste-frontend"
     assert native.is_symlink()
     assert native.readlink() == Path("../../skills/creative/taste-frontend")
     assert native.resolve() == snapshot / "skills" / "creative" / "taste-frontend"
+    (snapshot / "skills" / "creative" / "taste-frontend" / "SKILL.md").write_text(
+        "invalid Taste bytes\n", encoding="utf-8"
+    )
+    assert core._product_worker_runtime_snapshot(runtime) == snapshot
+    (snapshot / "scripts" / "takyon-claude-agent-task.mjs").write_text(
+        "console.log('corrupt');\n", encoding="utf-8"
+    )
+    with pytest.raises(core.TakyonError, match="product worker release cache is corrupt"):
+        core._product_worker_runtime_snapshot(runtime)
 
 
 def test_non_docker_native_taste_install_is_shared_under_takyon_home(tmp_path, monkeypatch):
@@ -146,6 +153,10 @@ def test_non_docker_native_taste_install_is_shared_under_takyon_home(tmp_path, m
     native.symlink_to(tmp_path / "forbidden-business-override", target_is_directory=True)
     assert core._shared_claude_config_dir(runtime) == config
     assert native.resolve() == canonical_dir
+    native.unlink()
+    native.mkdir()
+    assert core._shared_claude_config_dir(runtime) == config
+    assert native.is_dir() and not native.is_symlink()
     monkeypatch.setattr(core, "_repo_root", lambda: runtime)
     monkeypatch.setattr(
         core,

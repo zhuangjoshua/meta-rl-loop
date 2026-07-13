@@ -124,6 +124,8 @@ console.log(JSON.stringify(output));
     assert result["receipt"]["native_scope"] == "user"
     assert result["receipt"]["source"] == "shared-runtime-symlink"
     assert result["receipt"]["canonical_target"] is True
+    assert result["receipt"]["advisory"] is False
+    assert result["receipt"]["advisories"] == []
     assert result["receipt"]["installed_sha256"] == (
         "aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89"
     )
@@ -139,7 +141,7 @@ def test_runtime_tracks_one_shared_native_taste_directory_link():
     assert native.resolve() == canonical.resolve()
 
 
-def test_shared_native_taste_skill_refuses_noncanonical_target():
+def test_shared_native_taste_skill_reports_noncanonical_target_as_advisory():
     result = _run_module(
         """
 const fs = await import("node:fs/promises");
@@ -155,14 +157,46 @@ await fs.mkdir(path.dirname(nativeDir), { recursive: true });
 await fs.writeFile(path.join(canonicalDir, "SKILL.md"), "canonical");
 await fs.writeFile(path.join(wrongDir, "SKILL.md"), "wrong");
 await fs.symlink(wrongDir, nativeDir, "dir");
-let error = "";
-try { await validateTaste({ nativeDir, canonicalDir }); } catch (caught) { error = String(caught.message); }
+const validation = await validateTaste({ nativeDir, canonicalDir });
 await fs.rm(tempRoot, { recursive: true, force: true });
-console.log(JSON.stringify(error));
+console.log(JSON.stringify(validation.receipt));
 """
     )
 
-    assert result == "shared native Taste skill symlink does not resolve to the canonical runtime skill"
+    assert result["installed"] is False
+    assert result["canonical_target"] is False
+    assert result["advisory"] is True
+    assert {item["code"] for item in result["advisories"]} == {
+        "symlink_target_unconfirmed",
+        "digest_unconfirmed",
+    }
+
+
+def test_missing_shared_native_taste_skill_is_advisory():
+    canonical_dir = SCRIPT.parents[1] / "skills" / "creative" / "taste-frontend"
+    result = _run_module(
+        f"""
+const fs = await import("node:fs/promises");
+const os = await import("node:os");
+const path = await import("node:path");
+const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "takyon-native-skill-test-"));
+const nativeDir = path.join(tempRoot, ".claude", "skills", "design-taste-frontend");
+const validation = await validateTaste({{
+  nativeDir,
+  canonicalDir: {json.dumps(str(canonical_dir))},
+}});
+await fs.rm(tempRoot, {{ recursive: true, force: true }});
+console.log(JSON.stringify(validation.receipt));
+"""
+    )
+
+    assert result["installed"] is False
+    assert result["advisory"] is True
+    assert {item["code"] for item in result["advisories"]} == {
+        "install_unconfirmed",
+        "symlink_target_unconfirmed",
+        "digest_unconfirmed",
+    }
 
 
 def test_native_taste_tool_attempt_parser_only_accepts_canonical_skill_name():
@@ -189,7 +223,8 @@ console.log(JSON.stringify(messages.map(tasteUse)));
 def test_sdk_query_enables_only_the_native_taste_skill_and_ignores_business_project_settings():
     text = SCRIPT.read_text(encoding="utf-8")
 
-    assert "skills: [TASTE_SKILL_NAME]" in text
+    assert "? [TASTE_SKILL_NAME]" in text
+    assert "skills: requestedSkills" in text
     assert 'settingSources: ["user"]' in text
     assert "CLAUDE_CONFIG_DIR: claudeConfigDir" in text
     assert "skill_receipt: workerSkillReceipt" in text
@@ -228,8 +263,10 @@ console.log(JSON.stringify(buildPrompt({
 
     assert exact not in taste_prompt
     assert "Use the native `design-taste-frontend` skill" not in taste_prompt
+    assert "do not report BLOCKED solely because of Taste" in taste_prompt
     assert exact not in continuation_prompt
     assert "Use the native `design-taste-frontend` skill" not in continuation_prompt
+    assert "do not report BLOCKED solely because of Taste" in continuation_prompt
 
 
 def test_real_sdk_discovers_includes_and_invokes_shared_native_taste(tmp_path):

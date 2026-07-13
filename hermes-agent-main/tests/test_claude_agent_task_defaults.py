@@ -73,16 +73,13 @@ def _pin_test_coding_worker_model(monkeypatch):
     monkeypatch.setattr(takyon_core, "_blocks_session_bound_authority_op", lambda: False)
     monkeypatch.setattr(
         takyon_core,
-        "_validate_taste_worker_publication",
-        lambda **kwargs: (
-            {
-                "version": 1,
-                "passed": True,
-                "initial_pass": bool(kwargs.get("initial_pass")),
-                "baseline_snapshot_present": kwargs.get("baseline_snapshot") is not None,
-            },
-            "",
-        ),
+        "_taste_worker_advisory_receipt",
+        lambda **kwargs: {
+            "version": 1,
+            "passed": True,
+            "initial_pass": bool(kwargs.get("initial_pass")),
+            "baseline_snapshot_present": kwargs.get("baseline_snapshot") is not None,
+        },
     )
 
 
@@ -2488,7 +2485,7 @@ def test_successful_taste_worker_with_policy_publish_blocker_is_not_human_review
     assert agent_record["result"]["review_required"] is False
 
 
-def test_taste_success_without_publication_receipt_blocks_before_publish(tmp_path, monkeypatch):
+def test_taste_success_without_sdk_receipt_is_advisory_and_publishes(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = _FakeStore(tmp_path)
     process_calls: list[dict[str, object]] = []
@@ -2524,17 +2521,31 @@ def test_taste_success_without_publication_receipt_blocks_before_publish(tmp_pat
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
     monkeypatch.setattr(
         takyon_core,
-        "_validate_taste_worker_publication",
-        lambda **_kwargs: (
-            {"version": 1, "passed": False},
-            "product/site publication refused: native Taste skill receipt is missing",
-        ),
+        "_taste_worker_advisory_receipt",
+        lambda **_kwargs: {
+            "version": 1,
+            "passed": False,
+            "advisory": True,
+            "advisory_detail": "native Taste skill receipt is missing",
+        },
     )
     monkeypatch.setattr(
         takyon_core,
         "_finalize_product_surface_refresh",
-        lambda **_kwargs: pytest.fail("missing Taste contract must block before publish"),
+        lambda **_kwargs: {
+            "status": "passed",
+            "source_path": "product/site",
+            "receipt_path": "metrics/receipts/product-surface/taste-advisory.json",
+            "runtime_features": [],
+            "inventory": {},
+            "blocker": "",
+            "publish": {
+                "status": "published",
+                "public_url": "https://latexflow.coscale.app/",
+            },
+        },
     )
+    monkeypatch.setattr(takyon_core, "_product_surface_refresh_operations", lambda **_kwargs: [])
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -2551,11 +2562,14 @@ def test_taste_success_without_publication_receipt_blocks_before_publish(tmp_pat
         )
     )
 
-    assert result["success"] is False
-    assert result["blocked"] is True
+    assert result["success"] is True
     assert result["worker_attempts"] == 1
     assert result["taste_publication_receipt"]["passed"] is False
-    assert "native Taste skill receipt is missing" in result["error"]
+    assert result["taste_publication_receipt"]["advisory"] is True
+    assert result["taste_publication_receipt"]["advisory_detail"] == (
+        "native Taste skill receipt is missing"
+    )
+    assert result["surface_refresh"]["publish"]["status"] == "published"
     assert len(process_calls) == 1
 
 
@@ -2910,6 +2924,61 @@ def test_claude_agent_task_exposes_optional_image_without_visual_publication_too
     assert '"business_submit_taste_publication_audit"' not in text
     assert "optional creative tool" in text
     assert "Images are required" not in text
+
+
+def test_native_taste_sdk_receipt_failures_are_advisory():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is unavailable")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
+    text = script.read_text(encoding="utf-8")
+    source = f"""
+import {{ nativeTasteSkillReceiptAdvisories as advisories }} from {json.dumps(script.as_uri())};
+const failed = advisories({{ required: true }});
+const confirmed = advisories({{
+  required: true,
+  installed: true,
+  canonical_target: true,
+  installed_sha256: "aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89",
+  discovery_event: true,
+  discovered: true,
+  inclusion_event: true,
+  included: true,
+  native_use: true,
+  prompt_body_absent: true,
+  prompt_distinctive_markers_absent: true,
+}});
+console.log(JSON.stringify({{ failed, confirmed }}));
+"""
+    proc = subprocess.run(
+        [node, "--input-type=module", "--eval", source],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert [item["code"] for item in result["failed"]] == [
+        "install_unconfirmed",
+        "symlink_target_unconfirmed",
+        "digest_unconfirmed",
+        "sdk_discovery_unconfirmed",
+        "sdk_inclusion_unconfirmed",
+        "sdk_invocation_unconfirmed",
+        "prompt_separation_unconfirmed",
+    ]
+    assert result["confirmed"] == []
+    assert "const nativeTasteSkill = await validateNativeTasteSkill({" in text
+    assert "if (link && !linkIsSymbolic)" in text
+    assert "nativeDigest !== TASTE_SKILL_SHA256" in text
+    assert "? [TASTE_SKILL_NAME]" in text
+    assert "skills: requestedSkills," in text
+    assert 'settingSources: ["user"],' in text
+    assert "throw new Error(`shared native Taste" not in text
+    assert "product/site publication refused: Claude Code" not in text
+    assert "product/site publication refused: native Taste content" not in text
 
 
 def test_claude_agent_task_script_passes_beta_disable_to_child_env():

@@ -45,55 +45,183 @@ function hasCanonicalTasteFrontmatter(value) {
   return /^---\s*$[\s\S]*?^name:\s*design-taste-frontend\s*$[\s\S]*?^---\s*$/m.test(head);
 }
 
+function appendTasteSkillAdvisory(advisories, code, detail) {
+  if (!advisories.some((item) => item?.code === code)) {
+    advisories.push({ code, detail });
+  }
+}
+
 async function validateNativeTasteSkill({ nativeDir, canonicalDir } = {}) {
   const resolvedNativeDir = path.resolve(String(nativeDir || TASTE_SKILL_NATIVE_DIR));
   const resolvedCanonicalDir = path.resolve(String(canonicalDir || TASTE_SKILL_CANONICAL_DIR));
   const nativePath = path.join(resolvedNativeDir, "SKILL.md");
   const canonicalPath = path.join(resolvedCanonicalDir, "SKILL.md");
-  let link;
+  const advisories = [];
+  let link = null;
   try {
     link = await fs.lstat(resolvedNativeDir);
   } catch (error) {
-    throw new Error(
+    appendTasteSkillAdvisory(
+      advisories,
+      "install_unconfirmed",
       `shared native Taste skill is not installed at ${resolvedNativeDir}: ${error?.code || "unreadable"}`
     );
   }
-  if (!link.isSymbolicLink()) {
-    throw new Error(`shared native Taste skill must be a symlink: ${resolvedNativeDir}`);
+  const linkIsSymbolic = Boolean(link?.isSymbolicLink());
+  if (link && !linkIsSymbolic) {
+    appendTasteSkillAdvisory(
+      advisories,
+      "install_unconfirmed",
+      `shared native Taste skill is not a symlink at ${resolvedNativeDir}`
+    );
   }
-  const [nativeRealPath, canonicalRealPath, nativeContent, canonicalContent] = await Promise.all([
-    fs.realpath(nativePath),
-    fs.realpath(canonicalPath),
-    fs.readFile(nativePath),
-    fs.readFile(canonicalPath),
-  ]);
-  if (nativeRealPath !== canonicalRealPath) {
-    throw new Error("shared native Taste skill symlink does not resolve to the canonical runtime skill");
+
+  let canonicalRealPath = "";
+  let canonicalContent = null;
+  try {
+    [canonicalRealPath, canonicalContent] = await Promise.all([
+      fs.realpath(canonicalPath),
+      fs.readFile(canonicalPath),
+    ]);
+  } catch (error) {
+    appendTasteSkillAdvisory(
+      advisories,
+      "digest_unconfirmed",
+      `canonical native Taste skill is unavailable at ${canonicalPath}: ${error?.code || "unreadable"}`
+    );
   }
-  const nativeDigest = sha256(nativeContent);
-  const canonicalDigest = sha256(canonicalContent);
+
+  let nativeRealPath = "";
+  let nativeContent = null;
+  if (linkIsSymbolic) {
+    try {
+      [nativeRealPath, nativeContent] = await Promise.all([
+        fs.realpath(nativePath),
+        fs.readFile(nativePath),
+      ]);
+    } catch (error) {
+      appendTasteSkillAdvisory(
+        advisories,
+        "install_unconfirmed",
+        `shared native Taste skill content is unavailable at ${nativePath}: ${error?.code || "unreadable"}`
+      );
+    }
+  }
+
+  const canonicalTarget = Boolean(
+    nativeRealPath && canonicalRealPath && nativeRealPath === canonicalRealPath
+  );
+  if (!canonicalTarget) {
+    appendTasteSkillAdvisory(
+      advisories,
+      "symlink_target_unconfirmed",
+      "shared native Taste skill symlink does not resolve to the canonical runtime skill"
+    );
+  }
+  const nativeDigest = nativeContent ? sha256(nativeContent) : "";
+  const canonicalDigest = canonicalContent ? sha256(canonicalContent) : "";
+  const nativeFrontmatterValid = Boolean(
+    nativeContent && hasCanonicalTasteFrontmatter(nativeContent)
+  );
+  const canonicalFrontmatterValid = Boolean(
+    canonicalContent && hasCanonicalTasteFrontmatter(canonicalContent)
+  );
   if (
     nativeDigest !== TASTE_SKILL_SHA256
     || canonicalDigest !== TASTE_SKILL_SHA256
-    || !hasCanonicalTasteFrontmatter(nativeContent)
-    || !hasCanonicalTasteFrontmatter(canonicalContent)
+    || !nativeFrontmatterValid
+    || !canonicalFrontmatterValid
   ) {
-    throw new Error(
-      `shared native Taste skill failed canonical verification; expected ${TASTE_SKILL_SHA256}`
+    appendTasteSkillAdvisory(
+      advisories,
+      "digest_unconfirmed",
+      `shared native Taste skill did not match canonical digest/frontmatter ${TASTE_SKILL_SHA256}`
     );
   }
+  const installed = Boolean(
+    linkIsSymbolic
+    && canonicalTarget
+    && nativeDigest === TASTE_SKILL_SHA256
+    && canonicalDigest === TASTE_SKILL_SHA256
+    && nativeFrontmatterValid
+    && canonicalFrontmatterValid
+  );
   return {
     configDir: path.resolve(resolvedNativeDir, "..", ".."),
     receipt: {
       name: TASTE_SKILL_NAME,
-      installed: true,
+      installed,
       expected_sha256: TASTE_SKILL_SHA256,
-      installed_sha256: nativeDigest,
+      installed_sha256: nativeDigest || null,
+      canonical_sha256: canonicalDigest || null,
       source: "shared-runtime-symlink",
       native_scope: "user",
-      canonical_target: true,
+      canonical_target: canonicalTarget,
+      advisory: advisories.length > 0,
+      advisories,
     },
   };
+}
+
+function nativeTasteSkillReceiptAdvisories(receipt) {
+  const record = receipt && typeof receipt === "object" ? receipt : {};
+  const advisories = Array.isArray(record.advisories)
+    ? record.advisories.filter((item) => item && typeof item === "object").map((item) => ({ ...item }))
+    : [];
+  if (record.required !== true) return advisories;
+  if (record.installed !== true) {
+    appendTasteSkillAdvisory(
+      advisories,
+      "install_unconfirmed",
+      `Claude worker did not confirm installation of native skill ${TASTE_SKILL_NAME}.`
+    );
+  }
+  if (record.canonical_target !== true) {
+    appendTasteSkillAdvisory(
+      advisories,
+      "symlink_target_unconfirmed",
+      `Claude worker did not confirm the canonical symlink target for ${TASTE_SKILL_NAME}.`
+    );
+  }
+  if (String(record.installed_sha256 || "").toLowerCase() !== TASTE_SKILL_SHA256) {
+    appendTasteSkillAdvisory(
+      advisories,
+      "digest_unconfirmed",
+      `Claude worker did not confirm the canonical digest for ${TASTE_SKILL_NAME}.`
+    );
+  }
+  if (record.discovery_event !== true || record.discovered !== true) {
+    appendTasteSkillAdvisory(
+      advisories,
+      "sdk_discovery_unconfirmed",
+      `Claude SDK did not confirm discovery of native skill ${TASTE_SKILL_NAME}.`
+    );
+  }
+  if (record.inclusion_event !== true || record.included !== true) {
+    appendTasteSkillAdvisory(
+      advisories,
+      "sdk_inclusion_unconfirmed",
+      `Claude SDK did not confirm inclusion of native skill ${TASTE_SKILL_NAME} from user settings.`
+    );
+  }
+  if (record.native_use !== true) {
+    appendTasteSkillAdvisory(
+      advisories,
+      "sdk_invocation_unconfirmed",
+      `Claude SDK did not confirm invocation of native skill ${TASTE_SKILL_NAME}.`
+    );
+  }
+  if (
+    record.prompt_body_absent !== true
+    || record.prompt_distinctive_markers_absent !== true
+  ) {
+    appendTasteSkillAdvisory(
+      advisories,
+      "prompt_separation_unconfirmed",
+      "Claude SDK receipt did not confirm that native Taste content stayed out of the worker prompt."
+    );
+  }
+  return advisories;
 }
 
 function nativeTasteSkillUseFromSdkMessage(message) {
@@ -1519,6 +1647,9 @@ function buildPrompt(input) {
   const noteRule = normalizedWorkspace === "product/site" || normalizedWorkspace.startsWith("product/site/")
     ? "For product/site work, reflect durable truth in the source itself and your final summary. Do not create helper markdown, request files, verification notes, or scratch docs unless the instruction explicitly asks for them."
     : "If durable business truth changes, write a concise note into an appropriate file in this workspace or a child path.";
+  const tasteRule = isProductSiteWorkspace(normalizedWorkspace)
+    ? "The runtime requests the native design-taste-frontend skill for this session. Use it when available. Installation or Skill-tool telemetry is advisory: if Taste is unavailable or its invocation fails, continue the product task with your best design judgment and do not report BLOCKED solely because of Taste."
+    : "";
   const buildGate = input.allowBash
     ? "Customer-facing product build gate (HARD): before you finish you MUST run `npm run build` and `npm run typecheck` and confirm BOTH exit green. Diagnosing the error is not done; only a green build is done. If you cannot land both green this pass, do NOT report success — your FINAL line MUST start with BLOCKED: followed by the exact remaining build/typecheck error and the file(s) involved."
     : "";
@@ -1529,6 +1660,7 @@ function buildPrompt(input) {
     "The provided current workspace is already your working directory. Write paths relative to it; do not prefix paths with the workspace name again.",
     "",
     `Complete the requested task while preserving unrelated business files. ${noteRule}`,
+    ...(tasteRule ? [tasteRule] : []),
     "",
     "Inspect the relevant files, reason about the task, and use the available tools as needed. Keep private reasoning private; expose only concise tool progress and the final result.",
     "",
@@ -1572,6 +1704,8 @@ async function main() {
     native_use: false,
     native_use_attempts: 0,
     native_use_events: 0,
+    advisory: false,
+    advisories: [],
     model: null,
     usage: null,
   };
@@ -1654,6 +1788,16 @@ async function main() {
     canonicalDir: TASTE_SKILL_CANONICAL_DIR,
   });
   Object.assign(workerSkillReceipt, nativeTasteSkill.receipt);
+  const requestedSkills = nativeTasteSkill.receipt.installed
+    ? [TASTE_SKILL_NAME]
+    : [];
+  for (const advisory of nativeTasteSkill.receipt.advisories || []) {
+    emitProgress({
+      kind: "claude_agent_skill",
+      status: "output",
+      detail: `Native Taste advisory: ${String(advisory?.detail || advisory?.code || "unverified")}`,
+    });
+  }
   if (workerSkillReceipt.installed) {
     emitProgress({
       kind: "claude_agent_skill",
@@ -1683,11 +1827,22 @@ async function main() {
   const pendingTasteSkillUses = new Set();
   const pendingReadUses = new Map();
   const workerPrompt = buildPrompt(input);
-  const canonicalTasteBody = await fs.readFile(
-    path.join(TASTE_SKILL_CANONICAL_DIR, "SKILL.md"),
-    "utf8"
-  );
-  workerSkillReceipt.prompt_body_absent = !workerPrompt.includes(canonicalTasteBody);
+  let canonicalTasteBody = "";
+  try {
+    canonicalTasteBody = await fs.readFile(
+      path.join(TASTE_SKILL_CANONICAL_DIR, "SKILL.md"),
+      "utf8"
+    );
+  } catch (error) {
+    appendTasteSkillAdvisory(
+      workerSkillReceipt.advisories,
+      "digest_unconfirmed",
+      `canonical native Taste prompt body is unavailable: ${error?.code || "unreadable"}`
+    );
+  }
+  workerSkillReceipt.prompt_body_absent = canonicalTasteBody
+    ? !workerPrompt.includes(canonicalTasteBody)
+    : null;
   workerSkillReceipt.prompt_distinctive_markers_absent = TASTE_PROMPT_DISTINCTIVE_MARKERS.every(
     (marker) => !workerPrompt.includes(marker)
   );
@@ -1763,7 +1918,7 @@ async function main() {
             model,
             // Supplying a title disables Claude Code's separate paid title-generation request.
             title: `Takyon ${String(input.business || "business")} worker`,
-            skills: [TASTE_SKILL_NAME],
+            skills: requestedSkills,
             settingSources: ["user"],
             includePartialMessages: true,
             thinking: { type: "adaptive", display: "summarized" },
@@ -1858,12 +2013,6 @@ async function main() {
             detail: `Claude Code discovered native skill ${TASTE_SKILL_NAME}.`,
           });
         }
-        if (tasteSkillRequired && !workerSkillReceipt.discovered) {
-          abortController.abort();
-          throw new Error(
-            `product/site publication refused: Claude Code did not discover native skill ${TASTE_SKILL_NAME}`
-          );
-        }
       }
       const tasteToolUses = nativeTasteSkillToolUsesFromSdkMessage(message);
       if (tasteToolUses.length > 0) {
@@ -1922,30 +2071,6 @@ async function main() {
     if (parentAbortRequested) {
       throw new Error("Claude Agent SDK task cancelled by parent supervisor");
     }
-    if (tasteSkillRequired && !workerSkillReceipt.discovery_event) {
-      throw new Error(
-        `product/site publication refused: Claude Code emitted no native skill discovery receipt for ${TASTE_SKILL_NAME}`
-      );
-    }
-    if (tasteSkillRequired && (!workerSkillReceipt.inclusion_event || !workerSkillReceipt.included)) {
-      throw new Error(
-        `product/site publication refused: Claude Code did not include native skill ${TASTE_SKILL_NAME}`
-      );
-    }
-    if (tasteSkillRequired && !workerSkillReceipt.native_use) {
-      throw new Error(
-        `product/site publication refused: Claude Code did not invoke native skill ${TASTE_SKILL_NAME}`
-      );
-    }
-    if (
-      tasteSkillRequired
-      && (
-        workerSkillReceipt.prompt_body_absent !== true
-        || workerSkillReceipt.prompt_distinctive_markers_absent !== true
-      )
-    ) {
-      throw new Error("product/site publication refused: native Taste content was pasted into the worker prompt");
-    }
   } catch (error) {
     const failFastFailure = failOnApiRetry
       ? failFastApiFailureFromTerminalError(error)
@@ -1955,13 +2080,15 @@ async function main() {
   } finally {
     process.removeListener("SIGTERM", requestParentAbort);
     process.removeListener("SIGINT", requestParentAbort);
-    // The parent validates these digest-bound PNGs with taste_publication_gate.py before it removes
-    // verification scratch and syncs the business workspace. Deleting here would destroy the proof.
+    // The parent removes verification scratch after collecting advisory telemetry. Deleting it here
+    // would race that cleanup and can obscure diagnostics.
     if (workerSkillReceipt) {
       workerSkillReceipt.duration_ms = Math.max(0, Date.now() - workerSkillStartedAt);
       workerSkillReceipt.usage = finalUsage;
       workerSkillReceipt.actual_models = [...actualModels];
       workerSkillReceipt.actual_model = actualModels.size === 1 ? [...actualModels][0] : null;
+      workerSkillReceipt.advisories = nativeTasteSkillReceiptAdvisories(workerSkillReceipt);
+      workerSkillReceipt.advisory = workerSkillReceipt.advisories.length > 0;
     }
   }
 
@@ -1987,6 +2114,7 @@ export {
   createTastePublicationState,
   createSiteImageMcpServer,
   loadTastePublicationContract,
+  nativeTasteSkillReceiptAdvisories,
   nativeTasteSkillUseFromSdkMessage,
   progressEventFromSdkMessage,
   renderTasteLandingPreflight,
