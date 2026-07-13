@@ -2188,6 +2188,36 @@ def test_scoped_product_creation_language_routes_to_current_business_agent(monke
     assert "apply to this business and must use its product workflow" in captured["message"]
 
 
+def test_scoped_resume_language_routes_to_agent_not_control_command(monkeypatch):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+    captured: dict[str, str] = {}
+
+    def fake_run_agent(message, **_kwargs):  # noqa: ANN001
+        captured["message"] = message
+        return "resuming work"
+
+    monkeypatch.setattr(cli, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        cli,
+        "run_takyon_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("natural resume language must not reach the control command")
+        ),
+    )
+
+    output, business = cli._handle_shell_line(
+        "Resume the preserved blocked product source",
+        current_business="visitbrief0713e",
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert output == "resuming work"
+    assert business == "visitbrief0713e"
+    assert "Resume the preserved blocked product source" in captured["message"]
+
+
 def test_explicit_create_command_is_rejected_inside_business_scope(monkeypatch):
     monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
 

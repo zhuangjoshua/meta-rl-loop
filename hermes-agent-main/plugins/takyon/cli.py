@@ -4208,6 +4208,18 @@ def _command_with_current_business(tokens: list[str], current_business: str | No
     return tokens
 
 
+def _bare_control_command_is_unambiguous(
+    tokens: list[str], current_business: str | None
+) -> bool:
+    """Keep ordinary prose beginning with pause/resume/kill on the CEO chat path."""
+    if not tokens or tokens[0].lower() not in {"pause", "resume", "kill"}:
+        return True
+    if len(tokens) == 1:
+        return current_business is not None
+    target = tokens[1].lower()
+    return target == "global" or target == "business" or target.startswith("business:")
+
+
 def _looks_like_slug(value: str) -> bool:
     try:
         _slugify(value)
@@ -4643,7 +4655,12 @@ def _handle_shell_line(
             raw_hermes=raw_hermes,
         ), current_business
 
-    if command in _local_command_names() and command != "ceo" and not bare_create_language:
+    if (
+        command in _local_command_names()
+        and command != "ceo"
+        and not bare_create_language
+        and (is_slash or _bare_control_command_is_unambiguous(tokens, current_business))
+    ):
         normalized = _command_with_current_business(tokens, current_business)
         result = run_takyon_command(
             normalized,
