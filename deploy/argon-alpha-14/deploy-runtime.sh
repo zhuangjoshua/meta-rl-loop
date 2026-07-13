@@ -42,6 +42,7 @@ TAKYON_SMOKE_MAX_TIME="${TAKYON_SMOKE_MAX_TIME:-10}"
 TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS="${TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS:-900}"
 TAKYON_DEPLOY_DRAIN_POLL_SECONDS="${TAKYON_DEPLOY_DRAIN_POLL_SECONDS:-5}"
 TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS="${TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS:-1800}"
+TAKYON_DEPLOY_SERVICE_READY_TIMEOUT_SECONDS="${TAKYON_DEPLOY_SERVICE_READY_TIMEOUT_SECONDS:-60}"
 TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-takyon/claude-worker:node20-chromium-v1}"
 TAKYON_REQUIRE_XURL_AUTH="${TAKYON_REQUIRE_XURL_AUTH:-0}"
 TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
@@ -184,7 +185,8 @@ fi
 for numeric_setting in \
   TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS \
   TAKYON_DEPLOY_DRAIN_POLL_SECONDS \
-  TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS; do
+  TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS \
+  TAKYON_DEPLOY_SERVICE_READY_TIMEOUT_SECONDS; do
   numeric_value="${!numeric_setting}"
   if ! [[ "$numeric_value" =~ ^[0-9]+$ ]] || (( numeric_value < 1 )); then
     echo "$numeric_setting must be a positive integer" >&2
@@ -645,6 +647,155 @@ preflight_remote_staged_runtime() {
       bash -s" < "$PREFLIGHT_STAGED_RUNTIME_SCRIPT"
 }
 
+OPERATOR_SERVICE_ENV_PINS=(
+  TAKYON_STRICT_MODEL_ROLES=1
+  TAKYON_MODEL=gpt-5.5
+  TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro
+  ANTHROPIC_MODEL=deepseek-v4-pro
+  ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro
+  ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro
+  ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro
+  CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro
+)
+
+wait_for_remote_service_env() {
+  local unit="$1"
+  local health_url="$2"
+  shift 2
+  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+    "$TAKYON_VPS_HOST" bash -s -- \
+    "$unit" "$TAKYON_DEPLOY_SERVICE_READY_TIMEOUT_SECONDS" "$health_url" "$@" <<'REMOTE_SERVICE_READY'
+set -euo pipefail
+unit="$1"
+timeout_seconds="$2"
+health_url="$3"
+shift 3
+if [[ "$health_url" == "-" ]]; then
+  health_url=''
+fi
+deadline=$((SECONDS + timeout_seconds))
+ready=0
+stable_pid=''
+stable_probes=0
+env_candidate_pid=''
+env_missing_probes=0
+pid=0
+fatal_reason=''
+last_probe_reason='service has not started'
+
+while (( SECONDS < deadline )); do
+  probe_ok=1
+  if systemctl is-failed --quiet "$unit"; then
+    fatal_reason="$unit entered failed state"
+    break
+  fi
+  if ! systemctl is-active --quiet "$unit"; then
+    probe_ok=0
+    last_probe_reason='service is not active'
+    env_candidate_pid=''
+    env_missing_probes=0
+  fi
+  pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)"
+  if ! [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/environ" ]]; then
+    probe_ok=0
+    last_probe_reason='MainPID environment is not readable yet'
+    env_candidate_pid=''
+    env_missing_probes=0
+  fi
+  if [[ "$probe_ok" == 1 ]]; then
+    for expected in "$@"; do
+      if ! grep -Fzqx -- "$expected" "/proc/$pid/environ" 2>/dev/null; then
+        current_pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)"
+        if [[ "$current_pid" == "$pid" && -r "/proc/$pid/environ" ]]; then
+          probe_ok=0
+          last_probe_reason="process environment is not installed yet: $expected"
+          if [[ "$pid" == "$env_candidate_pid" ]]; then
+            env_missing_probes=$((env_missing_probes + 1))
+          else
+            env_candidate_pid="$pid"
+            env_missing_probes=1
+          fi
+          if (( env_missing_probes >= 3 )); then
+            fatal_reason="missing $unit process invariant after exec grace: $expected"
+          fi
+        else
+          probe_ok=0
+          last_probe_reason='MainPID changed during environment verification'
+          env_candidate_pid=''
+          env_missing_probes=0
+        fi
+        break
+      fi
+    done
+  fi
+  if [[ "$probe_ok" == 1 ]]; then
+    env_candidate_pid=''
+    env_missing_probes=0
+  fi
+  if [[ -z "$fatal_reason" && "$probe_ok" == 1 ]]; then
+    if grep -zEq '^(TAKYON_MIGRATION_DATABASE_URL|MIGRATION_DATABASE_URL)=' \
+        "/proc/$pid/environ" 2>/dev/null; then
+      fatal_reason="migration credential present in $unit process environment"
+    else
+      grep_status=$?
+      if [[ "$grep_status" != 1 ]]; then
+        probe_ok=0
+        last_probe_reason='MainPID environment changed during forbidden-key verification'
+      fi
+    fi
+  fi
+  if [[ -n "$fatal_reason" ]]; then
+    break
+  fi
+  if [[ "$probe_ok" == 1 && -n "$health_url" ]] \
+      && ! curl -fsS --connect-timeout 2 --max-time 3 "$health_url" >/dev/null 2>&1; then
+    probe_ok=0
+    last_probe_reason="health endpoint is not ready: $health_url"
+  fi
+
+  if [[ "$probe_ok" == 1 ]]; then
+    if [[ "$pid" == "$stable_pid" ]]; then
+      stable_probes=$((stable_probes + 1))
+    else
+      stable_pid="$pid"
+      stable_probes=1
+    fi
+    if (( stable_probes >= 2 )); then
+      ready=1
+      break
+    fi
+  else
+    stable_pid=''
+    stable_probes=0
+  fi
+  sleep 1
+done
+
+if [[ "$ready" != 1 ]]; then
+  echo "${fatal_reason:-$unit did not reach stable verified readiness: $last_probe_reason}" >&2
+  systemctl show "$unit" -p ActiveState -p SubState -p MainPID >&2 || true
+  if [[ -n "$health_url" ]]; then
+    health_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+      --connect-timeout 2 --max-time 3 "$health_url" 2>/dev/null || true)"
+    echo "$unit health status: ${health_status:-unreachable} ($health_url)" >&2
+  fi
+  pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/environ" ]]; then
+    for expected in "$@"; do
+      grep -Fzqx -- "$expected" "/proc/$pid/environ" 2>/dev/null \
+        || echo "missing $unit process invariant: $expected" >&2
+    done
+    if grep -zEq '^(TAKYON_MIGRATION_DATABASE_URL|MIGRATION_DATABASE_URL)=' \
+        "/proc/$pid/environ" 2>/dev/null; then
+      echo "migration credential present in $unit process environment" >&2
+    fi
+  fi
+  journalctl -u "$unit" --since '-2 minutes' --no-pager -n 80 >&2 || true
+  exit 1
+fi
+REMOTE_SERVICE_READY
+}
+
 preflight_remote_staged_runtime
 wait_for_remote_runtime_idle
 
@@ -724,31 +875,18 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   systemctl restart takyon-docker-broker.service
   systemctl is-active --quiet takyon-docker-broker.service
   systemctl restart takyon-dashboard.service
-  systemctl is-active --quiet takyon-dashboard.service
   if grep -Eq '^[[:space:]]*(export[[:space:]]+)?(TAKYON_MIGRATION_DATABASE_URL|MIGRATION_DATABASE_URL)=' \
       /opt/takyon/.takyon/.env /opt/takyon/secrets/.env 2>/dev/null; then
     echo 'migration credential remains in a service-readable env file' >&2
     exit 1
   fi
   test \"\$(stat -c '%u:%g:%a' /root/.config/takyon/migration)\" = '0:0:700'
-  test \"\$(stat -c '%u:%g:%a' /root/.config/takyon/migration/database-url)\" = '0:0:600'
-  for unit in takyon-dashboard.service; do
-    pid=\$(systemctl show -p MainPID --value "\$unit")
-    [ "\$pid" != 0 ]
-    process_env=\$(tr '\\000' '\\n' < "/proc/\$pid/environ")
-    grep -Fx -- 'TAKYON_STRICT_MODEL_ROLES=1' <<<"\$process_env" >/dev/null
-    grep -Fx -- 'TAKYON_MODEL=gpt-5.5' <<<"\$process_env" >/dev/null
-    grep -Fx -- 'TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
-    grep -Fx -- 'ANTHROPIC_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
-    grep -Fx -- 'ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
-    grep -Fx -- 'ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
-    grep -Fx -- 'ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
-    grep -Fx -- 'CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
-    if grep -Eq '^(TAKYON_MIGRATION_DATABASE_URL|MIGRATION_DATABASE_URL)=' <<<"\$process_env"; then
-      echo "migration credential present in \$unit process environment" >&2
-      exit 1
-    fi
-  done"
+  test \"\$(stat -c '%u:%g:%a' /root/.config/takyon/migration/database-url)\" = '0:0:600'"
+
+wait_for_remote_service_env \
+  takyon-dashboard.service \
+  http://127.0.0.1:9119/healthz \
+  "${OPERATOR_SERVICE_ENV_PINS[@]}"
 
 if [[ "$TAKYON_APPLY_CADDY" == "1" ]]; then
   TAKYON_VPS_HOST="$TAKYON_VPS_HOST" TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
@@ -790,7 +928,7 @@ for attempt in {1..12}; do
   if curl -fsS -o /dev/null \
     --connect-timeout "$TAKYON_SMOKE_CONNECT_TIMEOUT" \
     --max-time "$TAKYON_SMOKE_MAX_TIME" \
-    "$TAKYON_SMOKE_HOST" >/dev/null; then
+    "$TAKYON_SMOKE_HOST" >/dev/null 2>&1; then
     operator_smoke_succeeded=1
     break
   else
@@ -820,26 +958,13 @@ fi
 # restore the previous release fence because no target worker has been allowed to attempt a job.
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
-  if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
-    systemctl enable takyon-worker.service >/dev/null
-    systemctl restart takyon-worker.service
-    systemctl is-active --quiet takyon-worker.service
-    pid=\$(systemctl show -p MainPID --value takyon-worker.service)
-    [ \"\$pid\" != 0 ]
-    process_env=\$(tr '\\000' '\\n' < \"/proc/\$pid/environ\")
-    grep -Fx -- 'TAKYON_STRICT_MODEL_ROLES=1' <<<\"\$process_env\" >/dev/null
-    grep -Fx -- 'TAKYON_MODEL=gpt-5.5' <<<\"\$process_env\" >/dev/null
-    grep -Fx -- 'TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
-    grep -Fx -- 'ANTHROPIC_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
-    grep -Fx -- 'ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
-    grep -Fx -- 'ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
-    grep -Fx -- 'ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
-    grep -Fx -- 'CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro' <<<\"\$process_env\" >/dev/null
-    if grep -Eq '^(TAKYON_MIGRATION_DATABASE_URL|MIGRATION_DATABASE_URL)=' <<<\"\$process_env\"; then
-      echo 'migration credential present in takyon-worker.service process environment' >&2
-      exit 1
-    fi
-  fi"
+  systemctl enable takyon-worker.service >/dev/null
+  systemctl restart takyon-worker.service"
+
+wait_for_remote_service_env \
+  takyon-worker.service \
+  - \
+  "${OPERATOR_SERVICE_ENV_PINS[@]}"
 
 operator_runtime_activation_started=0
 operator_services_activated=1

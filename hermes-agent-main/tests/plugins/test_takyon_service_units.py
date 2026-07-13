@@ -459,6 +459,39 @@ def test_operator_deploy_smokes_dashboard_before_opening_target_worker_queue():
     assert "systemctl restart takyon-worker.service" not in pre_smoke_activation
 
 
+def test_operator_deploy_waits_for_stable_verified_services_before_commit():
+    src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
+    helper = src.split("wait_for_remote_service_env() {", 1)[1].split(
+        "\npreflight_remote_staged_runtime\n", 1
+    )[0]
+
+    assert "TAKYON_DEPLOY_SERVICE_READY_TIMEOUT_SECONDS" in src
+    assert ":-60" in src
+    assert 'systemctl is-failed --quiet "$unit"' in helper
+    assert 'if [[ "$pid" == "$stable_pid" ]]' in helper
+    assert "stable_probes >= 2" in helper
+    assert "env_missing_probes >= 3" in helper
+    assert 'grep -Fzqx -- "$expected" "/proc/$pid/environ"' in helper
+    assert "grep -zEq '^(TAKYON_MIGRATION_DATABASE_URL|MIGRATION_DATABASE_URL)='" in helper
+    assert 'fatal_reason="missing $unit process invariant after exec grace: $expected"' in helper
+    assert 'journalctl -u "$unit"' in helper
+
+    source_activate = src.index("\ntakyon_activate_staged_runtime")
+    dashboard_restart = src.index("systemctl restart takyon-dashboard.service", source_activate)
+    dashboard_wait = src.index(
+        "\nwait_for_remote_service_env \\\n  takyon-dashboard.service", dashboard_restart
+    )
+    public_smoke = src.index("\noperator_smoke_succeeded=0", dashboard_wait)
+    worker_restart = src.index("systemctl restart takyon-worker.service", public_smoke)
+    worker_wait = src.index(
+        "\nwait_for_remote_service_env \\\n  takyon-worker.service", worker_restart
+    )
+    activated = src.index("\noperator_services_activated=1", worker_wait)
+
+    assert dashboard_restart < dashboard_wait < public_smoke
+    assert public_smoke < worker_restart < worker_wait < activated
+
+
 def test_operator_bootstrap_remote_shell_contains_no_local_command_substitutions():
     src = (ROOT / "deploy/argon-alpha-14/bootstrap-host.sh").read_text()
     remote = src.split('ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail', 1)[1].split(
