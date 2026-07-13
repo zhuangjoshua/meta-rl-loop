@@ -2710,7 +2710,6 @@ def test_claude_agent_task_registers_bounded_direct_chromium_taste_preflight():
     assert '"--strictPort"' in text
     assert 'const TASTE_PREFLIGHT_CHROMIUM = "/usr/bin/chromium";' in text
     assert "TASTE_PREFLIGHT_CHROMIUM," in text
-    assert text.count('"--force-prefers-reduced-motion"') == 1
     assert "`--screenshot=${outputPath}`" in text
     assert 'spawn("agent-browser"' not in text
 

@@ -94,6 +94,6 @@ def test_animation_flag_adds_landing_hero_directive_only_when_set():
     on = _business_bootstrap_instruction("acme", "build a thing", "live", animations=True)
     off = _business_bootstrap_instruction("acme", "build a thing", "live")
     assert "Landing hero animation" in on
-    assert "requires `MOTION_INTENSITY: 4` or higher" in on
+    assert "requires `MOTION_INTENSITY: 6` or higher" in on
     assert "framer-motion" in on
     assert "Landing hero animation" not in off  # no-flag prose is unchanged

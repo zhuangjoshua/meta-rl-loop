@@ -322,9 +322,6 @@ async function captureTasteViewport({ cwd, url, viewport, outputPath, profileDir
       "--disable-sync",
       "--force-color-profile=srgb",
       "--force-device-scale-factor=1",
-      // Render the stable accessible state.  Motion/IntersectionObserver reveals can otherwise
-      // leave a cold single-use Taste screenshot at opacity zero even though the page is valid.
-      "--force-prefers-reduced-motion",
       "--hide-scrollbars",
       "--metrics-recording-only",
       "--no-default-browser-check",
