@@ -456,6 +456,7 @@ def test_prod_worker_preflight_proves_runtime_checkout_is_docker_bindable():
     assert 'src=$RUNTIME_DIR,dst=/takyon-runtime,readonly' in preflight
     assert "test -d /takyon-runtime/agent" in preflight
     assert "move or create the checkout under a Docker Desktop shared path" in preflight
+    assert 'export TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="$worker_image"' in preflight
 
 
 def test_docker_unshared_checkout_fails_before_worker_start(tmp_path):

@@ -1508,6 +1508,10 @@ require_docker_for_worker() {
   fi
   local tracked_worker_image="takyon/claude-worker:node20-chromium-v1"
   local worker_image="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-$tracked_worker_image}"
+  # The product worker resolves TAKYON_CLAUDE_AGENT_DOCKER_IMAGE before the legacy
+  # TERMINAL_DOCKER_IMAGE. Export the image we just proved so the child worker cannot silently
+  # fall back to an inherited generic image that lacks Chromium and agent-browser.
+  export TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="$worker_image"
   if [[ "$worker_image" == "$tracked_worker_image" ]]; then
     local worker_dockerfile="$ROOT/deploy/argon-alpha-14/takyon-claude-worker.Dockerfile"
     [[ -f "$worker_dockerfile" ]] || die "tracked Claude worker Dockerfile is missing: $worker_dockerfile"
