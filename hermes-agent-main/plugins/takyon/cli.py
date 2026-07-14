@@ -5133,7 +5133,14 @@ def _run_agent_with_meta(
             operator_user_id=resolved_operator_user_id,
             system_prompt=compose_primary_agent_system_prompt(ceo_prompt),
             user_prompt=prompt,
-            enabled_toolsets=["takyon", "takyon-authority", "web", "skills", "todo"],
+            enabled_toolsets=[
+                "takyon",
+                "takyon-authority",
+                "web",
+                "browser",
+                "skills",
+                "todo",
+            ],
             disabled_toolsets=[
                 "cronjob",
                 "messaging",

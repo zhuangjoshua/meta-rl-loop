@@ -447,6 +447,7 @@ def test_run_agent_streams_exact_sdk_deltas_without_reprinting_final(monkeypatch
     ]
     assert captured["completed_messages"] == []
     assert captured["sdk_kwargs"]["mode"] == "interactive"
+    assert "browser" in captured["sdk_kwargs"]["enabled_toolsets"]
     assert "browser" not in captured["sdk_kwargs"]["disabled_toolsets"]
     assert captured["sdk_kwargs"]["effort"] == "medium"
     assert captured["sdk_kwargs"]["max_budget_usd"] == 3
