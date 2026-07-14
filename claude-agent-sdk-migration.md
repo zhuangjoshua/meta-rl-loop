@@ -780,6 +780,8 @@ After the final cleanup revision is deployed, create a genuinely fresh business 
 10. Every paid call is reserved and settled authoritatively exactly once against the real Takyon user, with aggregate invocation spend retained without a second queue settlement.
 11. Session, job, skill-digest, build, publication, spend, and progress receipts are retained as the proof bundle.
 
+Skill invocation is migration acceptance evidence inspected outside the business runtime; it must not be a bootstrap completion predicate, a hard-coded phase-to-skill map, or a repair trigger. Native skill descriptions and their `when to use` language remain the routing surface, while bootstrap prompts may state the methods needed for the requested phase.
+
 After the core product E2E passes, run a separate ordinary operator turn that should route to `takyon-market-research`, then a separate ordinary operator turn that should route to `takyon-x`; X is not part of bootstrap.
 
 If design, product, build, publication, and the other required skill proofs pass and X is the only failure, report exactly `CORE E2E PASS; X skill not working: <exact blocker>`, mark the separate X subtest failed, and leave the core fresh-business design/product E2E green; never fabricate an X receipt or let an unavailable X account erase proof that the rest of the migration works.

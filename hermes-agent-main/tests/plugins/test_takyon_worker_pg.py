@@ -2153,19 +2153,7 @@ def _install_bootstrap_phase_store_stub(monkeypatch) -> None:
             self.current_phase: str | None = "final_workflow_build_publish"
             self.completed_phases: tuple[str, ...] = ()
             self.phase_evidence: dict[str, Any] = {}
-            self.phase_receipts: dict[str, Any] = {
-                "final_workflow_build_publish": [
-                    {
-                        "tool": "__primary_agent_runtime__",
-                        "status": "completed",
-                        "skills_invoked": [
-                            "design-taste-frontend",
-                            "takyon-app-runtime",
-                            "takyon-product",
-                        ],
-                    }
-                ]
-            }
+            self.phase_receipts: dict[str, Any] = {}
             self.phase_attempts: dict[str, Any] = {}
             self.status = "running"
             self._verify_after_turn = False

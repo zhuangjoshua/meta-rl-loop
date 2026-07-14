@@ -45,7 +45,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from . import app_usage, billing, composio_distribution, jobs, wakes
 from .jobs import Job, JobOutcome, JobRunResult
@@ -2314,7 +2314,7 @@ def _bootstrap_phase_authoritative_evidence(
 ) -> Any | None:
     """Validate one phase from durable runtime truth; assistant prose is ignored."""
 
-    from .bootstrap_phases import AuthoritativePhaseEvidence, PHASE_REQUIRED_SKILLS
+    from .bootstrap_phases import AuthoritativePhaseEvidence
 
     slug = str(run.business_slug)
     owner = str(run.owner_user_id)
@@ -2327,30 +2327,6 @@ def _bootstrap_phase_authoritative_evidence(
         return AuthoritativePhaseEvidence(
             "business-row", {"business_slug": slug, "owner_user_id": owner}
         )
-
-    required_skills = PHASE_REQUIRED_SKILLS.get(phase, frozenset())
-    if phase == "mobile" and str(archetype or "").strip().lower() != "mobile_app":
-        required_skills = frozenset()
-    invoked_skills: set[str] = set()
-    for receipt in receipts:
-        if (
-            not isinstance(receipt, Mapping)
-            or receipt.get("tool") != "__primary_agent_runtime__"
-            or receipt.get("status") != "completed"
-        ):
-            continue
-        raw_invoked = receipt.get("skills_invoked")
-        if not isinstance(raw_invoked, Sequence) or isinstance(
-            raw_invoked, (str, bytes, bytearray)
-        ):
-            continue
-        invoked_skills.update(
-            str(skill).strip().split(":", 1)[-1]
-            for skill in raw_invoked
-            if str(skill or "").strip()
-        )
-    if not required_skills <= invoked_skills:
-        return None
 
     root = store._business_root(slug)
     if phase == "brief":
@@ -2433,7 +2409,6 @@ def _bootstrap_phase_authoritative_evidence(
                 "workflow_requested": workflow_requested,
                 "real_http_actions": sorted(_bootstrap_real_http_actions(store, slug)),
                 "live_build_id": str(surface.get("live_build_id") or ""),
-                "required_skills_invoked": sorted(required_skills),
             },
         )
 

@@ -115,19 +115,6 @@ PHASE_MAX_TURNS = {
 }
 
 
-PHASE_REQUIRED_SKILLS: dict[str, frozenset[str]] = {
-    "brief": frozenset({"design-taste-frontend"}),
-    "landing_build_publish": frozenset(
-        {"design-taste-frontend", "takyon-product"}
-    ),
-    "logo": frozenset({"takyon-brand-logo"}),
-    "final_workflow_build_publish": frozenset(
-        {"design-taste-frontend", "takyon-app-runtime", "takyon-product"}
-    ),
-    "mobile": frozenset({"takyon-mobile-app"}),
-}
-
-
 class BootstrapPhaseError(RuntimeError):
     """The durable bootstrap phase contract was violated."""
 
@@ -715,7 +702,6 @@ __all__ = [
     "BootstrapPhaseRun",
     "PHASE_ALLOWED_TOOLS",
     "PHASE_MAX_TURNS",
-    "PHASE_REQUIRED_SKILLS",
     "PostgresBootstrapPhaseStore",
     "bootstrap_phase_idempotency",
     "phase_prompt",

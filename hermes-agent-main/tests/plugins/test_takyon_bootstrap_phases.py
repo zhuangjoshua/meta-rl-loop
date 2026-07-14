@@ -13,7 +13,6 @@ from plugins.takyon.bootstrap_phases import (
     BOOTSTRAP_PHASES,
     BootstrapPhaseError,
     PHASE_ALLOWED_TOOLS,
-    PHASE_REQUIRED_SKILLS,
     PostgresBootstrapPhaseStore,
     phase_prompt,
 )
@@ -247,15 +246,6 @@ def test_phase_prompts_and_toolsets_are_bounded() -> None:
         animations=False,
     )
     assert "design-taste-frontend" in final_prompt
-    assert PHASE_REQUIRED_SKILLS["brief"] == frozenset(
-        {"design-taste-frontend"}
-    )
-    assert PHASE_REQUIRED_SKILLS["landing_build_publish"] == frozenset(
-        {"design-taste-frontend", "takyon-product"}
-    )
-    assert PHASE_REQUIRED_SKILLS["final_workflow_build_publish"] == frozenset(
-        {"design-taste-frontend", "takyon-app-runtime", "takyon-product"}
-    )
     assert "business_invoke_app_action" not in PHASE_ALLOWED_TOOLS[
         "final_workflow_build_publish"
     ]
@@ -330,15 +320,6 @@ Calm, precise, evidence-aware, and operational rather than motivational.
 """,
         encoding="utf-8",
     )
-    run.phase_receipts["brief"] = [
-        {
-            "tool": "__primary_agent_runtime__",
-            "status": "completed",
-            "skills_invoked": [
-                "takyon-approved-skills:design-taste-frontend"
-            ],
-        }
-    ]
     evidence = worker._bootstrap_phase_authoritative_evidence(
         store,
         run,
@@ -350,7 +331,7 @@ Calm, precise, evidence-aware, and operational rather than motivational.
     assert evidence.source == "workspace-artifact"
 
 
-def test_final_product_phase_requires_its_own_completed_taste_invocation(
+def test_final_product_phase_does_not_gate_on_skill_receipts(
     monkeypatch,
 ) -> None:
     class SurfaceStore:
@@ -378,28 +359,6 @@ def test_final_product_phase_requires_its_own_completed_taste_invocation(
         lambda *_args, **_kwargs: {"generate-plan"},
     )
 
-    assert (
-        worker._bootstrap_phase_authoritative_evidence(
-            SurfaceStore(),
-            run,
-            "final_workflow_build_publish",
-            workflow_requested=True,
-            archetype="web_saas",
-        )
-        is None
-    )
-
-    run.phase_receipts["final_workflow_build_publish"] = [
-        {
-            "tool": "__primary_agent_runtime__",
-            "status": "completed",
-            "skills_invoked": [
-                "takyon-approved-skills:design-taste-frontend",
-                "takyon-approved-skills:takyon-app-runtime",
-                "takyon-approved-skills:takyon-product",
-            ],
-        }
-    ]
     evidence = worker._bootstrap_phase_authoritative_evidence(
         SurfaceStore(),
         run,
@@ -408,14 +367,46 @@ def test_final_product_phase_requires_its_own_completed_taste_invocation(
         archetype="web_saas",
     )
     assert evidence is not None
-    assert evidence.details["required_skills_invoked"] == [
-        "design-taste-frontend",
-        "takyon-app-runtime",
-        "takyon-product",
-    ]
+    assert "required_skills_invoked" not in evidence.details
 
 
-def test_failed_sdk_receipt_cannot_satisfy_required_bootstrap_skills(tmp_path) -> None:
+def test_landing_publication_does_not_gate_on_skill_receipts() -> None:
+    class SurfaceStore:
+        def _business_root(self, _slug):
+            return Path(".")
+
+        def _connect(self):
+            return nullcontext(object())
+
+        def _app_surface_contract(self, _conn, _slug):
+            return {
+                "live_build_id": "landing-build",
+                "metadata": {
+                    "takyon_publish": {
+                        "status": "published",
+                        "public_url": "https://acme.coscale.app/",
+                    }
+                },
+            }
+
+    evidence = worker._bootstrap_phase_authoritative_evidence(
+        SurfaceStore(),
+        SimpleNamespace(
+            business_slug="acme",
+            owner_user_id=str(uuid.uuid4()),
+            phase_receipts={"landing_build_publish": []},
+            phase_idempotency={},
+        ),
+        "landing_build_publish",
+        workflow_requested=True,
+        archetype="web_saas",
+    )
+
+    assert evidence is not None
+    assert evidence.source == "live-product-publication"
+
+
+def test_brief_phase_does_not_gate_on_failed_skill_receipt(tmp_path) -> None:
     strategy = tmp_path / "research" / "strategy.md"
     strategy.parent.mkdir(parents=True)
     strategy.write_text(
@@ -440,16 +431,18 @@ def test_failed_sdk_receipt_cannot_satisfy_required_bootstrap_skills(tmp_path) -
         phase_idempotency={},
     )
 
-    assert worker._bootstrap_phase_authoritative_evidence(
+    evidence = worker._bootstrap_phase_authoritative_evidence(
         SimpleNamespace(_business_root=lambda _slug: tmp_path),
         run,
         "brief",
         workflow_requested=True,
         archetype="web_saas",
-    ) is None
+    )
+    assert evidence is not None
+    assert evidence.source == "workspace-artifact"
 
 
-def test_phase_runtime_receipt_persists_verified_native_skill_evidence() -> None:
+def test_phase_runtime_receipt_preserves_native_skill_observability() -> None:
     store, conn, ids = _new_store()
     store.initialize_or_load(**ids)
     conn.row["current_phase"] = "final_workflow_build_publish"
