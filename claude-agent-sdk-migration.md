@@ -913,6 +913,153 @@ The completion report must state, with receipts rather than inference:
 - Hermes reachability and local/production cleanup audit;
 - every remaining failure or uncertainty stated directly.
 
+## Final Implementation Evidence — 2026-07-14
+
+This section records observed evidence, not intended behavior. The implementation revision before
+this report is `b168a69dd5f960ffe2edced5e2eb8c076aaab2e0`; the exact report/deploy revision is recorded by the
+release artifact and the completion response after this document is committed.
+
+### Release and topology
+
+- `origin/main` and `origin/dev` were advanced together through the migration commits; no Git history
+  was rewritten and the dirty canonical checkout at `/Users/Zygote/Downloads/takyon` was not reset,
+  staged, or used as a deployment source.
+- The immutable tracked deploy rail activated Safebox first, then operator, then both subuser replicas.
+- The operator release provides the one read-only 17-skill SDK plugin and no retired nested-worker
+  launcher. The Safebox and both subuser projections now exclude SDK source, approved skills,
+  HANDOFF, native plugin files, SDK launchers, SDK packages, and mutable SDK/skill homes.
+- Both subuser replicas were verified active and healthy on `:9119/healthz`, with neither
+  `TAKYON_OPERATOR_DATABASE_URL` nor `TAKYON_SAFEBOX_OPERATOR_TOKEN` present in either tracked env
+  file. Safebox was verified active and healthy on `10.116.0.2:8000` after its operator-agent
+  material was removed.
+
+### Fresh production CLI proof
+
+The final-cleanup runtime completed a fresh real CLI `/create --live` bootstrap without a stub,
+monkeypatch, direct database edit, queue-state edit, manual source repair, manual publish, or ad hoc
+VPS edit:
+
+| Evidence | Observed result |
+|---|---|
+| Business | `tasteproof-sdk13-20260714` |
+| Bootstrap job / SDK session | `08511b46-fe6d-4d11-a71e-d106f31f2cf1` / same stable UUID |
+| Job result | `completed`, attempt 1, authoritative worker actual cost `562c` |
+| Ordered checkpoints | all nine code-owned phases completed |
+| Native Taste | `Skill` invoked `design-taste-frontend`; its references were read before design |
+| Taste design statement | B2B SaaS for product managers/leaders, confident evidence-driven visual language |
+| Real logo | provider-backed `501x500` RGBA PNG plus receipt and public `/brand-logo.png` |
+| Landing publication | build `423cd7e716cc2b32ec3e0e4aff956c36` |
+| Product publication | build `59a43fd9eeb5900254716d346ce46f5f` |
+| Final publication | build `ff49b2f506b60dfb760cda17fedd6980` |
+| Product workflow | real `actions/synthesize.ts` plus signed-in UI wiring and normalized action schema |
+| Public result | `https://tasteproof-sdk13-20260714.coscale.app/`; `/`, `/app`, and the PNG logo returned HTTP 200 |
+| Placeholder/fallback status | none; deterministic build, typecheck, scaffold, action, and publication checks passed |
+
+The public workflow is structurally built and published through the existing rails. A real paid
+product user did not exist (`users=0`, `paid=0`), so signed-in live action execution was not
+fabricated and remains a separate customer-session acceptance item.
+
+### Native skill integration observed in production
+
+- `design-taste-frontend`: natively invoked in the fresh bootstrap and used for the published UI.
+- `takyon-product`: natively invoked in the preceding post-cleanup fresh bootstrap
+  `proofline-sdk12-20260714`; the same product rail built TasteProof's real action and final publish.
+- `takyon-app-runtime`: natively invoked in a read-only ordinary TasteProof turn; scoped reads and
+  runtime-capability checks succeeded before the invocation's conservative `$5` ceiling stopped the
+  oversized terminal response.
+- `takyon-market-research`: a real ordinary turn searched three current sources and updated
+  `research/strategy.md`; a following bounded turn natively invoked the skill. The old SDK process
+  left a descendant holding output pipes after returning its result; `b168a69d` fixes this by
+  terminating that lingering process group, joining the readers again, and preserving the valid
+  result.
+- `takyon-x`: natively invoked and published through the real provider-backed rail with receipt
+  `metrics/receipts/outreach/20260714T110733Z-x-2076986933738131858.json` and authoritative URL
+  `https://x.com/CoscaleAI/status/2076986933738131858`. The post was not inferred from prose.
+
+### Approved skill inventory
+
+All 17 release skills are discovered from one immutable manifest-owned plugin. Startup validation
+recomputes each digest, rejects count/name/path/frontmatter/mode drift, and denies resource reads
+outside the current HANDOFF mode.
+
+| Native name | Release digest | Production integration evidence |
+|---|---|---|
+| `design-taste-frontend` | `sha256:85a36a0f407ed0eaafa42a5654888ed20f7729139db3e5cf568748835077e90c` | fresh bootstrap + published site |
+| `surface-refresh-audit` | `sha256:8d7a5acf0934c1dd0c1dc1321e7f5e721dc093c831114bdf6049a9b49b1cfd73` | manifest/mode/resource validation |
+| `takyon-app-runtime` | `sha256:58228c769e89fcf00b9feb086d00d30ba9a3829e40a2a454393fbcaa52ff722c` | native ordinary-turn invocation + scoped runtime reads |
+| `takyon-autonomous-seo-geo-operator` | `sha256:9083d47a73a66eba5c8ff3371113e4440c179e826189410fdf6ed4fe5bddf9fc` | manifest/mode/resource validation |
+| `takyon-brand-logo` | `sha256:84301c4107e86d04556876f1cbc9e65210e599f427c5d737dab07a334b7e028e` | real bootstrap logo + receipt |
+| `takyon-business-metrics` | `sha256:ab467959cfca611fc796e66351e0c6610899b3484d7dab288f7db2db772782d4` | manifest/mode/resource validation |
+| `takyon-distribution` | `sha256:c26d64dcc01b82a94418624eefa437d0e1b6bce710b6834c716067338cb0c347` | manifest/mode/resource validation |
+| `takyon-lightreel-seedance-fal-ugc` | `sha256:e52c92d33164624963d97aee4d916aca5cb2cb9b1d51ebc1bec62eef8b76f2d2` | manifest/mode/resource validation; provider path remains fail-closed |
+| `takyon-market-research` | `sha256:a4c4b02ae461094152df6debf18085198dee37cfd509aba551ce410a40b51af3` | real research update + native invocation |
+| `takyon-meta-ads-v2` | `sha256:392224c30203d3eb51af288cf4cb86018d17afcf0dfe3239d3a0e79dfa5813a6` | manifest/mode/resource validation; no campaign spend used for migration proof |
+| `takyon-mobile-app` | `sha256:3a0eeba03a3cfc6369be0b984c1f05b10ad67c892beb75a538e9f4d12704c870` | manifest/mode/resource validation |
+| `takyon-product` | `sha256:93589cb3a4e8a17effea71d576db90f24c124593cb6c3e63d954dd9207e1ea87` | native post-cleanup bootstrap invocation + real publications |
+| `takyon-reddit-ads` | `sha256:2b439e79aacc07cd6c3d6ae74cfd5e2ff70e8cc49f7c34a4775fdc3cdc0bf0e5` | manifest/mode/resource validation; no campaign spend used for migration proof |
+| `takyon-static-ad-creative-generator` | `sha256:1e48d4e5e1e3efb1f4e56d531f56911701e7b11197d3bb55e84511465eab4a0e` | manifest/mode/resource validation; no creative spend used for migration proof |
+| `takyon-x` | `sha256:69ca5cfacbaecc939826341fad54b1f134fb7b258cfa7bff32ff530440e5cc58` | native invocation + provider receipt + live post |
+| `taste-imagegen-web` | `sha256:5942812f773cb5f2486f7dc88801e57a0c0f49b2c4e24d3034297b73d707eb8b` | manifest/mode/resource validation |
+| `ugc-video-ad` | `sha256:3a854c99035110c3a417ae2ec6296961acef6f036b2c0e4beeb97b6d5e88f700` | manifest/mode/resource validation; no creative spend used for migration proof |
+
+No claim is made that manifest validation equals a live paid-provider smoke. Positive, negative, and
+adjacent-intent native model probes for every non-core skill remain unexecuted; the core skills named
+above have actual production invocation evidence. This is the only incomplete item in the full
+17-skill routing matrix.
+
+### Focused verification results
+
+- 208 focused Python tests passed for manifest/HANDOFF enforcement, SDK runtime and sessions,
+  bootstrap phases, worker integration, cron routing, publication preclaims, service units, and wake
+  product bans.
+- 33 Node SDK runtime/entrypoint tests passed, including immutable plugin verification, native Skill
+  exposure, mode enforcement, no subagents, exact resume/compaction, streaming, steering, model pin,
+  broker route, and fail-closed initialization.
+- 191 Safebox/provider/spend tests passed for capability authentication, full-context reservation,
+  exact settlement, failure/retry behavior, and no duplicate charge.
+- 98 backend/product-rail tests passed with 10 environment-gated skips; runtime-feature derivation,
+  action execution/records, subuser rail state, account deletion, and progress behavior remained
+  unchanged.
+- 57 targeted gateway/session/worker tests passed for authenticated compaction/deletion, cancellation,
+  stable scope, worker ownership, and removal of nested-model reachability.
+- 22 immutable deploy/projection tests passed; the Safebox and subuser planes now fail deployment if
+  operator-agent material survives.
+- The process-group cleanup change passed 51 full SDK/runtime integration tests plus 33 Node tests;
+  its focused timeout/stream/cancel set passed 66 tests.
+
+### Backend and authority audit
+
+- Relative to pre-migration revision `a52a1a283994e5cee02a79496626c7b11927332d`, product auth,
+  entitlement, payment, usage, records, and subuser application modules are byte-for-byte unchanged.
+- The only backend authority changes are the intended Safebox operator-SDK model pin and authoritative
+  invocation-budget reservation/settlement path; product-subuser and creative rails retain their
+  existing capability and ledger semantics.
+- The SDK process receives a scoped Safebox capability and broker URL, never a raw DeepSeek key,
+  operator database DSN, Safebox transport token, or subuser authority.
+- The SDK exposes `Skill` plus the exact HANDOFF-resolved MCP intersection and explicitly disables
+  Agent/Task/subagent tools. Workspace paths and business identity are injected and enforced by the
+  parent bridge and server-side tools.
+
+### Hermes cleanup audit
+
+- Takyon operator entrypoints, queue handlers, cron, wake, and dashboard facade now use the one
+  primary SDK runtime; the retired `business_claude_agent_task`, nested worker script, handoff
+  launcher, Hermes skill commands, mutable skill sync, and related environment/service wiring were
+  removed from live reachability.
+- Generic upstream Hermes code remains in the vendored project only where it is outside every Takyon
+  production entrypoint; executable reachability tests prevent it from becoming a Takyon fallback.
+- Local persistent operator state uses the immutable SDK release/plugin and has no mutable
+  `$TAKYON_HOME/skills` activation path. Production operator state follows the same rule; Safebox and
+  both subuser replicas contain no SDK/skill runtime surface.
+
+### Direct remaining uncertainty
+
+The core migration, production bootstrap/product workflow, Taste, app-runtime invocation, research,
+X publish, security boundary, spend authority, session handling, and tracked deployment have real
+evidence. Full completion still requires the 17-skill positive/negative/adjacent native routing
+matrix for the non-core skills and a real paid product-user session for signed-in action execution;
+neither is represented as complete here.
+
 ## Main Migration Difficulty
 
 The hard part is not replacing the Hermes model call with `query()`; it is preserving the orchestration Hermes currently supplies—prompt composition, skill routing, business tools, durable jobs, session continuity, UI events, security boundaries, spend settlement, retries, and completion gates—while changing their ownership so portable methods live in skills and Takyon-specific enforcement lives in policy and code.
