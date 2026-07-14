@@ -729,6 +729,7 @@ def test_subuser_remote_activation_shell_is_syntax_valid(tmp_path):
 def test_deploys_replace_mutable_skills_with_immutable_operator_plugin_only():
     operator = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
     preflight = (ROOT / "deploy/argon-alpha-14/preflight-staged-runtime.sh").read_text()
+    safebox = (ROOT / "deploy/takyon-safebox/deploy-runtime.sh").read_text()
     subuser = (ROOT / "deploy/takyon-subuser/deploy-runtime.sh").read_text()
 
     assert "build_approved_skills_manifest.py" in preflight
@@ -743,6 +744,17 @@ def test_deploys_replace_mutable_skills_with_immutable_operator_plugin_only():
         "systemctl restart takyon-dashboard.service"
     )
     assert "rm -rf '$TAKYON_REMOTE_HOME/skills'" in operator
+
+    safebox_removal = "rm -rf '$TAKYON_REMOTE_HOME/skills' '$TAKYON_REMOTE_HOME/claude-agent-sdk' '$TAKYON_REMOTE_HOME/runtime/claude-agent-sdk'"
+    safebox_activation = safebox[safebox.index("activation_started=1") :]
+    assert safebox_removal in safebox_activation
+    assert safebox_activation.index(safebox_removal) < safebox_activation.index(
+        "systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'"
+    )
+    assert '"$TAKYON_DEPLOY_SOURCE_REVISION" safebox' in safebox
+    assert 'verify_safebox_runtime_surface "$TAKYON_REMOTE_STAGED_RUNTIME" 0' in safebox
+    assert 'verify_safebox_runtime_surface "$TAKYON_REMOTE_RUNTIME" 1' in safebox
+    assert "rm -rf '$TAKYON_REMOTE_RUNTIME/node_modules/@anthropic-ai'/claude-agent-sdk*" in safebox
 
     assert "remote_skills_preflight_home" not in subuser
     removal = "rm -rf '$TAKYON_REMOTE_HOME/skills' '$TAKYON_REMOTE_HOME/claude-agent-sdk' '$TAKYON_REMOTE_HOME/runtime/claude-agent-sdk'"

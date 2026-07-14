@@ -10,10 +10,12 @@ REBUILD_VENV_SCRIPT="$ROOT_DIR/deploy/takyon-safebox/rebuild-venv.sh"
 VERIFY_LOCK_SCRIPT="$ROOT_DIR/deploy/takyon-safebox/verify-requirements-lock.sh"
 SUPABASE_AUTH_HELPER="$ROOT_DIR/deploy/shared/supabase-auth-env.sh"
 VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh"
+VERIFY_AGENTLESS_RUNTIME_SURFACE_SCRIPT="$ROOT_DIR/deploy/shared/verify-subuser-runtime-surface.py"
 
 TAKYON_VPS_HOST="${TAKYON_VPS_HOST:-root@67.205.158.170}"
 TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
 TAKYON_REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-/opt/takyon/hermes-agent-main}"
+TAKYON_REMOTE_HOME="${TAKYON_REMOTE_HOME:-/opt/takyon/.takyon}"
 TAKYON_REMOTE_SERVICE_FILE="${TAKYON_REMOTE_SERVICE_FILE:-/etc/systemd/system/takyon-safebox.service}"
 TAKYON_REMOTE_SERVICE_NAME="${TAKYON_REMOTE_SERVICE_NAME:-takyon-safebox.service}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
@@ -96,6 +98,11 @@ if [[ ! -f "$VALIDATE_AUTHORITY_ENV_SCRIPT" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$VERIFY_AGENTLESS_RUNTIME_SURFACE_SCRIPT" ]]; then
+  echo "non-operator runtime verifier not found: $VERIFY_AGENTLESS_RUNTIME_SURFACE_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -x "$SUPABASE_AUTH_HELPER" ]]; then
   echo "supabase auth helper not found or not executable: $SUPABASE_AUTH_HELPER" >&2
   exit 1
@@ -144,8 +151,18 @@ cleanup_incomplete_safebox_stage() {
 }
 trap cleanup_incomplete_safebox_stage EXIT
 
+verify_safebox_runtime_surface() {
+  local runtime_root="$1"
+  local verify_home="${2:-0}"
+  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+    "python3 - '$runtime_root' '$TAKYON_REMOTE_HOME' '$verify_home'" \
+    < "$VERIFY_AGENTLESS_RUNTIME_SURFACE_SCRIPT"
+}
+
 takyon_stage_runtime_release \
-  "$DEPLOY_RUNTIME_DIR" "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" "$TAKYON_DEPLOY_SOURCE_REVISION"
+  "$DEPLOY_RUNTIME_DIR" "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" "$TAKYON_DEPLOY_SOURCE_REVISION" safebox
+
+verify_safebox_runtime_surface "$TAKYON_REMOTE_STAGED_RUNTIME" 0
 
 remote_service_candidate="$TAKYON_REMOTE_RELEASE_META/candidates/takyon-safebox.service"
 remote_service_backup="$TAKYON_REMOTE_RELEASE_META/backups/takyon-safebox.service"
@@ -266,6 +283,9 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
 takyon_activate_staged_runtime "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" "$TAKYON_DEPLOY_SOURCE_REVISION"
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
+  rm -rf '$TAKYON_REMOTE_HOME/skills' '$TAKYON_REMOTE_HOME/claude-agent-sdk' '$TAKYON_REMOTE_HOME/runtime/claude-agent-sdk'
+  rm -rf '$TAKYON_REMOTE_RUNTIME/node_modules/@anthropic-ai'/claude-agent-sdk*
+  rm -f '$TAKYON_REMOTE_RUNTIME/node_modules/.bin'/claude*
   systemctl daemon-reload
   systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'
   systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME'
@@ -289,6 +309,7 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   [[ \"\$ready\" == 1 ]]
   curl -fsS http://10.116.0.2:8000/healthz >/dev/null
   test \"\$(readlink -f /opt/takyon/venvs/safebox-current)\" = '$remote_venv_candidate'"
+verify_safebox_runtime_surface "$TAKYON_REMOTE_RUNTIME" 1
 activation_started=0
 trap - EXIT
 takyon_finalize_runtime_release "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"

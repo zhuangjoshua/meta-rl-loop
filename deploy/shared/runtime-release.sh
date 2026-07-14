@@ -35,8 +35,8 @@ takyon_stage_runtime_release() {
 
   case "$release_profile" in
     full) ;;
-    subuser)
-      # The product-serving plane receives the shared backend runtime, never the operator-agent
+    safebox|subuser)
+      # Non-operator planes receive the shared backend runtime, never the operator-agent
       # implementation or its approved skill material. These paths are absent from the staged tree,
       # so activation's --delete also removes any legacy live copies.
       profile_rsync_filters+=(
