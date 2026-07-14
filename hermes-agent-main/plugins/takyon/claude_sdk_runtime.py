@@ -33,6 +33,7 @@ from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 
 SDK_TOOL_BRIDGE_FD_ENV = "TAKYON_SDK_TOOL_BRIDGE_FD"
+SDK_SESSION_BRIDGE_FD_ENV = "TAKYON_SDK_SESSION_BRIDGE_FD"
 SDK_PROGRESS_PREFIX = "TAKYON_SDK_EVENT "
 SDK_SESSION_NAMESPACE = uuid.UUID("c284fcec-f3d0-4a85-ae8f-eb38b68a2b0d")
 SDK_MAX_STDOUT_BYTES = 4 * 1024 * 1024
@@ -1465,16 +1466,38 @@ def run_primary_sdk_subprocess(
         if callable(on_tool_complete):
             on_tool_complete(tool_use_id, name, args, result)
 
-    bridge = ScopedToolBridge(
+    tool_bridge = ScopedToolBridge(
         tool_definitions=tool_definitions,
         scope=scope,
         on_tool_start=tool_started,
         on_tool_complete=tool_completed,
-        session_store=session_store,
         denied_write_paths=mode_policy.denied_write_paths,
         skill_resource_reader=skill_resource_reader,
-    ).start()
-    env[SDK_TOOL_BRIDGE_FD_ENV] = str(bridge.child_fd)
+    )
+    try:
+        session_bridge = ScopedToolBridge(
+            tool_definitions=[],
+            scope=scope,
+            session_store=session_store,
+        )
+    except BaseException:
+        tool_bridge.close()
+        raise
+    try:
+        tool_bridge.start()
+        session_bridge.start()
+    except BaseException:
+        session_bridge.close()
+        tool_bridge.close()
+        raise
+    if tool_bridge.child_fd == session_bridge.child_fd:
+        session_bridge.close()
+        tool_bridge.close()
+        raise ClaudeSdkRuntimeError(
+            "tool and SessionStore bridges must use distinct descriptors"
+        )
+    env[SDK_TOOL_BRIDGE_FD_ENV] = str(tool_bridge.child_fd)
+    env[SDK_SESSION_BRIDGE_FD_ENV] = str(session_bridge.child_fd)
     process: subprocess.Popen[str] | None = None
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
@@ -1501,10 +1524,11 @@ def run_primary_sdk_subprocess(
             encoding="utf-8",
             errors="replace",
             env=env,
-            pass_fds=(bridge.child_fd,),
+            pass_fds=(tool_bridge.child_fd, session_bridge.child_fd),
             start_new_session=True,
         )
-        bridge.close_child_in_parent()
+        tool_bridge.close_child_in_parent()
+        session_bridge.close_child_in_parent()
         if process.stdin is None or process.stdout is None or process.stderr is None:
             raise ClaudeSdkRuntimeError(
                 "primary SDK subprocess pipes were not created"
@@ -1714,7 +1738,8 @@ def run_primary_sdk_subprocess(
                 process.stdin.close()
             except OSError:
                 pass
-        bridge.close()
+        session_bridge.close()
+        tool_bridge.close()
 
 
 __all__ = [
@@ -1724,6 +1749,7 @@ __all__ = [
     "LEGACY_OR_DELEGATING_TOOLS",
     "SDK_GLOBAL_OPERATOR_TOOLS",
     "SDK_PROGRESS_PREFIX",
+    "SDK_SESSION_BRIDGE_FD_ENV",
     "SDK_TOOL_BRIDGE_FD_ENV",
     "SdkModeToolPolicy",
     "ScopedToolBridge",

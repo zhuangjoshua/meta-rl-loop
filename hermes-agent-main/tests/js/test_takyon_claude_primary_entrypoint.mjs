@@ -75,6 +75,38 @@ test("entrypoint request is exact, bounded, and requires one stable session", ()
   );
 });
 
+test("entrypoint refuses to multiplex tools and durable sessions on one socket", async () => {
+  const sharedSocket = new ReplyingBridgeSocket(() => ({ appended: true }));
+  await assert.rejects(
+    runPrimaryEntrypoint(request(), {
+      toolSocket: sharedSocket,
+      sessionSocket: sharedSocket,
+      sdkModule: {},
+      zodModule: { z: {} },
+      sourceEnv: {},
+      runTurn: async () => assert.fail("turn must not start"),
+    }),
+    (error) => error.code === "bridge_configuration" && /distinct sockets/.test(error.message)
+  );
+  assert.equal(sharedSocket.destroyed, true);
+});
+
+test("entrypoint closes the tool socket when session socket acquisition fails", async () => {
+  const toolSocket = new ReplyingBridgeSocket(() => ({ success: true }));
+  await assert.rejects(
+    runPrimaryEntrypoint(request(), {
+      toolSocket,
+      sdkModule: {},
+      zodModule: { z: {} },
+      sourceEnv: {},
+      runTurn: async () => assert.fail("turn must not start"),
+    }),
+    (error) => error.code === "bridge_configuration"
+      && /TAKYON_SDK_SESSION_BRIDGE_FD/.test(error.message)
+  );
+  assert.equal(toolSocket.destroyed, true);
+});
+
 test("manual compaction request is canonical and requires a resumed session", () => {
   const resumeSessionId = randomUUID();
   const parsed = validatePrimaryEntrypointRequest(request({
@@ -180,12 +212,17 @@ test("dynamic MCP tools invoke only the private bridge with converted schemas", 
 
 test("entrypoint always wires eager durable sessions and Skill-only exact MCP tools", async () => {
   const sessionId = randomUUID();
-  const bridgeCalls = [];
-  const socket = new ReplyingBridgeSocket((message) => {
-    bridgeCalls.push(message);
+  const toolBridgeCalls = [];
+  const sessionBridgeCalls = [];
+  const toolSocket = new ReplyingBridgeSocket((message) => {
+    toolBridgeCalls.push(message);
+    assert.equal(message.type, "tool");
+    return JSON.stringify({ success: true });
+  });
+  const sessionSocket = new ReplyingBridgeSocket((message) => {
+    sessionBridgeCalls.push(message);
     if (message.type === "session_load") return [{ type: "user", uuid: "u1" }];
     if (message.type === "session_list_subkeys") return [];
-    if (message.type === "tool") return JSON.stringify({ success: true });
     return { appended: true };
   });
   const sdkModule = {
@@ -197,7 +234,8 @@ test("entrypoint always wires eager durable sessions and Skill-only exact MCP to
     },
   };
   const result = await runPrimaryEntrypoint(request({ sessionId }), {
-    socket,
+    toolSocket,
+    sessionSocket,
     sdkModule,
     zodModule: { z: { fromJSONSchema: () => ({ shape: {} }) } },
     sourceEnv: {},
@@ -220,9 +258,11 @@ test("entrypoint always wires eager durable sessions and Skill-only exact MCP to
     },
   });
   assert.equal(result.summary, "done");
-  assert.deepEqual(bridgeCalls.map((call) => call.type), [
+  assert.deepEqual(sessionBridgeCalls.map((call) => call.type), [
     "session_append",
     "session_load",
+  ]);
+  assert.deepEqual(toolBridgeCalls.map((call) => call.type), [
     "tool",
   ]);
 });
@@ -233,7 +273,8 @@ for (const [wireMode, sdkMode] of [
 ]) {
   test(`entrypoint maps ${wireMode} wire mode to ${sdkMode} SDK mode`, async () => {
     const sessionId = randomUUID();
-    const socket = new ReplyingBridgeSocket(() => ({ appended: true }));
+    const toolSocket = new ReplyingBridgeSocket(() => ({ success: true }));
+    const sessionSocket = new ReplyingBridgeSocket(() => ({ appended: true }));
     const sdkModule = {
       tool(name, _description, _shape, handler) {
         return { name, handler };
@@ -244,7 +285,8 @@ for (const [wireMode, sdkMode] of [
     };
 
     const result = await runPrimaryEntrypoint(request({ mode: wireMode, sessionId }), {
-      socket,
+      toolSocket,
+      sessionSocket,
       sdkModule,
       zodModule: { z: { fromJSONSchema: () => ({ shape: {} }) } },
       sourceEnv: {},
@@ -269,7 +311,8 @@ test("entrypoint refuses normalized HANDOFF modes on its task-kind wire boundary
 
 test("manual compaction entrypoint exposes no Skill or MCP tools", async () => {
   const resumeSessionId = randomUUID();
-  const socket = new ReplyingBridgeSocket((message) => {
+  const toolSocket = new ReplyingBridgeSocket(() => ({ success: true }));
+  const sessionSocket = new ReplyingBridgeSocket((message) => {
     if (message.type === "session_load") return [{ type: "user", uuid: "u1" }];
     return { appended: true };
   });
@@ -287,7 +330,8 @@ test("manual compaction entrypoint exposes no Skill or MCP tools", async () => {
     sessionId: "",
     resumeSessionId,
   }), {
-    socket,
+    toolSocket,
+    sessionSocket,
     sdkModule,
     zodModule: { z: {} },
     sourceEnv: {},

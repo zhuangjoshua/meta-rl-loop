@@ -671,6 +671,8 @@ Direct VPS edits, ad hoc `rsync`, local-only proof, hand-patched business files,
 
 - Publish the exact candidate commit to `main` and deploy it through the tracked Mac production rails.
 - Enable the SDK path for a controlled production canary while the rollback flag still exists.
+- Carry SDK tool RPCs and durable `SessionStore` RPCs over separate private, parent-owned sockets: product build/publish calls may legitimately exceed the SDK's fixed 60-second mirror callback limit, so transcript persistence must never queue behind a long tool call.
+- Keep tool calls serialized on their own lane, keep session operations serialized on their own lane, pass neither database credentials nor Safebox authority into Node, and pin cleanup until any in-flight guarded side effect returns.
 - Complete a fresh-business bootstrap, Taste-guided product workflow, publication, progress stream, spend proof, and X attempt through the real production path.
 - Roll back on any core failure; do not hotfix the test business to manufacture a pass.
 
@@ -712,6 +714,7 @@ Direct VPS edits, ad hoc `rsync`, local-only proof, hand-patched business files,
 - Manual `/compact` and `/compress` modify the exact stable scoped SDK session without tools or session-key drift.
 - Session deletion uses the authenticated transport principal and removes both the chat record and its durable SDK transcript without crossing owner/business scope.
 - A bounded worker sweep removes whole expired sessions from abandoned scopes after a fresh age check and leaves active/recent sessions intact.
+- A tool held beyond 60 seconds cannot delay, drop, or reorder an eager durable transcript append; the append must commit and acknowledge while the tool remains in flight.
 - Interactive CLI assistant deltas stream before the final result.
 - Timeout and `Ctrl-C` terminate the detached SDK process group before leases and spend holds are released.
 - Wake emits bounded readable interim chat progress without dropping all assistant progress or spamming token/tool events.

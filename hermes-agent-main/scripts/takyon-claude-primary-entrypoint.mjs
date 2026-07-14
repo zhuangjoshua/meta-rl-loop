@@ -5,7 +5,7 @@
  *
  * stdin is one bounded JSON request. stdout is one final JSON receipt. Progress
  * is emitted only as prefixed JSON on stderr. Takyon tools and the durable
- * SessionStore share one inherited socket owned by the Python parent; this
+ * SessionStore use separate inherited sockets owned by the Python parent; this
  * process receives no database credential, Safebox authority token, shell, host
  * filesystem tool, or model-agent tool.
  */
@@ -25,6 +25,7 @@ import {
 } from "./takyon-claude-primary-runtime.mjs";
 
 const BRIDGE_FD_ENV = "TAKYON_SDK_TOOL_BRIDGE_FD";
+const SESSION_BRIDGE_FD_ENV = "TAKYON_SDK_SESSION_BRIDGE_FD";
 const ZOD_MODULE_PATH_ENV = "TAKYON_CLAUDE_ZOD_MODULE";
 const PROGRESS_PREFIX = "TAKYON_SDK_EVENT ";
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
@@ -332,10 +333,10 @@ export function createBridgeMcpServer({ sdk, z, request, toolDefinitions }) {
   });
 }
 
-function bridgeSocketFromEnvironment(sourceEnv = process.env) {
-  const fdText = cleanString(sourceEnv[BRIDGE_FD_ENV]);
+function bridgeSocketFromEnvironment(envName, sourceEnv = process.env) {
+  const fdText = cleanString(sourceEnv[envName]);
   if (!/^\d+$/.test(fdText) || Number(fdText) < 3) {
-    fail("bridge_configuration", `${BRIDGE_FD_ENV} must name an inherited private descriptor`);
+    fail("bridge_configuration", `${envName} must name an inherited private descriptor`);
   }
   return new net.Socket({ fd: Number(fdText), readable: true, writable: true });
 }
@@ -346,7 +347,8 @@ export async function runPrimaryEntrypoint(
     sourceEnv = process.env,
     sdkModule = null,
     zodModule = null,
-    socket = null,
+    toolSocket = null,
+    sessionSocket = null,
     runTurn = runPrimaryAgentTurn,
     streamingInput = null,
   } = {}
@@ -358,11 +360,32 @@ export async function runPrimaryEntrypoint(
     "@anthropic-ai/claude-agent-sdk",
   );
   const zod = zodModule || await loadConfiguredModule(sourceEnv, ZOD_MODULE_PATH_ENV, "zod");
-  const bridge = createJsonLineBridge(socket || bridgeSocketFromEnvironment(sourceEnv));
-  const expectedSessionId = request.resumeSessionId || request.sessionId;
+  let resolvedToolSocket = null;
+  let resolvedSessionSocket = null;
+  let toolBridge = null;
+  let sessionBridge = null;
   try {
+    const configuredToolFd = cleanString(sourceEnv[BRIDGE_FD_ENV]);
+    const configuredSessionFd = cleanString(sourceEnv[SESSION_BRIDGE_FD_ENV]);
+    if (
+      !toolSocket
+      && !sessionSocket
+      && configuredToolFd
+      && configuredToolFd === configuredSessionFd
+    ) {
+      fail("bridge_configuration", "tool and SessionStore bridges must use distinct descriptors");
+    }
+    resolvedToolSocket = toolSocket || bridgeSocketFromEnvironment(BRIDGE_FD_ENV, sourceEnv);
+    resolvedSessionSocket = sessionSocket
+      || bridgeSocketFromEnvironment(SESSION_BRIDGE_FD_ENV, sourceEnv);
+    if (resolvedToolSocket === resolvedSessionSocket) {
+      fail("bridge_configuration", "tool and SessionStore bridges must use distinct sockets");
+    }
+    toolBridge = createJsonLineBridge(resolvedToolSocket);
+    sessionBridge = createJsonLineBridge(resolvedSessionSocket);
+    const expectedSessionId = request.resumeSessionId || request.sessionId;
     const sessionStore = createBridgeSessionStore({
-      request: bridge.request,
+      request: sessionBridge.request,
       projectKey: request.sessionProjectKey,
       sessionId: expectedSessionId,
     });
@@ -372,7 +395,7 @@ export async function runPrimaryEntrypoint(
       : createBridgeMcpServer({
           sdk,
           z: zod.z,
-          request: bridge.request,
+          request: toolBridge.request,
           toolDefinitions: request.toolDefinitions,
         });
     const qualifiedTools = compactOperation
@@ -411,7 +434,10 @@ export async function runPrimaryEntrypoint(
       ...(streamingInput ? { streamingInput } : {}),
     });
   } finally {
-    bridge.close();
+    sessionBridge?.close();
+    toolBridge?.close();
+    if (!sessionBridge) resolvedSessionSocket?.destroy?.();
+    if (!toolBridge) resolvedToolSocket?.destroy?.();
   }
 }
 

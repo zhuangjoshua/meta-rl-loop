@@ -14,6 +14,7 @@ import pytest
 
 from plugins.takyon.claude_sdk_runtime import (
     ClaudeSdkRuntimeError,
+    InMemorySessionStoreBackend,
     ScopedToolBridge,
     ToolBridgeScope,
     _build_skill_resource_reader,
@@ -475,6 +476,130 @@ def test_bridge_close_pins_until_synchronous_side_effect_returns() -> None:
     assert not closing.is_alive()
 
 
+def test_session_bridge_close_pins_until_inflight_append_returns() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    session_id = str(uuid.uuid4())
+    project_key = "takyon:test:session-close"
+
+    class BlockingSessionStore(InMemorySessionStoreBackend):
+        def append(self, key, entries) -> None:
+            entered.set()
+            assert release.wait(5)
+            super().append(key, entries)
+
+    bridge = ScopedToolBridge(
+        tool_definitions=[],
+        scope=ToolBridgeScope(
+            operator_user_id="user-1",
+            session_id=session_id,
+            session_project_key=project_key,
+        ),
+        session_store=BlockingSessionStore(),
+    ).start()
+    client, _reader, writer = _bridge_client(bridge)
+    writer.write(
+        json.dumps(
+            {
+                "id": "append",
+                "type": "session_append",
+                "key": {"projectKey": project_key, "sessionId": session_id},
+                "entries": [{"type": "assistant", "uuid": "entry-1"}],
+            }
+        )
+        + "\n"
+    )
+    writer.flush()
+    assert entered.wait(2)
+    closing = threading.Thread(target=bridge.close)
+    closing.start()
+    time.sleep(0.05)
+    assert closing.is_alive()
+    release.set()
+    closing.join(2)
+    writer.close()
+    client.close()
+    assert not closing.is_alive()
+
+
+def test_session_bridge_lane_acks_while_tool_lane_is_blocked() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    simulated_append_budget = 0.05
+    session_id = str(uuid.uuid4())
+    project_key = "takyon:test:separate-session-lane"
+    scope = ToolBridgeScope(
+        operator_user_id="user-1",
+        session_id=session_id,
+        session_project_key=project_key,
+    )
+    store = InMemorySessionStoreBackend()
+
+    def dispatch(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        return "done"
+
+    tool_bridge = ScopedToolBridge(
+        tool_definitions=[{"name": "slow_tool", "inputSchema": {"type": "object"}}],
+        scope=scope,
+        dispatcher=dispatch,
+    ).start()
+    session_bridge = ScopedToolBridge(
+        tool_definitions=[],
+        scope=scope,
+        session_store=store,
+    ).start()
+    tool_client, tool_reader, tool_writer = _bridge_client(tool_bridge)
+    session_client, session_reader, session_writer = _bridge_client(session_bridge)
+    try:
+        tool_writer.write(
+            json.dumps(
+                {"id": "slow", "type": "tool", "name": "slow_tool", "args": {}}
+            )
+            + "\n"
+        )
+        tool_writer.flush()
+        assert entered.wait(1)
+        time.sleep(simulated_append_budget * 1.5)
+
+        session_client.settimeout(1)
+        append_started = time.monotonic()
+        session_writer.write(
+            json.dumps(
+                {
+                    "id": "append",
+                    "type": "session_append",
+                    "key": {"projectKey": project_key, "sessionId": session_id},
+                    "entries": [{"type": "assistant", "uuid": "entry-1"}],
+                }
+            )
+            + "\n"
+        )
+        session_writer.flush()
+        append_response = json.loads(session_reader.readline())
+        append_elapsed = time.monotonic() - append_started
+
+        assert append_response["ok"] is True
+        assert append_elapsed < 1
+        assert release.is_set() is False
+        assert store.load(
+            {"projectKey": project_key, "sessionId": session_id}
+        ) == [{"type": "assistant", "uuid": "entry-1"}]
+
+        release.set()
+        tool_client.settimeout(1)
+        assert json.loads(tool_reader.readline())["ok"] is True
+    finally:
+        release.set()
+        for stream in (session_writer, session_reader, tool_writer, tool_reader):
+            stream.close()
+        session_client.close()
+        tool_client.close()
+        session_bridge.close()
+        tool_bridge.close()
+
+
 def _node_runtime(tmp_path, *, sdk_version="0.3.148", zod_version="4.4.3"):
     root = tmp_path / "node-runtime"
     sdk = root / "node_modules" / "@anthropic-ai" / "claude-agent-sdk"
@@ -548,6 +673,94 @@ def test_node_runtime_repo_fallback_is_explicit_and_never_production(
         _primary_sdk_node_runtime(child_path=os.environ["PATH"])
 
 
+def test_second_bridge_constructor_failure_closes_first_bridge(
+    monkeypatch, tmp_path
+) -> None:
+    from plugins.takyon import claude_sdk_runtime as runtime
+
+    policy = runtime.SdkModeToolPolicy(
+        mode="interactive",
+        allowed_skills=("safe-skill",),
+        baseline_tools=("safe_tool",),
+        allowed_tools=("safe_tool",),
+        denied_capabilities=(),
+        denied_tools=(),
+        denied_write_paths=(),
+        handoff_guidance="Use the scoped tool bridge.",
+    )
+    definitions = [{"name": "safe_tool", "inputSchema": {"type": "object"}}]
+    monkeypatch.setattr(
+        runtime,
+        "_primary_sdk_install_paths",
+        lambda: (
+            tmp_path / "entrypoint.mjs",
+            tmp_path / "plugin",
+            tmp_path / "manifest.json",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime, "sdk_tool_definitions", lambda **_kwargs: list(definitions)
+    )
+    monkeypatch.setattr(
+        runtime,
+        "enforce_sdk_mode_tool_policy",
+        lambda **_kwargs: (list(definitions), policy),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_build_skill_resource_reader",
+        lambda **_kwargs: lambda _args: "",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "build_primary_sdk_env",
+        lambda **_kwargs: {
+            "PATH": os.environ.get("PATH", ""),
+            "ANTHROPIC_API_KEY": "scoped-capability",
+            "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_primary_sdk_node_runtime",
+        lambda **_kwargs: ("node", tmp_path / "sdk.mjs", tmp_path / "zod.mjs"),
+    )
+    original_bridge = runtime.ScopedToolBridge
+    first_bridge = None
+    bridge_count = 0
+
+    def construct_bridge(**kwargs):
+        nonlocal bridge_count, first_bridge
+        bridge_count += 1
+        if bridge_count == 2:
+            raise OSError("forced SessionStore bridge constructor failure")
+        first_bridge = original_bridge(**kwargs)
+        return first_bridge
+
+    monkeypatch.setattr(runtime, "ScopedToolBridge", construct_bridge)
+
+    with pytest.raises(OSError, match="forced SessionStore"):
+        runtime.run_primary_sdk_subprocess(
+            business="acme",
+            operator_user_id="operator-1",
+            system_prompt="system",
+            user_prompt="turn",
+            enabled_toolsets=["takyon"],
+            workspace_root=tmp_path,
+            session_id=str(uuid.uuid4()),
+            resume_session=False,
+            session_store=runtime.InMemorySessionStoreBackend(),
+            mode="interactive",
+            epoch="interactive:test",
+            max_turns=2,
+            max_budget_usd=1,
+        )
+
+    assert first_bridge is not None
+    assert first_bridge.child_fd == -1
+    assert first_bridge._parent_socket.fileno() == -1
+
+
 @pytest.mark.parametrize(
     ("handoff_mode", "wire_mode"),
     [("bootstrap", "ceo_bootstrap"), ("wake", "ceo_wake")],
@@ -569,7 +782,8 @@ def test_primary_sdk_subprocess_serializes_task_kind_wire_mode(
             return super().write(value)
 
     class FakeBridge:
-        child_fd = 91
+        def __init__(self, child_fd) -> None:
+            self.child_fd = child_fd
 
         def start(self):
             return self
@@ -605,7 +819,8 @@ def test_primary_sdk_subprocess_serializes_task_kind_wire_mode(
             return 0
 
     process = FakeProcess()
-    bridge = FakeBridge()
+    bridges = iter((FakeBridge(91), FakeBridge(92)))
+    popen_kwargs = {}
     policy = runtime.SdkModeToolPolicy(
         mode=handoff_mode,
         allowed_skills=("safe-skill",),
@@ -655,8 +870,13 @@ def test_primary_sdk_subprocess_serializes_task_kind_wire_mode(
         "_primary_sdk_node_runtime",
         lambda **_kwargs: ("node", tmp_path / "sdk.mjs", tmp_path / "zod.mjs"),
     )
-    monkeypatch.setattr(runtime, "ScopedToolBridge", lambda **_kwargs: bridge)
-    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(runtime, "ScopedToolBridge", lambda **_kwargs: next(bridges))
+
+    def popen(*_args, **kwargs):
+        popen_kwargs.update(kwargs)
+        return process
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", popen)
 
     result = runtime.run_primary_sdk_subprocess(
         business="acme",
@@ -677,6 +897,9 @@ def test_primary_sdk_subprocess_serializes_task_kind_wire_mode(
     request = json.loads(process.stdin.writes[0])
     assert request["mode"] == wire_mode
     assert request["epoch"] == f"{handoff_mode}:phase-1"
+    assert popen_kwargs["pass_fds"] == (91, 92)
+    assert popen_kwargs["env"][runtime.SDK_TOOL_BRIDGE_FD_ENV] == "91"
+    assert popen_kwargs["env"][runtime.SDK_SESSION_BRIDGE_FD_ENV] == "92"
     assert result["summary"] == "done"
 
 
@@ -688,16 +911,18 @@ def test_keyboard_interrupt_terminates_sdk_process_before_bridge_cleanup(
     events: list[str] = []
 
     class FakeBridge:
-        child_fd = 91
+        def __init__(self, name, child_fd) -> None:
+            self.name = name
+            self.child_fd = child_fd
 
         def start(self):
             return self
 
         def close_child_in_parent(self) -> None:
-            events.append("bridge_child_closed")
+            events.append(f"{self.name}_child_closed")
 
         def close(self) -> None:
-            events.append("bridge_closed")
+            events.append(f"{self.name}_closed")
 
     class FakeProcess:
         def __init__(self) -> None:
@@ -711,7 +936,7 @@ def test_keyboard_interrupt_terminates_sdk_process_before_bridge_cleanup(
             return -15 if self.terminated else None
 
     process = FakeProcess()
-    bridge = FakeBridge()
+    bridges = iter((FakeBridge("tool", 91), FakeBridge("session", 92)))
     policy = runtime.SdkModeToolPolicy(
         mode="interactive",
         allowed_skills=("safe-skill",),
@@ -750,7 +975,7 @@ def test_keyboard_interrupt_terminates_sdk_process_before_bridge_cleanup(
         "_primary_sdk_node_runtime",
         lambda **_kwargs: ("node", tmp_path / "sdk.mjs", tmp_path / "zod.mjs"),
     )
-    monkeypatch.setattr(runtime, "ScopedToolBridge", lambda **_kwargs: bridge)
+    monkeypatch.setattr(runtime, "ScopedToolBridge", lambda **_kwargs: next(bridges))
     monkeypatch.setattr(runtime.subprocess, "Popen", lambda *_args, **_kwargs: process)
 
     def terminate(candidate, **_kwargs) -> None:
@@ -778,5 +1003,10 @@ def test_keyboard_interrupt_terminates_sdk_process_before_bridge_cleanup(
             stop_probe=lambda *_args: (_ for _ in ()).throw(KeyboardInterrupt()),
         )
 
-    assert events.index("process_group_terminated") < events.index("bridge_closed")
+    assert events.index("process_group_terminated") < events.index("session_closed")
+    assert events.index("process_group_terminated") < events.index("tool_closed")
+    assert events.count("tool_child_closed") == 1
+    assert events.count("session_child_closed") == 1
+    assert events.count("tool_closed") == 1
+    assert events.count("session_closed") == 1
     assert process.stdin.closed is True
