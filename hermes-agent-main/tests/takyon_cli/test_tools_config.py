@@ -191,7 +191,7 @@ def test_get_platform_tools_expands_composite_when_mixed_with_configurable():
     enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
 
     # Native tools must reappear.
-    for ts in ("terminal", "file", "web", "browser", "memory", "delegation",
+    for ts in ("terminal", "file", "web", "browser", "memory",
                "code_execution", "todo", "session_search", "skills"):
         assert ts in enabled, f"{ts} should be enabled when takyon-cli is listed"
     # User explicitly opted into Spotify — must survive _DEFAULT_OFF_TOOLSETS subtraction.
@@ -464,7 +464,7 @@ def test_save_platform_tools_does_not_preserve_platform_default_toolsets():
         "platform_toolsets": {
             "cli": [
                 "browser", "clarify", "code_execution", "cronjob",
-                "delegation", "file", "takyon-cli",  # <-- the culprit
+                "file", "takyon-cli",  # <-- the culprit
                 "memory", "session_search", "skills", "terminal",
                 "todo", "tts", "vision", "web",
             ]
@@ -474,7 +474,7 @@ def test_save_platform_tools_does_not_preserve_platform_default_toolsets():
     # User unchecks image_gen, homeassistant, moa — keeps the rest
     new_selection = {
         "browser", "clarify", "code_execution", "cronjob",
-        "delegation", "file", "memory", "session_search",
+        "file", "memory", "session_search",
         "skills", "terminal", "todo", "tts", "vision", "web",
     }
 

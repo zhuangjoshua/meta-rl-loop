@@ -47,7 +47,6 @@ TOOL_KIND_MAP: Dict[str, ToolKind] = {
     "browser_back": "execute",
     "browser_get_images": "read",
     # Agent internals
-    "delegate_task": "execute",
     "vision_analyze": "read",
     "image_generate": "execute",
     "text_to_speech": "execute",
@@ -58,7 +57,7 @@ TOOL_KIND_MAP: Dict[str, ToolKind] = {
 
 _POLISHED_TOOLS = {
     # Core operator loop
-    "todo", "memory", "session_search", "delegate_task",
+    "todo", "memory", "session_search",
     # Files / execution
     "read_file", "write_file", "patch", "search_files", "terminal", "process", "execute_code",
     # Skills / web / browser / media
@@ -116,14 +115,6 @@ def build_tool_title(tool_name: str, args: Dict[str, Any]) -> str:
         action = str(args.get("action") or "").strip() or "manage"
         sid = str(args.get("session_id") or "").strip()
         return f"process {action}: {sid}" if sid else f"process {action}"
-    if tool_name == "delegate_task":
-        tasks = args.get("tasks")
-        if isinstance(tasks, list) and tasks:
-            return f"delegate batch ({len(tasks)} tasks)"
-        goal = args.get("goal", "")
-        if goal and len(goal) > 60:
-            goal = goal[:57] + "..."
-        return f"delegate: {goal}" if goal else "delegate task"
     if tool_name == "session_search":
         query = str(args.get("query") or "").strip()
         return f"session search: {query}" if query else "recent sessions"
@@ -560,52 +551,6 @@ def _format_process_result(result: Optional[str], args: Optional[Dict[str, Any]]
     return _truncate_text("\n".join(lines), limit=7000)
 
 
-def _format_delegate_result(result: Optional[str]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return None
-    if data.get("error") and not isinstance(data.get("results"), list):
-        return f"Delegation failed: {data.get('error')}"
-    results = data.get("results")
-    if not isinstance(results, list):
-        return None
-    total = data.get("total_duration_seconds")
-    lines = [f"Delegation results: {len(results)} task{'s' if len(results) != 1 else ''}" + (f" in {total}s" if total is not None else "")]
-    icon = {"completed": "✅", "failed": "✗", "error": "✗", "timeout": "⏱", "interrupted": "⚠"}
-    for item in results:
-        if not isinstance(item, dict):
-            lines.append(f"- {item}")
-            continue
-        idx = item.get("task_index")
-        status = str(item.get("status") or "unknown")
-        model = item.get("model")
-        dur = item.get("duration_seconds")
-        role = item.get("_child_role")
-        header = f"{icon.get(status, '•')} Task {idx + 1 if isinstance(idx, int) else '?'}: {status}"
-        bits = []
-        if model:
-            bits.append(str(model))
-        if role:
-            bits.append(f"role={role}")
-        if dur is not None:
-            bits.append(f"{dur}s")
-        if bits:
-            header += " (" + ", ".join(bits) + ")"
-        lines.extend(["", header])
-        summary = str(item.get("summary") or "").strip()
-        error = str(item.get("error") or "").strip()
-        if summary:
-            lines.append(_truncate_text(summary, limit=1200))
-        if error:
-            lines.append("Error: " + _truncate_text(error, limit=800))
-        trace = item.get("tool_trace")
-        if isinstance(trace, list) and trace:
-            names = [str(t.get("tool") or "?") for t in trace if isinstance(t, dict)]
-            if names:
-                lines.append("Tools: " + ", ".join(names[:12]) + (f" (+{len(names)-12})" if len(names) > 12 else ""))
-    return _truncate_text("\n".join(lines), limit=8000)
-
-
 def _format_session_search_result(result: Optional[str]) -> Optional[str]:
     data = _json_loads_maybe(result)
     if not isinstance(data, dict):
@@ -881,7 +826,6 @@ def _build_polished_completion_content(
         "search_files": lambda: _format_search_files_result(result),
         "execute_code": lambda: _format_execute_code_result(result),
         "process": lambda: _format_process_result(result, function_args),
-        "delegate_task": lambda: _format_delegate_result(result),
         "session_search": lambda: _format_session_search_result(result),
         "memory": lambda: _format_memory_result(result, function_args),
         "skill_view": lambda: _format_skill_view_result(result),
@@ -1243,21 +1187,6 @@ def build_tool_start(
             tool_call_id, title, kind=kind, content=content, locations=locations,
         )
 
-    if tool_name == "delegate_task":
-        tasks = arguments.get("tasks")
-        if isinstance(tasks, list) and tasks:
-            lines = [f"Delegating {len(tasks)} tasks", ""]
-            for i, task in enumerate(tasks[:8], 1):
-                if isinstance(task, dict):
-                    goal = str(task.get("goal") or "").strip()
-                    role = str(task.get("role") or "").strip()
-                    lines.append(f"{i}. " + _truncate_text(goal, limit=160) + (f" ({role})" if role else ""))
-            if len(tasks) > 8:
-                lines.append(f"... {len(tasks) - 8} more")
-            content = [_text("\n".join(lines))]
-        else:
-            goal = str(arguments.get("goal") or "").strip()
-            content = [_text("Delegating task" + (f":\n{_truncate_text(goal, limit=800)}" if goal else ""))]
         return acp.start_tool_call(
             tool_call_id, title, kind=kind, content=content, locations=locations,
         )

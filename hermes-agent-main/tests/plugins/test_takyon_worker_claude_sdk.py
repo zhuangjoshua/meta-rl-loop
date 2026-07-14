@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from plugins.takyon import claude_sdk_runtime, claude_sdk_sessions, core, cost_events, worker
+from toolsets import resolve_toolset
 
 
 def test_worker_runtime_has_no_rollout_selector(monkeypatch) -> None:
@@ -22,6 +23,9 @@ def test_final_cutover_has_one_agent_loop_and_no_nested_model_worker() -> None:
     assert not hasattr(worker, "_run_hermes_ceo_turn")
     assert not hasattr(core, "handle_business_claude_agent_task")
     assert not (project / "scripts" / "takyon-claude-agent-task.mjs").exists()
+    assert not (project / "tools" / "delegate_tool.py").exists()
+    assert "delegate_task" not in resolve_toolset("takyon-cli")
+    assert "delegate_task" not in resolve_toolset("takyon-api-server")
     for relative in (
         "plugins/takyon/cli.py",
         "plugins/takyon/worker.py",

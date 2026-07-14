@@ -91,8 +91,8 @@ def _get_tool_loop():
 def _get_worker_loop():
     """Return a persistent event loop for the current worker thread.
 
-    Each worker thread (e.g., delegate_task's ThreadPoolExecutor threads)
-    gets its own long-lived loop stored in thread-local storage.  This
+    Each worker thread gets its own long-lived loop stored in thread-local
+    storage. This
     prevents the "Event loop is closed" errors that occurred when
     asyncio.run() was used per-call: asyncio.run() creates a loop, runs
     the coroutine, then *closes* the loop — but cached httpx/AsyncOpenAI
@@ -187,8 +187,8 @@ def _run_async(coro):
                     pass
             raise
 
-    # If we're on a worker thread (e.g., parallel tool execution in
-    # delegate_task), use a per-thread persistent loop.  This avoids
+    # If we're on a worker thread (e.g., parallel tool execution), use a
+    # per-thread persistent loop. This avoids
     # contention with the main thread's shared loop while keeping cached
     # httpx/AsyncOpenAI clients bound to a live loop for the thread's
     # lifetime — preventing "Event loop is closed" on GC cleanup.
@@ -519,7 +519,7 @@ def _compute_tool_definitions(
 # because they need agent-level state (TodoStore, MemoryStore, etc.).
 # The registry still holds their schemas; dispatch just returns a stub error
 # so if something slips through, the LLM sees a sensible message.
-_AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task"}
+_AGENT_LOOP_TOOLS = {"todo", "memory", "session_search"}
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
 
 

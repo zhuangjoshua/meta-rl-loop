@@ -3740,11 +3740,6 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "API service tier (OpenAI/Anthropic)",
         "options": ["", "auto", "default", "flex"],
     },
-    "delegation.reasoning_effort": {
-        "type": "select",
-        "description": "Reasoning effort for delegated subagents",
-        "options": ["", "low", "medium", "high"],
-    },
 }
 
 # Categories with fewer fields get merged into "general" to avoid tab sprawl.
@@ -3769,7 +3764,7 @@ _CATEGORY_MERGE: Dict[str, str] = {
 
 # Display order for tabs — unlisted categories sort alphabetically after these.
 _CATEGORY_ORDER = [
-    "general", "agent", "terminal", "display", "delegation",
+    "general", "agent", "terminal", "display",
     "memory", "compression", "security", "browser", "voice",
     "tts", "stt", "logging", "discord", "auxiliary",
 ]

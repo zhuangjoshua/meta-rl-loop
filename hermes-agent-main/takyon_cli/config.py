@@ -1213,50 +1213,6 @@ DEFAULT_CONFIG = {
         "provider": "",
     },
 
-    # Subagent delegation — override the provider:model used by delegate_task
-    # so child agents can run on a different (cheaper/faster) provider and model.
-    # Uses the same runtime provider resolution as CLI/gateway startup, so all
-    # configured providers (OpenRouter, Nous, Z.ai, Kimi, etc.) are supported.
-    "delegation": {
-        "model": "",       # e.g. "google/gemini-3-flash-preview" (empty = inherit parent model)
-        "provider": "",    # e.g. "openrouter" (empty = inherit parent provider + credentials)
-        "base_url": "",    # direct OpenAI-compatible endpoint for subagents
-        "api_key": "",     # API key for delegation.base_url (falls back to OPENAI_API_KEY)
-        "api_mode": "",    # wire protocol for delegation.base_url: "chat_completions",
-                           # "codex_responses", or "anthropic_messages". Empty = auto-detect
-                           # from URL (e.g. /anthropic suffix → anthropic_messages). Set this
-                           # explicitly for non-standard endpoints the heuristic can't detect.
-        # When delegate_task narrows child toolsets explicitly, preserve any
-        # MCP toolsets the parent already has enabled. On by default so
-        # narrowing (e.g. toolsets=["web","browser"]) expresses "I want these
-        # extras" without silently stripping MCP tools the parent already has.
-        # Set to false for strict intersection.
-        "inherit_mcp_toolsets": True,
-        "max_iterations": 50,  # per-subagent iteration cap (each subagent gets its own budget,
-                               # independent of the parent's max_iterations)
-        "child_timeout_seconds": 600,  # wall-clock timeout for each child agent (floor 30s,
-                                       # no ceiling). High-reasoning models on large tasks
-                                       # (e.g. gpt-5.5 xhigh, opus-4.6) need generous budgets;
-                                       # raise if children time out before producing output.
-        "reasoning_effort": "",  # reasoning effort for subagents: "xhigh", "high", "medium",
-                                 # "low", "minimal", "none" (empty = inherit parent's level)
-        "max_concurrent_children": 3,  # max parallel children per batch; floor of 1 enforced, no ceiling
-        # Orchestrator role controls (see tools/delegate_tool.py:_get_max_spawn_depth
-        # and _get_orchestrator_enabled).  Values are clamped to [1, 3] with a
-        # warning log if out of range.
-        "max_spawn_depth": 1,        # depth cap (1 = flat [default], 2 = orchestrator→leaf, 3 = three-level)
-        "orchestrator_enabled": True,  # kill switch for role="orchestrator"
-        # When a subagent hits a dangerous-command approval prompt, the parent's
-        # prompt_toolkit TUI owns stdin — a thread-local input() call from the
-        # subagent worker would deadlock the parent UI. To avoid the deadlock,
-        # subagent threads ALWAYS resolve approvals non-interactively:
-        #   false (default) → auto-deny with a logger.warning audit line (safe)
-        #   true             → auto-approve "once" with a logger.warning audit line
-        # Flip to true only if you trust delegated work to run dangerous cmds
-        # without human review (cron pipelines, batch automation, etc.).
-        "subagent_auto_approve": False,
-    },
-
     # Ephemeral prefill messages file — JSON list of {role, content} dicts
     # injected at the start of every API call for few-shot priming.
     # Never saved to sessions, logs, or trajectories.
@@ -3338,7 +3294,7 @@ def check_config_version() -> Tuple[int, int]:
 _KNOWN_ROOT_KEYS = {
     "_config_version", "model", "providers", "fallback_model",
     "fallback_providers", "credential_pool_strategies", "toolsets",
-    "agent", "terminal", "display", "compression", "delegation",
+    "agent", "terminal", "display", "compression",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
     "sessions",
 }

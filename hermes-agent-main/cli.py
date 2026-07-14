@@ -387,13 +387,6 @@ def load_cli_config() -> Dict[str, Any]:
                 "api_key": "",
             },
         },
-        "delegation": {
-            "max_iterations": 45,  # Max tool-calling turns per child agent
-            "model": "",       # Subagent model override (empty = inherit parent model)
-            "provider": "",    # Subagent provider override (empty = inherit parent provider)
-            "base_url": "",    # Direct OpenAI-compatible endpoint for subagents
-            "api_key": "",     # API key for delegation.base_url (falls back to OPENAI_API_KEY)
-        },
         "onboarding": {
             # First-touch hint flags (see agent/onboarding.py).  Each hint is
             # shown once per install then latched here.

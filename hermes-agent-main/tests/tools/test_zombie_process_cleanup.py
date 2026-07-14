@@ -261,33 +261,3 @@ class TestGatewayCleanupWiring:
 
         mock_agent.close.assert_not_called()
         assert "session-key" not in runner._agent_cache
-
-
-class TestDelegationCleanup:
-    """Verify subagent delegation cleans up child agents."""
-
-    def test_run_single_child_calls_close(self):
-        """_run_single_child finally block should call close() on child."""
-        from unittest.mock import MagicMock
-        from tools.delegate_tool import _run_single_child
-
-        parent = MagicMock()
-        parent._active_children = []
-        parent._active_children_lock = threading.Lock()
-
-        child = MagicMock()
-        child._delegate_saved_tool_names = ["tool1"]
-        child.run_conversation.side_effect = RuntimeError("test abort")
-
-        parent._active_children.append(child)
-
-        result = _run_single_child(
-            task_index=0,
-            goal="test goal",
-            child=child,
-            parent_agent=parent,
-        )
-
-        child.close.assert_called_once()
-        assert child not in parent._active_children
-        assert result["status"] == "error"

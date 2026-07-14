@@ -29,7 +29,7 @@ class TestTakyonApiServerToolset:
             "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze", "image_generate",
-            "execute_code", "delegate_task",
+            "execute_code",
             "todo", "memory", "session_search", "cronjob",
         ]
         for tool in expected:

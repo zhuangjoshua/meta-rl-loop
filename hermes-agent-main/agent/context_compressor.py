@@ -400,12 +400,6 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
             url_desc += f" (+{len(urls) - 1} more)"
         return f"[web_extract] {url_desc} ({content_len:,} chars)"
 
-    if tool_name == "delegate_task":
-        goal = args.get("goal", "")
-        if len(goal) > 60:
-            goal = goal[:57] + "..."
-        return f"[delegate_task] '{goal}' ({content_len:,} chars result)"
-
     if tool_name == "execute_code":
         code_preview = (args.get("code") or "")[:60].replace("\n", " ")
         if len(args.get("code", "")) > 60:

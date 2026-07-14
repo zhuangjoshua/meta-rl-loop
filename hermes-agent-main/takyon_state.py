@@ -794,7 +794,7 @@ class SessionDB:
         cached agent accumulates across messages).
         """
         # Ensure the session row exists so the UPDATE doesn't silently affect
-        # 0 rows.  Under concurrent load (cron + kanban + delegate_task) the
+        # 0 rows. Under concurrent load (cron + kanban) the
         # initial create_session() may have failed due to SQLite locking.
         # INSERT OR IGNORE is cheap and idempotent.
         self._insert_session_row(session_id, "unknown", model=model)
@@ -3270,4 +3270,3 @@ class SessionDB:
                 (error[:500], session_id),
             )
         self._execute_write(_do)
-

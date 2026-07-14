@@ -456,19 +456,6 @@ class TestBuildToolComplete:
         assert "npm run dev" in text
         assert result.raw_output is None
 
-    def test_build_tool_complete_for_delegate_task_summarizes_children(self):
-        result = build_tool_complete(
-            "tc-delegate",
-            "delegate_task",
-            '{"results":[{"task_index":0,"status":"completed","summary":"Reviewed ACP rendering.","model":"gpt-5.5","duration_seconds":3.2,"tool_trace":[{"tool":"read_file"}]}],"total_duration_seconds":3.4}',
-        )
-        text = result.content[0].content.text
-        assert "Delegation results: 1 task" in text
-        assert "Reviewed ACP rendering" in text
-        assert "gpt-5.5" in text
-        assert "Tools: read_file" in text
-        assert result.raw_output is None
-
     def test_build_tool_complete_for_session_search_recent(self):
         result = build_tool_complete(
             "tc-session",

@@ -248,9 +248,7 @@ KANBAN_GUIDANCE = (
     "- Do not complete a task you didn't actually finish. Block it.\n"
     "- Do not assign follow-up work to yourself. Assign it to the right "
     "specialist profile.\n"
-    "- Do not call `delegate_task` as a board substitute. `delegate_task` is "
-    "for short reasoning subtasks inside your own run; board tasks are for "
-    "cross-agent handoffs that outlive one API loop."
+    "- Board tasks are for cross-agent handoffs that outlive one API loop."
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (

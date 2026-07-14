@@ -129,7 +129,6 @@ TIPS = [
 
     # --- Tools & Capabilities ---
     "execute_code runs Python scripts that call Takyon tools programmatically — results stay out of context.",
-    "delegate_task spawns up to 3 concurrent sub-agents by default (delegation.max_concurrent_children) with isolated contexts for parallel work.",
     "web_extract works on PDF URLs — pass any PDF link and it converts to markdown.",
     "search_files is ripgrep-backed and faster than grep — use it instead of terminal grep.",
     "patch uses 9 fuzzy matching strategies so minor whitespace differences won't break edits.",
@@ -285,7 +284,6 @@ TIPS = [
     "V4A patch format supports Add File, Delete File, and Move File directives — not just Update.",
     "MCP servers can request LLM completions back via sampling — the agent becomes a tool for the server.",
     "MCP servers send notifications/tools/list_changed to trigger automatic tool re-registration without restart.",
-    "delegate_task with acp_command: 'claude' spawns Claude Code as a child agent from any platform.",
     "Delegation has a heartbeat thread — child activity propagates to the parent, preventing gateway timeouts.",
     "When a provider returns HTTP 402 (payment required), the auxiliary client auto-falls back to the next one.",
     "agent.tool_use_enforcement steers models that describe actions instead of calling tools — auto for GPT/Codex.",
@@ -304,8 +302,6 @@ TIPS = [
     "BROWSERBASE_ADVANCED_STEALTH=true enables advanced anti-detection with custom Chromium (Scale Plan).",
     "The CLI auto-switches to compact mode in terminals narrower than 80 columns.",
     "Quick commands support two types: exec (run shell command directly) and alias (redirect to another command).",
-    "Per-task delegation model: delegation.model and delegation.provider in config route subagents to cheaper models.",
-    "delegation.reasoning_effort independently controls thinking depth for subagents.",
     "display.platforms in config.yaml allows per-platform display overrides: {telegram: {tool_progress: all}}.",
     "human_delay.mode in config simulates human typing speed — configurable min_ms/max_ms range.",
     "Config version migrations run automatically on load — new config keys appear without manual intervention.",
@@ -481,5 +477,4 @@ def get_random_tip(exclude_recent: int = 0) -> str:
             deduplication across sessions.
     """
     return random.choice(TIPS)
-
 

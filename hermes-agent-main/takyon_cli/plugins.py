@@ -469,12 +469,12 @@ class PluginContext:
         """Dispatch a tool call through the registry, with parent agent context.
 
         This is the public interface for plugin slash commands that need to call
-        tools like ``delegate_task`` without reaching into framework internals.
+        registered tools without reaching into framework internals.
         The parent agent (if available) is resolved automatically — plugins never
         need to access the agent directly.
 
         Args:
-            tool_name: Registry name of the tool (e.g. ``"delegate_task"``).
+            tool_name: Registry name of the tool (e.g. ``"web_search"``).
             args: Tool arguments dict (same as what the model would pass).
             **kwargs: Extra keyword args forwarded to the registry dispatch.
 

@@ -2300,37 +2300,6 @@ class AIAgent:
         return drop_thinking_only_and_merge_users(messages)
 
     @staticmethod
-    def _cap_delegate_task_calls(tool_calls: list) -> list:
-        """Truncate excess delegate_task calls to max_concurrent_children.
-
-        The delegate_tool caps the task list inside a single call, but the
-        model can emit multiple separate delegate_task tool_calls in one
-        turn.  This truncates the excess, preserving all non-delegate calls.
-
-        Returns the original list if no truncation was needed.
-        """
-        from tools.delegate_tool import _get_max_concurrent_children
-        max_children = _get_max_concurrent_children()
-        delegate_count = sum(1 for tc in tool_calls if tc.function.name == "delegate_task")
-        if delegate_count <= max_children:
-            return tool_calls
-        kept_delegates = 0
-        truncated = []
-        for tc in tool_calls:
-            if tc.function.name == "delegate_task":
-                if kept_delegates < max_children:
-                    truncated.append(tc)
-                    kept_delegates += 1
-            else:
-                truncated.append(tc)
-        logger.warning(
-            "Truncated %d excess delegate_task call(s) to enforce "
-            "max_concurrent_children=%d limit",
-            delegate_count - max_children, max_children,
-        )
-        return truncated
-
-    @staticmethod
     def _deduplicate_tool_calls(tool_calls: list) -> list:
         """Remove duplicate (tool_name, arguments) pairs within a single turn.
 
@@ -3887,25 +3856,6 @@ class AIAgent:
             )
         finally:
             self._executing_tools = False
-
-    def _dispatch_delegate_task(self, function_args: dict) -> str:
-        """Single call site for delegate_task dispatch.
-
-        New DELEGATE_TASK_SCHEMA fields only need to be added here to reach all
-        invocation paths (concurrent, sequential, inline).
-        """
-        from tools.delegate_tool import delegate_task as _delegate_task
-        return _delegate_task(
-            goal=function_args.get("goal"),
-            context=function_args.get("context"),
-            toolsets=function_args.get("toolsets"),
-            tasks=function_args.get("tasks"),
-            max_iterations=function_args.get("max_iterations"),
-            acp_command=function_args.get("acp_command"),
-            acp_args=function_args.get("acp_args"),
-            role=function_args.get("role"),
-            parent_agent=self,
-        )
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None,
