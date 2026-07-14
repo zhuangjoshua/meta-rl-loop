@@ -322,7 +322,9 @@ def _validate_bindings(bindings: dict, skill_names: set[str]) -> tuple[dict, dic
     for semantic_id, binding in artifacts.items():
         if not SEMANTIC_ID_RE.fullmatch(str(semantic_id)) or not isinstance(binding, dict):
             _fail(f"invalid HANDOFF artifact binding: {semantic_id!r}")
-        if set(binding) != {"paths", "publish", "receipt"}:
+        required_artifact_fields = {"paths", "publish", "receipt"}
+        allowed_artifact_fields = {*required_artifact_fields, "runtime_owned_paths"}
+        if not required_artifact_fields <= set(binding) or not set(binding) <= allowed_artifact_fields:
             _fail(f"HANDOFF artifact {semantic_id} has invalid keys")
         paths = binding.get("paths")
         if not isinstance(paths, list) or not paths or not isinstance(binding.get("publish"), bool) or not str(binding.get("receipt") or ""):
@@ -335,6 +337,24 @@ def _validate_bindings(bindings: dict, skill_names: set[str]) -> tuple[dict, dic
         ]
         if len(binding["paths"]) != len(set(binding["paths"])):
             _fail(f"HANDOFF artifact {semantic_id} has duplicate canonical paths")
+        runtime_owned_paths = binding.get("runtime_owned_paths") or []
+        if not isinstance(runtime_owned_paths, list):
+            _fail(f"HANDOFF artifact {semantic_id}.runtime_owned_paths must be a list")
+        binding["runtime_owned_paths"] = [
+            _canonical_relative_prefix(
+                path,
+                label=f"HANDOFF artifact {semantic_id} runtime-owned path",
+            )
+            for path in runtime_owned_paths
+        ]
+        if len(binding["runtime_owned_paths"]) != len(set(binding["runtime_owned_paths"])):
+            _fail(f"HANDOFF artifact {semantic_id} has duplicate runtime-owned paths")
+        for owned_path in binding["runtime_owned_paths"]:
+            if not _publication_is_bound(owned_path, binding["paths"]):
+                _fail(
+                    f"HANDOFF artifact {semantic_id} runtime-owned path is outside its bound paths: "
+                    f"{owned_path}"
+                )
     for name, policy in policies.items():
         if not isinstance(policy, dict) or set(policy) != {"allowed_modes"}:
             _fail(f"HANDOFF skill policy {name} is malformed")
@@ -579,6 +599,16 @@ def _handoff_guidance(capabilities: dict, artifacts: dict, mode_policy: dict) ->
             f"- {semantic_id} -> {', '.join(map(str, binding['paths']))} "
             f"({publish}; evidence={binding['receipt']})"
         )
+    lines.append("Runtime-owned artifact paths (inspect but never edit; repair worker-owned source instead):")
+    owned_artifacts = [
+        (semantic_id, binding["runtime_owned_paths"])
+        for semantic_id, binding in sorted(artifacts.items())
+        if binding.get("runtime_owned_paths")
+    ]
+    if not owned_artifacts:
+        lines.append("- none")
+    for semantic_id, paths in owned_artifacts:
+        lines.append(f"- {semantic_id} -> {', '.join(map(str, paths))}")
     lines.append("Mode write exclusions:")
     for mode, policy in sorted(mode_policy.items()):
         paths = ", ".join(map(str, policy["denied_write_paths"])) or "none"
@@ -775,6 +805,7 @@ def build_manifest(skills_root: Path = DEFAULT_SKILLS_ROOT) -> dict:
             "paths": list(binding["paths"]),
             "publish": bool(binding["publish"]),
             "receipt": str(binding["receipt"]),
+            "runtime_owned_paths": list(binding["runtime_owned_paths"]),
         }
         for semantic_id, binding in sorted(artifacts.items())
     }

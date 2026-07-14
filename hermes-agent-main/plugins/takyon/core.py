@@ -14942,6 +14942,7 @@ class _IdempotencyPreclaim:
     claim_token: str
     accepted_state_identities: tuple[str, ...]
     result_context: dict[str, Any]
+    completion_state: str = "completed"
 
 
 def _idempotency_preclaim_metadata(value: Any) -> dict[str, Any]:
@@ -14960,6 +14961,8 @@ def _idempotency_preclaim_payload(
     tool_response: Mapping[str, Any] | None = None,
     commit_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if state not in {"pending", "completed", "retryable"}:
+        raise TakyonError("invalid idempotency preclaim state")
     identities = sorted(
         {
             str(identity or "").strip()
@@ -14976,7 +14979,7 @@ def _idempotency_preclaim_payload(
     }
     if state == "pending":
         metadata["claimed_at"] = _now()
-    elif state == "completed":
+    elif state in {"completed", "retryable"}:
         metadata["completed_at"] = _now()
     payload: dict[str, Any] = {_IDEMPOTENCY_PRECLAIM_FIELD: metadata}
     if tool_response is not None:
@@ -14997,9 +15000,9 @@ def _acquire_idempotency_preclaim(
     """Claim a key atomically or replay its completed response without running the operation.
 
     The durable claim occupies the canonical idempotency row before any external side effect. A
-    different request or source-state identity therefore fails before build/publish; an exact
-    completed retry returns the stored tool response. Pending claims never transfer ownership, so
-    concurrent or ambiguous retries fail closed instead of repeating a live side effect.
+    different request therefore fails before build/publish, and an exact completed retry returns
+    the stored tool response. A runtime-proven pre-publication failure may transfer ownership only
+    after the source identity changes; successful, ambiguous, and pending claims never transfer.
     """
 
     key = str(idempotency_key or "").strip()
@@ -15063,10 +15066,10 @@ def _acquire_idempotency_preclaim(
         for identity in (prior_metadata.get("accepted_state_identities") or [])
         if str(identity or "").strip()
     }
-    if state_identity not in accepted:
-        raise TakyonError("idempotency_key already used for different operations")
     state = str(prior_metadata.get("state") or "").strip()
     if state == "completed":
+        if state_identity not in accepted:
+            raise TakyonError("idempotency_key already used for different operations")
         tool_response = prior_payload.get("tool_response") if isinstance(prior_payload, Mapping) else None
         if not isinstance(tool_response, Mapping):
             raise TakyonError("completed idempotency record is missing its stored tool response")
@@ -15075,6 +15078,47 @@ def _acquire_idempotency_preclaim(
         raise TakyonError(
             "idempotency_key is already claimed by an in-progress operation; "
             "the live side effect will not be repeated"
+        )
+    if state == "retryable":
+        tool_response = prior_payload.get("tool_response") if isinstance(prior_payload, Mapping) else None
+        if not isinstance(tool_response, Mapping):
+            raise TakyonError("retryable idempotency record is missing its stored tool response")
+        if state_identity in accepted:
+            return None, dict(tool_response)
+        accepted.add(state_identity)
+        retry_pending_payload = _idempotency_preclaim_payload(
+            kind=normalized_kind,
+            state="pending",
+            operation_hash=operation_hash,
+            claim_token=claim_token,
+            accepted_state_identities=accepted,
+        )
+        prior_result_json = str(prior["result_json"] or "")
+        with store._connect() as conn:
+            with conn:
+                updated = conn.execute(
+                    "UPDATE idempotency_keys SET result_json = ? "
+                    "WHERE key = ? AND operation_hash = ? AND result_json = ?",
+                    (
+                        _json_dumps(retry_pending_payload),
+                        key,
+                        operation_hash,
+                        prior_result_json,
+                    ),
+                )
+        if int(getattr(updated, "rowcount", 0) or 0) != 1:
+            raise TakyonError(
+                "idempotency_key retry was claimed concurrently; the live side effect will not be repeated"
+            )
+        return (
+            _IdempotencyPreclaim(
+                kind=normalized_kind,
+                operation_hash=operation_hash,
+                claim_token=claim_token,
+                accepted_state_identities=tuple(sorted(accepted)),
+                result_context={},
+            ),
+            None,
         )
     raise TakyonError("idempotency_key has an invalid preclaim state")
 
@@ -20204,6 +20248,8 @@ class TakyonStore:
                 raise TakyonError("invalid idempotency preclaim operation hash")
             if not str(_idempotency_preclaim.claim_token or "").strip():
                 raise TakyonError("invalid idempotency preclaim token")
+            if _idempotency_preclaim.completion_state not in {"completed", "retryable"}:
+                raise TakyonError("invalid idempotency preclaim completion state")
         else:
             op_hash = _hash_operation(
                 {"scope": scope, "operations": operations, "reason": reason, "actor": actor}
@@ -20331,7 +20377,7 @@ class TakyonStore:
             }
             completed_payload = _idempotency_preclaim_payload(
                 kind=_idempotency_preclaim.kind,
-                state="completed",
+                state=_idempotency_preclaim.completion_state,
                 operation_hash=op_hash,
                 claim_token=_idempotency_preclaim.claim_token,
                 accepted_state_identities=accepted_state_identities,
@@ -26127,6 +26173,24 @@ def _product_refresh_operation_identity(
     }
 
 
+def _product_refresh_is_retryable_prepublication_failure(
+    surface_refresh: Mapping[str, Any],
+) -> bool:
+    """True only when deterministic validation stopped before publication began."""
+
+    publish = (
+        surface_refresh.get("publish")
+        if isinstance(surface_refresh.get("publish"), Mapping)
+        else {}
+    )
+    return (
+        str(surface_refresh.get("status") or "").strip() in {"failed", "blocked"}
+        and str(publish.get("status") or "").strip() == "blocked"
+        and not bool(publish.get("database_build_activated"))
+        and not bool(surface_refresh.get("activation_reconciliation"))
+    )
+
+
 def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
     store = _store()
     try:
@@ -26235,6 +26299,11 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
                 sorted({initial_source_identity, final_source_identity})
             ),
             result_context=response_context,
+            completion_state=(
+                "retryable"
+                if _product_refresh_is_retryable_prepublication_failure(surface_refresh)
+                else "completed"
+            ),
         )
         result = store.commit(
             scope=f"business:{business}",

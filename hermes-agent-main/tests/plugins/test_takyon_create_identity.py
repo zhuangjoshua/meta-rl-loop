@@ -147,6 +147,9 @@ def test_bootstrap_prompt_trusts_authoritative_product_result_and_stops_on_block
     prompt = _checkpointed_phase_prompt("landing_build_publish")
 
     assert "require structured publish.status published plus a real public_url" in prompt
+    assert "pre-publication build, type, action, or path validation failure" in prompt
+    assert "retry once with that same exact key" in prompt
+    assert "publication or activation is blocked or ambiguous" in prompt
     assert "record the exact blocker in research/strategy.md and stop" in prompt
     assert "Never fake a receipt" in prompt
     assert "X" not in prompt

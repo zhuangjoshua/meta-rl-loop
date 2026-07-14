@@ -160,6 +160,16 @@ compatibility metadata from an earlier failed typecheck over the authoritative t
 status, live build, and public URL. The predicate must prefer normalized surface columns and use
 attempt metadata only as a legacy fallback; this changes no publication authority or backend rail.
 
+The next fresh canary, `signal-orchard-sdk8-20260714`, proved the workspace and predicate fixes and
+native Taste/product skill routing, then exposed two general runtime defects before publication:
+the primary bootstrap prompt did not surface the scaffold-owned path inventory already enforced by
+the runtime, and a deterministic typecheck failure permanently consumed the phase publication key.
+The path inventory now lives in HANDOFF `product.surface.runtime_owned_paths`, not in the portable
+product skill. A product refresh now marks only a runtime-proven pre-publication build/type/action/
+path validation failure as retryable: unchanged source replays the stored failure, changed arguments
+fail, and repaired source may atomically reclaim the same key. Successful, pending, publication-
+stage, and ambiguous activation results remain terminal and never repeat a live side effect.
+
 #### New in this migration goal
 
 | Gate | Grade | Disposition |
@@ -183,7 +193,7 @@ attempt metadata only as a legacy fallback; this changes no publication authorit
 | Stable job-level SDK session may resume only from committed transcript evidence | **Keep hard** | Prevents transcript loss, cross-job resume, and fabricated resume state. |
 | SDK invocation requires an explicit session, budget, pinned runtime/model route, scoped tools, and no `Agent` tool | **Keep hard** | These are the new adapter's security and spend boundaries. |
 | Approved skill plugin manifest, digest, name, mode, resource-path, and read-only mount checks | **Keep hard** | These govern what code/guidance is exposed, not whether a product phase is complete. |
-| Product refresh preclaims a business-and-operation-scoped publication idempotency key and rejects changed or ambiguous retries | **Keep hard** | This new migration hardening prevents duplicate build/publish effects. |
+| Product refresh preclaims a business-and-operation-scoped publication idempotency key; only a proven pre-publication validation failure can be retried with the same key after source repair | **Keep hard** | Successful, pending, publication-stage, and ambiguous results remain terminal; unchanged failures replay, changed arguments fail, and the repair reclaim is atomic. |
 | Phase-to-skill receipt requirement (`PHASE_REQUIRED_SKILLS`) | **Remove — already removed** | It overrode Claude's native `when to use` routing and was an unauthorized completion gate. |
 | Native skill invocation and digest proof | **External audit only** | Inspect SDK receipts after the run; never block or repair the business from a hard-coded phase-to-skill map. |
 
@@ -251,7 +261,7 @@ Scheduling, last-wake-of-day calculation, fresh-state assembly, autonomous autho
 
 | Runtime code owns | HANDOFF configures |
 |---|---|
-| Bootstrap phase graph, transition order, retry/resume rules, deterministic idempotency-key derivation, runtime-owned milestone posting, atomic receipt recording, validator implementations, and authoritative done predicates | Semantic phase capability to exact tool mapping, semantic artifact to exact path mapping, broad mode capability sets, publish destinations, authority scopes, receipt kinds, and validator identifiers |
+| Bootstrap phase graph, transition order, retry/resume rules, deterministic idempotency-key derivation, runtime-owned milestone posting, atomic receipt recording, validator implementations, and authoritative done predicates | Semantic phase capability to exact tool mapping, semantic artifact to exact path mapping, runtime-owned path inventory, broad mode capability sets, publish destinations, authority scopes, receipt kinds, and validator identifiers |
 | Wake job/session lifecycle, pre-wake deterministic refresh/distillation, last-wake calculation, fresh-state assembly, the invariant that autonomous wakes cannot edit product state, settlement, and next-wake scheduling | Exact wake tools, readable/writable artifact paths, provider/publication adapters, and the tool/path deny projection used in addition to server enforcement |
 | The restrictive intersection between a phase's required semantic capabilities and its mode authority | The concrete tools that each semantic capability resolves to |
 
@@ -816,7 +826,7 @@ Direct VPS edits, ad hoc `rsync`, local-only proof, hand-patched business files,
 ### Product and deployment
 
 - Verified artifacts publish through existing rails with receipts.
-- Product publication claims a business-and-operation-scoped durable idempotency key before build/publish; an exact post-publication retry replays the stored result, changed source/arguments fail before publication, ambiguous pending claims never repeat the side effect, and pre-upgrade unscoped publication rows fail closed.
+- Product publication claims a business-and-operation-scoped durable idempotency key before build/publish; exact completed and unchanged failed retries replay the stored result; only a runtime-proven pre-publication validation failure may atomically retry the same key after source repair; changed arguments, successful publication, publication-stage blockers, ambiguous activation, pending claims, and pre-upgrade unscoped rows all fail closed without repeating a live side effect.
 - Placeholder or failed product surfaces remain blocked.
 - The operator service and queue worker deploy successfully with the SDK runtime.
 - Both subuser replicas remain authority-free and behaviorally unchanged.

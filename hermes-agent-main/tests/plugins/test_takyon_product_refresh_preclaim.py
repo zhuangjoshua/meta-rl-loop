@@ -135,6 +135,35 @@ def _prepare(tmp_path: Path, monkeypatch):
     return store, source_file, calls
 
 
+def _refresh_result(
+    kwargs: dict[str, Any],
+    *,
+    refresh_status: str,
+    publish_status: str,
+    database_build_activated: bool = False,
+    activation_reconciliation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result = {
+        "status": refresh_status,
+        "kind": "node_build",
+        "source_path": kwargs["source_path"],
+        "receipt_path": kwargs["receipt_path"],
+        "runtime_features": [],
+        "inventory": {},
+        "publish": {
+            "status": publish_status,
+            "public_url": kwargs["publish_target"] if publish_status == "published" else "",
+            "live_build_id": "build-repaired" if publish_status == "published" else "",
+            "database_build_activated": database_build_activated,
+            "blocker": "" if publish_status == "published" else "typecheck failed",
+        },
+        "blocker": "" if publish_status == "published" else "typecheck failed",
+    }
+    if activation_reconciliation is not None:
+        result["activation_reconciliation"] = activation_reconciliation
+    return result
+
+
 def test_changed_source_reuse_fails_before_finalize(tmp_path, monkeypatch):
     _store, source_file, calls = _prepare(tmp_path, monkeypatch)
     args = {
@@ -173,6 +202,174 @@ def test_exact_retry_replays_full_result_without_finalize_or_commit(tmp_path, mo
             ("product.surface.refresh.preclaim-test",),
         ).fetchone()["count"]
     assert int(count) == 1
+
+
+def test_prepublication_failure_exact_retry_replays_without_finalize(tmp_path, monkeypatch):
+    store, _source_file, calls = _prepare(tmp_path, monkeypatch)
+
+    def fail_finalize(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return _refresh_result(
+            kwargs,
+            refresh_status="failed",
+            publish_status="blocked",
+        )
+
+    monkeypatch.setattr(core, "_finalize_product_surface_refresh", fail_finalize)
+    args = {
+        "business": "preclaim",
+        "source_path": "product/site",
+        "install": False,
+        "idempotency_key": "failed-exact-replay",
+    }
+
+    first = json.loads(core.handle_business_refresh_product_surface(args))
+    replay = json.loads(core.handle_business_refresh_product_surface(args))
+
+    assert replay == first
+    assert len(calls) == 1
+    storage_key = core._product_refresh_idempotency_storage_key(
+        args["idempotency_key"], business="preclaim"
+    )
+    with store._connect() as conn:
+        payload = json.loads(
+            conn.execute(
+                "SELECT result_json FROM idempotency_keys WHERE key = ?", (storage_key,)
+            ).fetchone()["result_json"]
+        )
+    assert core._idempotency_preclaim_metadata(payload)["state"] == "retryable"
+
+
+def test_prepublication_failure_retries_same_key_after_source_repair(tmp_path, monkeypatch):
+    store, source_file, calls = _prepare(tmp_path, monkeypatch)
+
+    def fail_then_pass(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            return _refresh_result(
+                kwargs,
+                refresh_status="failed",
+                publish_status="blocked",
+            )
+        return _refresh_result(
+            kwargs,
+            refresh_status="passed",
+            publish_status="published",
+            database_build_activated=True,
+        )
+
+    monkeypatch.setattr(core, "_finalize_product_surface_refresh", fail_then_pass)
+    args = {
+        "business": "preclaim",
+        "source_path": "product/site",
+        "install": False,
+        "idempotency_key": "failed-source-repair",
+    }
+
+    failed = json.loads(core.handle_business_refresh_product_surface(args))
+    source_file.write_text("export const version = 'repaired';\n", encoding="utf-8")
+    repaired = json.loads(core.handle_business_refresh_product_surface(args))
+
+    assert failed["surface_refresh"]["status"] == "failed"
+    assert repaired["surface_refresh"]["publish"]["status"] == "published"
+    assert len(calls) == 2
+    storage_key = core._product_refresh_idempotency_storage_key(
+        args["idempotency_key"], business="preclaim"
+    )
+    with store._connect() as conn:
+        payload = json.loads(
+            conn.execute(
+                "SELECT result_json FROM idempotency_keys WHERE key = ?", (storage_key,)
+            ).fetchone()["result_json"]
+        )
+    assert core._idempotency_preclaim_metadata(payload)["state"] == "completed"
+
+
+def test_publish_stage_blocker_cannot_retry_after_source_change(tmp_path, monkeypatch):
+    _store, source_file, calls = _prepare(tmp_path, monkeypatch)
+
+    def publish_blocked(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return _refresh_result(
+            kwargs,
+            refresh_status="passed",
+            publish_status="blocked",
+        )
+
+    monkeypatch.setattr(core, "_finalize_product_surface_refresh", publish_blocked)
+    args = {
+        "business": "preclaim",
+        "source_path": "product/site",
+        "install": False,
+        "idempotency_key": "publish-stage-blocker",
+    }
+    assert json.loads(core.handle_business_refresh_product_surface(args))["success"] is True
+    source_file.write_text("export const version = 'two';\n", encoding="utf-8")
+
+    blocked = json.loads(core.handle_business_refresh_product_surface(args))
+
+    assert blocked["success"] is False
+    assert "already used for different operations" in blocked["error"]
+    assert len(calls) == 1
+
+
+def test_retryable_failure_rejects_changed_arguments_without_source_repair(tmp_path, monkeypatch):
+    _store, _source_file, calls = _prepare(tmp_path, monkeypatch)
+
+    def fail_finalize(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return _refresh_result(
+            kwargs,
+            refresh_status="failed",
+            publish_status="blocked",
+        )
+
+    monkeypatch.setattr(core, "_finalize_product_surface_refresh", fail_finalize)
+    args = {
+        "business": "preclaim",
+        "source_path": "product/site",
+        "install": False,
+        "timeout_seconds": 300,
+        "idempotency_key": "failed-changed-args",
+    }
+    assert json.loads(core.handle_business_refresh_product_surface(args))["success"] is True
+
+    blocked = json.loads(
+        core.handle_business_refresh_product_surface({**args, "timeout_seconds": 301})
+    )
+
+    assert blocked["success"] is False
+    assert "already used for different operations" in blocked["error"]
+    assert len(calls) == 1
+
+
+def test_activation_reconciliation_blocker_is_not_retryable(tmp_path, monkeypatch):
+    _store, source_file, calls = _prepare(tmp_path, monkeypatch)
+
+    def ambiguous_activation(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return _refresh_result(
+            kwargs,
+            refresh_status="blocked",
+            publish_status="blocked",
+            activation_reconciliation={"status": "blocked"},
+        )
+
+    monkeypatch.setattr(core, "_finalize_product_surface_refresh", ambiguous_activation)
+    args = {
+        "business": "preclaim",
+        "source_path": "product/site",
+        "install": False,
+        "idempotency_key": "ambiguous-activation",
+    }
+    assert json.loads(core.handle_business_refresh_product_surface(args))["success"] is True
+    source_file.write_text("export const version = 'two';\n", encoding="utf-8")
+
+    blocked = json.loads(core.handle_business_refresh_product_surface(args))
+
+    assert blocked["success"] is False
+    assert "already used for different operations" in blocked["error"]
+    assert len(calls) == 1
 
 
 def test_exact_retry_ignores_runtime_owned_post_publish_surface_state(tmp_path, monkeypatch):

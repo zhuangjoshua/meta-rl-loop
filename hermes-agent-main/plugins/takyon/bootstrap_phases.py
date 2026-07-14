@@ -661,7 +661,9 @@ def phase_prompt(
             "Customize the polished truthful landing and brand tokens while preserving PublicSiteHeader, canonical routing, src/lib/takyon.ts, src/lib/hooks.ts, /app, /app/profile, and support.",
             "Do not customize app-layout.tsx, app-home.tsx, or profile.tsx yet.",
             "Use reduced-motion-safe continuous product-relevant animation." if animations else "Animation is optional and must be reduced-motion safe.",
-            "Refresh once with the exact publish idempotency key and require structured publish.status published plus a real public_url; on a deterministic blocker, record the exact blocker in research/strategy.md and stop.",
+            "Refresh with the exact publish idempotency key and require structured publish.status published plus a real public_url.",
+            "If the structured result is a deterministic pre-publication build, type, action, or path validation failure, repair only worker-owned source and retry once with that same exact key; an unchanged retry only replays the failure.",
+            "If publication or activation is blocked or ambiguous, record the exact blocker in research/strategy.md and stop; never retry that live side effect.",
         ),
         "search": (
             f"Register the already-live URL-prefix property at {public_site_url} with business_register_search_console and the exact register key.",
@@ -677,7 +679,9 @@ def phase_prompt(
             "Customize app-home.tsx and profile.tsx while preserving app-layout.tsx, canonical account/entitlement/cancellation hooks, landing, auth, checkout, profile, and support rails.",
             "When a workflow is requested, implement real product/site/actions/*.ts generation, one normalized validated result schema, useDecodedActionRunner UI wiring, and records persistence/reopen; no SDK keys, fake output, fixtures, localStorage authority, orphan action, or unsupported route.",
             "Do not invoke the app action: signed-in subscriber execution remains post-bootstrap verification.",
-            "Refresh with the exact publish key and require a different live build than the landing baseline; record and stop on the exact deterministic blocker.",
+            "Refresh with the exact publish key and require a different live build than the landing baseline.",
+            "If the structured result is a deterministic pre-publication build, type, action, or path validation failure, repair only worker-owned source and retry once with that same exact key; an unchanged retry only replays the failure.",
+            "If publication or activation is blocked or ambiguous, record the exact blocker and stop; never retry that live side effect.",
         ),
         "mobile": (
             "Invoke takyon-mobile-app and turn seeded product/app into the real business app with deterministic install, typecheck, and Expo config green.",

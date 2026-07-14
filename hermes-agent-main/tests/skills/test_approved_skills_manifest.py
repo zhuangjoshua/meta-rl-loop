@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -330,6 +331,35 @@ def test_product_tuning_invariants_and_floors_are_rebound() -> None:
     assert "publication_status_published_with_public_url" in product["verification_floors"]
     assert "changed_action_certified_invoked_and_receipted" in product["verification_floors"]
     assert product["routing_preservation_digest"].startswith("sha256:")
+
+
+def test_product_runtime_owned_paths_live_in_handoff_and_match_runtime() -> None:
+    bindings = _load_yaml(SKILLS_ROOT / "HANDOFF" / "bindings.yaml")
+    owned_paths = bindings["artifacts"]["product.surface"]["runtime_owned_paths"]
+    module = ast.parse(
+        (PROJECT_ROOT / "plugins" / "takyon" / "core.py").read_text(encoding="utf-8")
+    )
+    runtime_paths: tuple[str, ...] | None = None
+    for statement in module.body:
+        if not isinstance(statement, ast.Assign):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == "_STARTER_OWNED_REFRESH_FILES"
+            for target in statement.targets
+        ):
+            runtime_paths = ast.literal_eval(statement.value)
+            break
+    assert runtime_paths is not None
+    assert owned_paths == [f"product/site/{path}" for path in runtime_paths]
+
+    manifest = manifest_tool.build_manifest(SKILLS_ROOT)
+    assert manifest["artifact_bindings"]["product.surface"]["runtime_owned_paths"] == owned_paths
+    assert all(path in manifest["handoff_guidance"] for path in owned_paths)
+    assert "inspect but never edit; repair worker-owned source instead" in manifest["handoff_guidance"]
+    product_skill = (SKILLS_ROOT / "takyon" / "takyon-product" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert not any(path in product_skill for path in owned_paths)
 
 
 def test_operator_host_builtins_and_ambient_web_are_not_bound() -> None:
