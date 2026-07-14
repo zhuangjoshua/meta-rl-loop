@@ -3308,8 +3308,11 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                         animations=animations,
                     )
                     refresh_cursor, _ = _product_publish_blocker_after(store, slug, "")
-                    configured_phase_turns = PHASE_MAX_TURNS.get(phase, _DEFAULT_MAX_TURNS)
-                    if payload.get("max_turns") is not None:
+                    phase_turn_limit = PHASE_MAX_TURNS.get(phase)
+                    configured_phase_turns = (
+                        max_turns if phase_turn_limit is None else phase_turn_limit
+                    )
+                    if payload.get("max_turns") is not None and phase_turn_limit is not None:
                         configured_phase_turns = min(configured_phase_turns, max_turns)
                     response, turn_cost_usd, turn_cost_status, phase_turn_completed = _run_ceo_turn(
                         slug=slug,

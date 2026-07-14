@@ -17,6 +17,8 @@ export function AppLayout() {
   const checkoutError = searchParams.get("checkout") === "error";
   const autoCheckout =
     !access.loading && access.authenticated && !access.entitled && !accountRoute && !checkoutError;
+  const checkoutStarting =
+    access.authenticated && !access.entitled && (subscribeIntent || autoCheckout);
   useSubscribeIntent(access, searchParams.get("intent"), autoCheckout);
   useCheckoutReturnRefresh(access);
 
@@ -72,13 +74,13 @@ export function AppLayout() {
           </div>
         ) : null}
 
-        {access.loading || auth.busy || subscribeIntent || autoCheckout ? (
+        {access.loading || auth.busy || checkoutStarting ? (
           <div className="grid min-h-[70vh] place-items-center" aria-busy="true">
             <div className="w-full max-w-md space-y-4 text-center">
               <Skeleton className="mx-auto h-10 w-2/3" />
               <Skeleton className="h-24 w-full" />
               <p className="text-sm text-muted-foreground">
-                {subscribeIntent || autoCheckout ? "Opening secure checkout…" : "Loading your workspace…"}
+                {checkoutStarting ? "Opening secure checkout…" : "Loading your workspace…"}
               </p>
             </div>
           </div>

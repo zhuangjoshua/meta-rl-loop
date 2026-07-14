@@ -99,7 +99,10 @@ def test_app_layout_is_canonical_direct_full_width_gate():
     assert "!access.entitled" in layout
     assert "!access.entitled && !accountRoute" in layout
     assert "const autoCheckout" in layout
+    assert "const checkoutStarting" in layout
     assert "useSubscribeIntent(access, searchParams.get(\"intent\"), autoCheckout)" in layout
+    assert "access.loading || auth.busy || checkoutStarting" in layout
+    assert "access.loading || auth.busy || subscribeIntent || autoCheckout" not in layout
     assert "Opening secure checkout" in layout
     assert "Complete your subscription" not in layout
     assert 'location.pathname.replace(/\\/+$/, "") === "/app/profile"' in layout
@@ -180,15 +183,15 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     prompt = turn_runtime._business_bootstrap_instruction(
         "saas-appkit-test", "Build a SaaS workflow", "live", archetype="web_saas"
     )
-    assert "Preserve and render the canonical `PublicSiteHeader`" in prompt
+    assert "Preserve `PublicSiteHeader` behavior" in prompt
     landing_pass = prompt.rsplit("#### 2a. Build and publish the landing page", 1)[1].split(
         "#### 2a.1. Register Search Console", 1
     )[0]
     assert "guidance_skills" not in landing_pass
     assert "`design-taste-frontend`" in landing_pass
-    assert "Safebox-gated site-image generation" in landing_pass
-    assert "images, DESIGN.md, screenshots, and visual audits are optional" in landing_pass
-    assert "never publication conditions" in landing_pass
+    assert "own the complete landing implementation and its normal working method" in landing_pass
+    assert "any frontend component, style, animation, and asset files" in landing_pass
+    assert "images, DESIGN.md, screenshots, and visual audits are optional" not in landing_pass
     assert "max_turns" not in landing_pass
     assert "budget_usd" not in landing_pass
     assert "never start a second overlapping build" in landing_pass
@@ -242,7 +245,7 @@ def test_bootstrap_uses_native_taste_without_prompt_body_guidance_injection():
     assert "#### 3a. Upgrade landing proof" not in prompt
 
 
-def test_new_landing_offers_optional_assets_and_keeps_logo_after_publish():
+def test_new_landing_leaves_assets_to_taste_and_keeps_logo_after_publish():
     prompt = turn_runtime._business_bootstrap_instruction(
         "taste-assets-test",
         "Build a SaaS where customers generate and save account briefs",
@@ -256,9 +259,9 @@ def test_new_landing_offers_optional_assets_and_keeps_logo_after_publish():
     )[0]
     landing_lower = landing_pass.lower()
 
-    assert "available when original imagery improves the product" in landing_lower
-    assert "safebox-gated site-image generation" in landing_lower
-    assert "images" in landing_lower and "never publication conditions" in landing_lower
+    assert "own the complete landing implementation and its normal working method" in landing_lower
+    assert "without wrapper-authored layout, section, image, animation, or audit guidance" in landing_lower
+    assert "images, design.md, screenshots, and visual audits are optional" not in landing_lower
 
     # Optional site imagery stays inside the Taste-owned 2a call. The distinct logo workflow
     # remains after the first landing has published and does not make site images mandatory.
@@ -270,7 +273,7 @@ def test_new_landing_offers_optional_assets_and_keeps_logo_after_publish():
     assert "business_generate_logo" in logo_pass
 
 
-def test_opted_in_animation_remains_guidance_without_requiring_generated_imagery():
+def test_animation_option_does_not_override_native_taste_workflow():
     prompt = turn_runtime._business_bootstrap_instruction(
         "taste-animation-test",
         "Build an animated analytics SaaS",
@@ -281,9 +284,8 @@ def test_opted_in_animation_remains_guidance_without_requiring_generated_imagery
     landing_pass = prompt.rsplit("#### 2a. Build and publish the landing page", 1)[1].split(
         "#### 2a.1. Register Search Console", 1
     )[0]
-    assert "explicitly requested continuous landing animation" in landing_pass
-    assert "reduced-motion-safe" in landing_pass
-    assert "required generated assets" not in landing_pass
+    assert "explicitly requested continuous landing animation" not in landing_pass
+    assert "wrapper-authored layout, section, image, animation, or audit guidance" in landing_pass
 
 
 def test_bootstrap_keeps_named_cancellation_policy_out_of_worker_authored_copy():
@@ -324,8 +326,8 @@ def test_taste_landing_agent_has_native_visual_tools_without_a_hard_acceptance_g
     assert "`design-taste-frontend`" in prompt.rsplit(
         "#### 2a. Build and publish the landing page", 1
     )[1]
-    assert "Safebox-gated site-image generation is available" in prompt
-    assert "images, DESIGN.md, screenshots, and visual audits are optional" in prompt
+    assert "own the complete landing implementation and its normal working method" in prompt
+    assert "images, DESIGN.md, screenshots, and visual audits are optional" not in prompt
     assert "bounded rendered-viewport preflight" not in prompt
     assert "browser_vision" in bootstrap_phases.PHASE_ALLOWED_TOOLS[
         "landing_build_publish"

@@ -16,21 +16,18 @@ export const APP_MODE_PACKS = {
   standard_saas: {
     label: "Standard SaaS",
     recommendedRoutes: ["/", "/app"],
-    recommendedSections: ["hero", "proof", "pricing", "faq", "app_shell"],
     requiredRails: ["auth", "account"],
     optionalRails: ["checkout", "usage"],
   },
   ai_tool: {
     label: "AI Tool",
     recommendedRoutes: ["/", "/app", "/app/workspace"],
-    recommendedSections: ["hero", "workflow", "pricing", "app_shell", "results"],
     requiredRails: ["auth", "account", "generate"],
     optionalRails: ["checkout", "usage"],
   },
   api_product: {
     label: "API Product",
     recommendedRoutes: ["/", "/docs", "/app"],
-    recommendedSections: ["hero", "quickstart", "docs", "pricing", "dashboard"],
     requiredRails: ["auth", "account"],
     optionalRails: ["checkout", "usage", "generate"],
   },
@@ -78,9 +75,6 @@ export function planSubuserSurface(context = {}) {
     recommendedRoutes: uniq([
       ...(appMode.recommendedRoutes || []),
       ...(context.routes || []),
-    ]),
-    recommendedSections: uniq([
-      ...(appMode.recommendedSections || []),
     ]),
     recommendedModules: uniq([
       ...(subscription.recommendedModules || []),

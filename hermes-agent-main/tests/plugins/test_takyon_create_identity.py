@@ -127,8 +127,10 @@ def test_bootstrap_prompt_requires_bold_landing_and_branded_appkit_auth_surface(
     final = _checkpointed_phase_prompt("final_workflow_build_publish")
 
     assert "Invoke takyon-product and design-taste-frontend" in landing
-    assert "preserving PublicSiteHeader" in landing
-    assert "Do not customize app-layout.tsx, app-home.tsx, or profile.tsx yet." in landing
+    assert "let design-taste-frontend own the complete landing implementation" in landing
+    assert "any frontend component, style, animation, and asset files" in landing
+    assert "without wrapper-authored layout, section, image, animation, or audit guidance" in landing
+    assert "landing_build_publish" not in PHASE_MAX_TURNS
     assert "Customize app-home.tsx and profile.tsx while preserving app-layout.tsx" in final
     assert "landing, auth, checkout, profile, and support rails" in final
 

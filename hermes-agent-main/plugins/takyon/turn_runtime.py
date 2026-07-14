@@ -289,20 +289,14 @@ def _business_bootstrap_instruction(
         "#### 2a. Build and publish the landing page (the customer's first paint)",
         "This pass is the customer's FIRST paint — nothing is live before it publishes, so start it immediately after the surface contract (and plan, if paid) are pinned. Build the full, polished, custom landing so the site looks bespoke, not templated.",
         "- Invoke native `takyon-product`, then `design-taste-frontend`, and apply them directly in this session.",
-        "- Inspect the seeded `product/site` source through the scoped business file capabilities. Use the pinned Vite scaffold as the base and preserve shared wiring through `src/lib/takyon.ts` and `src/lib/hooks.ts`. Safebox-gated site-image generation is available when original imagery improves the product; images, DESIGN.md, screenshots, and visual audits are optional and never publication conditions.",
-        "- Scope this pass to the landing route `/` plus its brand direction: customize `src/screens/landing.tsx` and let the native skill decide how `src/tokens.css` should support the design. Do NOT edit `src/screens/app-layout.tsx`, `src/screens/app-home.tsx`, or `src/screens/profile.tsx` in this pass — those are customized in 2b.",
-        "- Preserve and render the canonical `PublicSiteHeader` from `src/components/site-navigation.tsx`; do not replace it with a page-specific nav. The signed-out banner must stay visibly separated from the page and show distinct Log in and Sign up actions, never Subscribe/Open app or a price-first CTA. Signed-in visitors are redirected to `/app` by the shared landing behavior.",
+        "- Inspect the seeded `product/site` source through the scoped business file capabilities, then let native `design-taste-frontend` own the complete landing implementation and its normal working method without wrapper-authored layout, section, image, animation, or audit guidance.",
+        "- Start from the pinned AppKit scaffold and preserve auth, checkout, account, runtime, routes, `src/lib/takyon.ts`, and `src/lib/hooks.ts`. The skill may edit any frontend component, style, animation, and asset files needed for the landing.",
+        "- Preserve `PublicSiteHeader` behavior, including distinct signed-out Log in and Sign up actions and the signed-in redirect to `/app`, but let the skill redesign its presentation.",
         "- Never author subscription cancellation timing, renewal/end dates, grace-period, or refund/no-refund copy in the landing or pricing content, even when the business goal names that policy. Keep it as a backend constraint and preserve the canonical AppKit account control, which derives customer-visible truth from backend policy/action results.",
         "- Make the real product and conversion path understandable. Never fabricate UI, statistics, testimonials, logos, or outcome numbers.",
         "- Keep the shared Vite route skeleton and the seeded `/app`, `/app/profile`, and support routes intact; do not delete or stub any seeded screen. They stay as the seeded app kit until 2b refines them.",
-        *(
-            [
-                "- The operator explicitly requested continuous landing animation. Tell the native Taste skill about that requirement and implement a product-relevant, reduced-motion-safe result.",
-            ]
-            if animations
-            else []
-        ),
-        "- Make the required source edits with scoped business patch/write capabilities, then call business_refresh_product_surface once with a fresh idempotency key to build, validate, publish, and serve this landing.",
+        "- The real generated logo is added in 2b; do not block this landing pass on it or invent a replacement.",
+        "- Only after the native Taste skill has completed its workflow, call business_refresh_product_surface with a fresh idempotency key to build, validate, publish, and serve the landing.",
         "- The primary model, turn ceiling, spend ceiling, and wall deadline are deployment policy. Do not try to change them or start another model task. On an API error or unchanged deterministic failure, stop and return the exact blocker.",
         "",
         "This 2a refresh PUBLISHES AND SERVES the landing immediately: `surface_refresh.publish.status` must be `published` and the structured result must contain a real `public_url`. The live host serves the landing while the still-seeded real `/app` access shell remains behind sign-in until 2b refines it.",

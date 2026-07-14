@@ -256,8 +256,8 @@ export function useSubscribeIntent(
       return;
     }
     if (!access.authenticated) {
-      // Stash the intent across the sign-in OAuth redirect; the app's sign-in gate is already
-      // shown. On return (authenticated) this effect re-runs and resumes checkout below.
+      // Stash the intent while AppLayout shows the sign-in/sign-up gate. On return
+      // (authenticated) this effect re-runs and resumes checkout below.
       setSubscribeAfterAuth(true);
       return;
     }

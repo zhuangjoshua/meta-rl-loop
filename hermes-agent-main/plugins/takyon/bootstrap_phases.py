@@ -121,7 +121,6 @@ PHASE_ALLOWED_TOOLS: dict[str, frozenset[str]] = {
 PHASE_MAX_TURNS = {
     "brief": 12,
     "surface": 10,
-    "landing_build_publish": 36,
     "search": 10,
     "logo": 16,
     "final_workflow_build_publish": 60,
@@ -645,13 +644,19 @@ def phase_prompt(
     workflow = bool(inputs.get("workflow_requested"))
     mobile = str(inputs.get("archetype") or "").lower() == "mobile_app"
     keys = dict(run.phase_idempotency.get(phase) or {})
+    phase_execution = (
+        "Execute only this phase. Let the native design skill complete its full working method "
+        "before publication, then stop after the authoritative publish outcome exists."
+        if phase == "landing_build_publish"
+        else "Execute only this phase, use only the exposed capabilities, and stop when its authoritative tool/artifact outcome exists."
+    )
     header = [
         f"Continue the same fresh-business launch for business:{run.business_slug}.",
         f"Current code-owned phase: {phase}.",
         f"Canonical business name: {business_name}",
         f"Business goal: {goal}",
         f"Explicit product workflow requested: {'yes' if workflow else 'no'}.",
-        "Execute only this phase, use only the exposed capabilities, and stop when its authoritative tool/artifact outcome exists.",
+        phase_execution,
         "Do not redo earlier phases. Do not install or enumerate skills. Never fake a receipt, provider result, publication, auth, subscription, record, or customer workflow.",
         "Use every idempotency key below exactly; a retry must reattach to the same effect, never mint a replacement unless three mobile repair keys are explicitly supplied.",
         "The operator_update key is reserved for the runtime-owned customer milestone; never pass it to a tool.",
@@ -672,11 +677,10 @@ def phase_prompt(
             "Do not set bootstrap_final_product_pass in this phase.",
         ),
         "landing_build_publish": (
-            "Invoke takyon-product and design-taste-frontend. Inspect the seeded product/site source.",
-            "Customize the polished truthful landing and brand tokens while preserving PublicSiteHeader, canonical routing, src/lib/takyon.ts, src/lib/hooks.ts, /app, /app/profile, and support.",
-            "Do not customize app-layout.tsx, app-home.tsx, or profile.tsx yet.",
-            "Use reduced-motion-safe continuous product-relevant animation." if animations else "Animation is optional and must be reduced-motion safe.",
-            "Refresh with the exact publish idempotency key and require structured publish.status published plus a real public_url.",
+            "Invoke takyon-product and design-taste-frontend. Inspect the seeded product/site source, then let design-taste-frontend own the complete landing implementation and its normal working method without wrapper-authored layout, section, image, animation, or audit guidance.",
+            "Start from AppKit and preserve its auth, checkout, account, runtime, route, and PublicSiteHeader behavior. The skill may edit any frontend component, style, animation, and asset files needed for the landing and may redesign the header presentation without changing its behavior.",
+            "The real generated logo is added in the later logo phase; do not block the landing on it or invent a replacement.",
+            "Only after the native skill has completed its workflow, refresh with the exact publish idempotency key and require structured publish.status published plus a real public_url.",
             "If the structured result is a deterministic pre-publication build, type, action, or path validation failure, repair only worker-owned source and retry once with that same exact key; an unchanged retry only replays the failure.",
             "If publication or activation is blocked or ambiguous, record the exact blocker in research/strategy.md and stop; never retry that live side effect.",
         ),
