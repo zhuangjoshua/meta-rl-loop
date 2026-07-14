@@ -5141,7 +5141,6 @@ def _run_agent_with_meta(
                 "session_search",
                 "terminal",
                 "file",
-                "browser",
                 "code_execution",
             ],
             workspace_root=str(workspace_home or ""),
