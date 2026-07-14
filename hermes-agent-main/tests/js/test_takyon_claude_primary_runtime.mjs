@@ -870,9 +870,47 @@ test("SDK init fails closed on extra skills, forbidden Agent tool, or a model mi
         content: [{ type: "text", text: "Completed" }],
       },
     },
+    {
+      type: "assistant",
+      session_id: syntheticResultSession,
+      uuid: randomUUID(),
+      parent_tool_use_id: null,
+      message: {
+        role: "assistant",
+        model: "<synthetic>",
+        stop_reason: "stop_sequence",
+        content: [{ type: "text", text: "SDK terminal bookkeeping" }],
+      },
+    },
     syntheticResult,
   ]) });
   assert.deepEqual(syntheticReceipt.actual_models, [PRIMARY_AGENT_MODEL]);
+
+  const syntheticOnlySession = randomUUID();
+  const syntheticOnlyInit = sdkInit(
+    "takyon-approved-skills",
+    syntheticOnlySession,
+    ["market-research"]
+  );
+  syntheticOnlyInit.plugins[0].path = fixture.pluginPath;
+  await assert.rejects(
+    runPrimaryAgentTurn(baseConfig, { sdk: fakeSdk([
+      syntheticOnlyInit,
+      {
+        type: "assistant",
+        session_id: syntheticOnlySession,
+        uuid: randomUUID(),
+        parent_tool_use_id: null,
+        message: {
+          role: "assistant",
+          model: "<synthetic>",
+          stop_reason: "stop_sequence",
+          content: [{ type: "text", text: "No paid-model evidence" }],
+        },
+      },
+    ]) }),
+    (error) => error.code === "actual_model_mismatch"
+  );
 });
 
 test("provider retries and session mirror failures abort instead of silently continuing", async (t) => {

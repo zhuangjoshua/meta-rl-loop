@@ -1313,12 +1313,19 @@ export async function runPrimaryAgentTurn(configuration, { sdk = null } = {}) {
       ? cleanString(message?.message?.model || message?.model)
       : "";
     if (reportedModel) {
-      actualModels.add(reportedModel);
-      if (reportedModel !== prepared.broker.model) {
+      const contentTypes = Array.isArray(message?.message?.content)
+        ? message.message.content.map((block) => cleanString(block?.type)).filter(Boolean)
+        : [];
+      const sdkSyntheticTerminal = reportedModel === "<synthetic>"
+        && actualModels.has(prepared.broker.model)
+        && cleanString(message?.message?.role) === "assistant"
+        && cleanString(message?.message?.stop_reason) === "stop_sequence"
+        && !cleanString(message?.parent_tool_use_id)
+        && contentTypes.length > 0
+        && contentTypes.every((type) => type === "text");
+      if (!sdkSyntheticTerminal) actualModels.add(reportedModel);
+      if (!sdkSyntheticTerminal && reportedModel !== prepared.broker.model) {
         prepared.options.abortController.abort();
-        const contentTypes = Array.isArray(message?.message?.content)
-          ? message.message.content.map((block) => cleanString(block?.type)).filter(Boolean)
-          : [];
         fail(
           "actual_model_mismatch",
           `SDK used model ${reportedModel}; expected ${prepared.broker.model}; `
