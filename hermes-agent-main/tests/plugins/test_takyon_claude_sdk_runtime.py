@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import hashlib
 import io
@@ -1060,3 +1061,29 @@ def test_keyboard_interrupt_terminates_sdk_process_before_bridge_cleanup(
     assert events.count("tool_closed") == 1
     assert events.count("session_closed") == 1
     assert process.stdin.closed is True
+
+
+def test_terminate_process_group_kills_pipe_holding_descendants_after_parent_exit(
+    monkeypatch,
+) -> None:
+    from plugins.takyon import claude_sdk_runtime as runtime
+
+    signals: list[int] = []
+
+    class ExitedParent:
+        pid = 4242
+
+        @staticmethod
+        def poll():
+            return 0
+
+    def killpg(pid: int, sig: int) -> None:
+        assert pid == 4242
+        signals.append(sig)
+
+    monkeypatch.setattr(runtime.os, "killpg", killpg)
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+
+    runtime._terminate_process_group(ExitedParent(), grace_seconds=0.1)
+
+    assert signals == [signal.SIGTERM, 0, signal.SIGKILL]

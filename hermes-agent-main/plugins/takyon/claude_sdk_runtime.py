@@ -1264,26 +1264,37 @@ def _redact_sdk_text(value: object, secrets: Iterable[str]) -> str:
 def _terminate_process_group(
     process: subprocess.Popen[str], *, grace_seconds: float = 10.0
 ) -> None:
-    if process.poll() is not None:
-        return
+    parent_exited = process.poll() is not None
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
     except OSError:
+        if parent_exited:
+            return
         process.terminate()
-    try:
-        process.wait(timeout=max(0.1, float(grace_seconds)))
-        return
-    except subprocess.TimeoutExpired:
-        pass
+    if not parent_exited:
+        try:
+            process.wait(timeout=max(0.1, float(grace_seconds)))
+            return
+        except subprocess.TimeoutExpired:
+            pass
+    elif grace_seconds > 0:
+        time.sleep(min(float(grace_seconds), 1.0))
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        except OSError:
+            return
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         return
     except OSError:
         process.kill()
-    process.wait(timeout=5.0)
+    if not parent_exited:
+        process.wait(timeout=5.0)
 
 
 def run_primary_sdk_subprocess(
@@ -1694,9 +1705,12 @@ def run_primary_sdk_subprocess(
         stderr_thread.join(timeout=5.0)
         if stdout_thread.is_alive() or stderr_thread.is_alive():
             _terminate_process_group(process, grace_seconds=1.0)
-            raise ClaudeSdkRuntimeError(
-                "primary SDK subprocess output readers did not terminate"
-            )
+            stdout_thread.join(timeout=2.0)
+            stderr_thread.join(timeout=2.0)
+            if stdout_thread.is_alive() or stderr_thread.is_alive():
+                raise ClaudeSdkRuntimeError(
+                    "primary SDK subprocess output readers did not terminate"
+                )
         if stopped_reason:
             raise ClaudeSdkProcessStopped(
                 stopped_reason, inactivity_timeout=inactivity_timeout
