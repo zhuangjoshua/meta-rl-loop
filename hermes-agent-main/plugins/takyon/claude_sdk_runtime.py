@@ -39,6 +39,11 @@ SDK_MAX_STDOUT_BYTES = 4 * 1024 * 1024
 SDK_MAX_STDERR_BYTES = 2 * 1024 * 1024
 SDK_MAX_SKILL_RESOURCE_BYTES = 256 * 1024
 SDK_RUNTIME_BASELINE_TOOLS = frozenset({"skill_read_resource"})
+SDK_ENTRYPOINT_MODES = {
+    "interactive": "interactive",
+    "bootstrap": "ceo_bootstrap",
+    "wake": "ceo_wake",
+}
 SDK_GLOBAL_OPERATOR_TOOLS = frozenset(
     {
         "business_list_app_connections",
@@ -1336,7 +1341,11 @@ def run_primary_sdk_subprocess(
         "configDir": env["CLAUDE_CONFIG_DIR"],
         "pluginPath": str(plugin),
         "manifestPath": str(manifest),
-        "mode": str(mode or ""),
+        # The parent policy uses the agnostic HANDOFF modes while the private
+        # subprocess boundary names the exact Takyon invocation kind.  Derive
+        # the wire value from the already validated policy instead of trusting
+        # a second caller-controlled spelling.
+        "mode": SDK_ENTRYPOINT_MODES[mode_policy.mode],
         "operation": runtime_operation,
         "epoch": str(epoch or mode or ""),
         "sessionId": "" if resume_session else stable_session,

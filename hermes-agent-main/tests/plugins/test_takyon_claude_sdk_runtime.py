@@ -498,6 +498,138 @@ def test_node_runtime_repo_fallback_is_explicit_and_never_production(
         _primary_sdk_node_runtime(child_path=os.environ["PATH"])
 
 
+@pytest.mark.parametrize(
+    ("handoff_mode", "wire_mode"),
+    [("bootstrap", "ceo_bootstrap"), ("wake", "ceo_wake")],
+)
+def test_primary_sdk_subprocess_serializes_task_kind_wire_mode(
+    monkeypatch, tmp_path, handoff_mode, wire_mode
+) -> None:
+    from plugins.takyon import claude_sdk_runtime as runtime
+
+    session_id = str(uuid.uuid4())
+
+    class RecordingStdin(io.StringIO):
+        def __init__(self) -> None:
+            super().__init__()
+            self.writes: list[str] = []
+
+        def write(self, value: str) -> int:
+            self.writes.append(value)
+            return super().write(value)
+
+    class FakeBridge:
+        child_fd = 91
+
+        def start(self):
+            return self
+
+        def close_child_in_parent(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdin = RecordingStdin()
+            self.stdout = io.StringIO(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "session_id": session_id,
+                            "operation": "turn",
+                            "summary": "done",
+                        },
+                    }
+                )
+            )
+            self.stderr = io.StringIO()
+            self.returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    process = FakeProcess()
+    bridge = FakeBridge()
+    policy = runtime.SdkModeToolPolicy(
+        mode=handoff_mode,
+        allowed_skills=("safe-skill",),
+        baseline_tools=("safe_tool",),
+        allowed_tools=("safe_tool",),
+        denied_capabilities=(),
+        denied_tools=(),
+        denied_write_paths=(),
+        handoff_guidance="Use the scoped tool bridge.",
+    )
+    definitions = [{"name": "safe_tool", "inputSchema": {"type": "object"}}]
+
+    monkeypatch.setattr(
+        runtime,
+        "_primary_sdk_install_paths",
+        lambda: (
+            tmp_path / "entrypoint.mjs",
+            tmp_path / "plugin",
+            tmp_path / "manifest.json",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime, "sdk_tool_definitions", lambda **_kwargs: list(definitions)
+    )
+
+    def enforce_mode(**kwargs):
+        assert kwargs["mode"] == handoff_mode
+        return (list(definitions), policy)
+
+    monkeypatch.setattr(runtime, "enforce_sdk_mode_tool_policy", enforce_mode)
+    monkeypatch.setattr(
+        runtime,
+        "_build_skill_resource_reader",
+        lambda **_kwargs: lambda _args: "",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "build_primary_sdk_env",
+        lambda **_kwargs: {
+            "PATH": os.environ.get("PATH", ""),
+            "ANTHROPIC_API_KEY": "scoped-capability",
+            "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_primary_sdk_node_runtime",
+        lambda **_kwargs: ("node", tmp_path / "sdk.mjs", tmp_path / "zod.mjs"),
+    )
+    monkeypatch.setattr(runtime, "ScopedToolBridge", lambda **_kwargs: bridge)
+    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    result = runtime.run_primary_sdk_subprocess(
+        business="acme",
+        operator_user_id="operator-1",
+        system_prompt="system",
+        user_prompt="turn",
+        enabled_toolsets=["takyon"],
+        workspace_root=tmp_path,
+        session_id=session_id,
+        resume_session=False,
+        session_store=runtime.InMemorySessionStoreBackend(),
+        mode=handoff_mode,
+        epoch=f"{handoff_mode}:phase-1",
+        max_turns=2,
+        max_budget_usd=1,
+    )
+
+    request = json.loads(process.stdin.writes[0])
+    assert request["mode"] == wire_mode
+    assert request["epoch"] == f"{handoff_mode}:phase-1"
+    assert result["summary"] == "done"
+
+
 def test_keyboard_interrupt_terminates_sdk_process_before_bridge_cleanup(
     monkeypatch, tmp_path
 ) -> None:

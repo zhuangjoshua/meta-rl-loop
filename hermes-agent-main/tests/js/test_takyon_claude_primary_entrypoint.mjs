@@ -227,6 +227,46 @@ test("entrypoint always wires eager durable sessions and Skill-only exact MCP to
   ]);
 });
 
+for (const [wireMode, sdkMode] of [
+  ["ceo_bootstrap", "bootstrap"],
+  ["ceo_wake", "wake"],
+]) {
+  test(`entrypoint maps ${wireMode} wire mode to ${sdkMode} SDK mode`, async () => {
+    const sessionId = randomUUID();
+    const socket = new ReplyingBridgeSocket(() => ({ appended: true }));
+    const sdkModule = {
+      tool(name, _description, _shape, handler) {
+        return { name, handler };
+      },
+      createSdkMcpServer(options) {
+        return options;
+      },
+    };
+
+    const result = await runPrimaryEntrypoint(request({ mode: wireMode, sessionId }), {
+      socket,
+      sdkModule,
+      zodModule: { z: { fromJSONSchema: () => ({ shape: {} }) } },
+      sourceEnv: {},
+      runTurn: async (configuration) => {
+        assert.equal(configuration.mode, sdkMode);
+        return { session_id: sessionId, summary: "done" };
+      },
+    });
+
+    assert.equal(result.summary, "done");
+  });
+}
+
+test("entrypoint refuses normalized HANDOFF modes on its task-kind wire boundary", () => {
+  for (const mode of ["bootstrap", "wake"]) {
+    assert.throws(
+      () => validatePrimaryEntrypointRequest(request({ mode })),
+      (error) => error.code === "entrypoint_request" && /unsupported primary runtime mode/.test(error.message)
+    );
+  }
+});
+
 test("manual compaction entrypoint exposes no Skill or MCP tools", async () => {
   const resumeSessionId = randomUUID();
   const socket = new ReplyingBridgeSocket((message) => {
