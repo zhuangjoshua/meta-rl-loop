@@ -1082,7 +1082,7 @@ class EnvironmentProvisioner:
                 f"{len(replicas)}/{expected_count} subuser replicas",
             )
 
-        subuser_hosts = ",".join(str(rep["public_ip"]) for rep in replicas)
+        subuser_hosts = ",".join(str(rep["private_ip"]) for rep in replicas)
         common_env = {
             **os.environ,
             "TAKYON_DEV_STORE": str(store_path),
@@ -3064,7 +3064,9 @@ class EnvironmentProvisioner:
             )
             if copied_private.returncode != 0:
                 return False, f"operator publish-key sync failed: {(copied_private.stderr or '').strip()[-200:]}"
-            hosts = ",".join(str(rep.get("public_ip") or "").strip() for rep in replica_blocks)
+            hosts = ",".join(str(rep.get("private_ip") or "").strip() for rep in replica_blocks)
+            if not all(str(rep.get("private_ip") or "").strip() for rep in replica_blocks):
+                return False, "subuser replica is missing a private VPC IP"
             configured = subprocess.run(
                 [
                     "ssh", *ssh_base, f"root@{operator_ip}",
@@ -3095,7 +3097,8 @@ class EnvironmentProvisioner:
                     "chmod 0600 /opt/takyon/secrets/takyon-subuser-sync.key /opt/takyon/.takyon/.env; "
                     "runuser -u takyon -- ssh -i /opt/takyon/secrets/takyon-subuser-sync.key "
                     "-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "
-                    f"root@{str(replica_blocks[0].get('public_ip') or '').strip()} true",
+                    "-o ConnectTimeout=10 "
+                    f"root@{str(replica_blocks[0].get('private_ip') or '').strip()} true",
                 ],
                 capture_output=True, text=True, timeout=60,
             )
