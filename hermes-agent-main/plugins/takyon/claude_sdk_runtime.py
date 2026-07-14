@@ -266,8 +266,21 @@ def sdk_tool_definitions(
     # loader.  Register the existing web handlers explicitly when HANDOFF asks
     # for that toolset so schema discovery and bridge dispatch see the same
     # guarded web_search/web_extract implementations as the dashboard runtime.
-    if "web" in {str(name or "").strip() for name in enabled_toolsets}:
+    normalized_enabled = {str(name or "").strip() for name in enabled_toolsets}
+    if "web" in normalized_enabled:
         importlib.import_module("tools.web_tools")
+
+    # Hermes' `browser` composite includes web_search as a convenience.  The
+    # generic disabled-toolset subtraction therefore removes web_search even
+    # when this SDK invocation explicitly enables the separate `web` toolset.
+    # Browser tools were never added to this explicit selection, so omitting
+    # that redundant subtraction preserves web_search without exposing a
+    # browser capability.
+    effective_disabled = [
+        name
+        for name in (disabled_toolsets or ())
+        if not ("web" in normalized_enabled and str(name or "").strip() == "browser")
+    ]
 
     from model_tools import get_tool_definitions
 
@@ -278,7 +291,7 @@ def sdk_tool_definitions(
     seen: set[str] = set()
     for raw in get_tool_definitions(
         enabled_toolsets=list(enabled_toolsets),
-        disabled_toolsets=list(disabled_toolsets or ()),
+        disabled_toolsets=effective_disabled,
         quiet_mode=True,
     ):
         if not isinstance(raw, Mapping):

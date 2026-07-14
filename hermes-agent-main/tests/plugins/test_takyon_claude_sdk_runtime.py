@@ -70,15 +70,29 @@ def test_sdk_tool_definitions_remove_legacy_delegation(monkeypatch) -> None:
 
 def test_sdk_tool_definitions_register_web_handlers_for_standalone_cli(monkeypatch) -> None:
     imports: list[str] = []
+    selections: list[dict] = []
     monkeypatch.setattr(
         "plugins.takyon.claude_sdk_runtime.importlib.import_module",
         lambda name: imports.append(name),
     )
-    monkeypatch.setattr("model_tools.get_tool_definitions", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        "model_tools.get_tool_definitions",
+        lambda **kwargs: selections.append(kwargs) or [],
+    )
 
-    sdk_tool_definitions(enabled_toolsets=["takyon", "web"])
+    sdk_tool_definitions(
+        enabled_toolsets=["takyon", "web"],
+        disabled_toolsets=["browser", "terminal"],
+    )
 
     assert imports == ["tools.web_tools"]
+    assert selections == [
+        {
+            "enabled_toolsets": ["takyon", "web"],
+            "disabled_toolsets": ["terminal"],
+            "quiet_mode": True,
+        }
+    ]
 
 
 def test_primary_sdk_env_is_key_free_and_authorized_by_scoped_capability(
