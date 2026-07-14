@@ -23753,6 +23753,40 @@ def _product_refresh_source_state_identity(source_root: Path) -> str:
     )
 
 
+def _product_refresh_contract_input(surface: Mapping[str, Any]) -> dict[str, Any]:
+    """Return only caller-owned contract state; publication output is runtime-owned."""
+
+    contract_input: dict[str, Any] = {
+        str(key): value
+        for key, value in surface.items()
+        if str(key) not in _PRODUCT_REFRESH_VOLATILE_SURFACE_FIELDS
+    }
+    if isinstance(contract_input.get("metadata"), Mapping):
+        contract_input["metadata"] = {
+            str(key): value
+            for key, value in contract_input["metadata"].items()
+            if str(key) not in _PRODUCT_REFRESH_VOLATILE_METADATA_FIELDS
+        }
+    return contract_input
+
+
+def _product_refresh_state_identity(
+    source_root: Path,
+    *,
+    surface: Mapping[str, Any],
+    plans: list[dict[str, Any]] | None,
+) -> str:
+    """Identity of repairable inputs, separate from immutable publication controls."""
+
+    return _hash_operation(
+        {
+            "source": _product_refresh_source_state_identity(source_root),
+            "surface_contract": _product_refresh_contract_input(surface),
+            "plans": list(plans or []),
+        }
+    )
+
+
 def _product_refresh_operation_identity(
     *,
     business: str,
@@ -23768,25 +23802,14 @@ def _product_refresh_operation_identity(
     reason: str,
     actor: str,
 ) -> dict[str, Any]:
-    # Publication output fields are deliberately excluded: this refresh mutates them itself, so an
-    # exact retry must still match after success. Every build-affecting contract field (including
-    # future additions) remains bound unless it is explicitly listed as publication output above.
-    contract_input: dict[str, Any] = {
-        str(key): value
-        for key, value in surface.items()
-        if str(key) not in _PRODUCT_REFRESH_VOLATILE_SURFACE_FIELDS
-    }
-    if isinstance(contract_input.get("metadata"), Mapping):
-        contract_input["metadata"] = {
-            str(key): value
-            for key, value in contract_input["metadata"].items()
-            if str(key) not in _PRODUCT_REFRESH_VOLATILE_METADATA_FIELDS
-        }
+    # The operation hash binds immutable publication controls. Repairable product inputs belong to
+    # the state identity instead: a deterministic pre-publication failure may retry after source,
+    # contract, or plan repair, while a completed publication still rejects any changed state.
+    # Audit prose (reason/actor) is deliberately not part of effect identity.
+    del surface, plans, reason, actor
     return {
         "tool": "business_refresh_product_surface",
         "business": business,
-        "surface_contract": contract_input,
-        "plans": list(plans or []),
         "source_path": source_path,
         "publish_target": publish_target,
         "requested_publish_policy": requested_publish_policy,
@@ -23794,8 +23817,6 @@ def _product_refresh_operation_identity(
         "install": bool(install),
         "timeout_seconds": int(timeout_seconds),
         "activate_on_success": bool(activate_on_success),
-        "reason": reason,
-        "actor": actor,
     }
 
 
@@ -23862,7 +23883,11 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
             source_root = Path(business_root) / source_path
         else:  # Narrow test-double compatibility; production TakyonStore always owns this method.
             source_root = Path(os.getenv("TAKYON_HOME") or get_takyon_home() / DEFAULT_TAKYON_DIRNAME) / "businesses" / business / source_path
-        initial_source_identity = _product_refresh_source_state_identity(source_root)
+        initial_source_identity = _product_refresh_state_identity(
+            source_root,
+            surface=surface,
+            plans=plans,
+        )
         storage_key = _product_refresh_idempotency_storage_key(
             idempotency_key,
             business=business,
@@ -23911,7 +23936,11 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
             receipt_path=receipt_path,
             refresh_source="business_refresh_product_surface",
         )
-        final_source_identity = _product_refresh_source_state_identity(source_root)
+        final_source_identity = _product_refresh_state_identity(
+            source_root,
+            surface=surface,
+            plans=plans,
+        )
         response_context = {
             "success": True,
             "business": business,

@@ -285,6 +285,67 @@ def test_prepublication_failure_retries_same_key_after_source_repair(tmp_path, m
     assert core._idempotency_preclaim_metadata(payload)["state"] == "completed"
 
 
+def test_prepublication_failure_retries_after_source_contract_and_audit_repair(
+    tmp_path, monkeypatch
+):
+    store, source_file, calls = _prepare(tmp_path, monkeypatch)
+
+    def fail_then_pass(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            return _refresh_result(
+                kwargs,
+                refresh_status="failed",
+                publish_status="blocked",
+            )
+        return _refresh_result(
+            kwargs,
+            refresh_status="passed",
+            publish_status="published",
+            database_build_activated=True,
+        )
+
+    monkeypatch.setattr(core, "_finalize_product_surface_refresh", fail_then_pass)
+    args = {
+        "business": "preclaim",
+        "source_path": "product/site",
+        "install": False,
+        "reason": "initial final build",
+        "idempotency_key": "failed-multi-input-repair",
+    }
+
+    failed = json.loads(core.handle_business_refresh_product_surface(args))
+    source_file.write_text("export const version = 'repaired';\n", encoding="utf-8")
+    store.surface_contracts["preclaim"]["notes"] = "reconfirmed after repair"
+    repaired = json.loads(
+        core.handle_business_refresh_product_surface(
+            {**args, "reason": "retry after deterministic typecheck repair"}
+        )
+    )
+
+    assert failed["surface_refresh"]["status"] == "failed"
+    assert repaired["surface_refresh"]["publish"]["status"] == "published"
+    assert len(calls) == 2
+
+
+def test_completed_refresh_rejects_changed_contract_state(tmp_path, monkeypatch):
+    store, _source_file, calls = _prepare(tmp_path, monkeypatch)
+    args = {
+        "business": "preclaim",
+        "source_path": "product/site",
+        "install": False,
+        "idempotency_key": "completed-contract-change",
+    }
+
+    assert json.loads(core.handle_business_refresh_product_surface(args))["success"] is True
+    store.surface_contracts["preclaim"]["notes"] = "a different contract"
+    blocked = json.loads(core.handle_business_refresh_product_surface(args))
+
+    assert blocked["success"] is False
+    assert "already used for different operations" in blocked["error"]
+    assert len(calls) == 1
+
+
 def test_publish_stage_blocker_cannot_retry_after_source_change(tmp_path, monkeypatch):
     _store, source_file, calls = _prepare(tmp_path, monkeypatch)
 
