@@ -828,6 +828,51 @@ test("SDK init fails closed on extra skills, forbidden Agent tool, or a model mi
     runPrimaryAgentTurn(baseConfig, { sdk: fakeSdk([modelInit, successfulResult(modelSession)]) }),
     (error) => error.code === "actual_model_mismatch"
   );
+
+  const assistantMismatchSession = randomUUID();
+  const assistantMismatchInit = sdkInit(
+    "takyon-approved-skills",
+    assistantMismatchSession,
+    ["market-research"]
+  );
+  assistantMismatchInit.plugins[0].path = fixture.pluginPath;
+  await assert.rejects(
+    runPrimaryAgentTurn(baseConfig, { sdk: fakeSdk([
+      assistantMismatchInit,
+      {
+        type: "assistant",
+        session_id: assistantMismatchSession,
+        uuid: randomUUID(),
+        message: { role: "assistant", model: "other-model", content: [{ type: "text", text: "No." }] },
+      },
+    ]) }),
+    (error) => error.code === "actual_model_mismatch"
+  );
+
+  const syntheticResultSession = randomUUID();
+  const syntheticResultInit = sdkInit(
+    "takyon-approved-skills",
+    syntheticResultSession,
+    ["market-research"]
+  );
+  syntheticResultInit.plugins[0].path = fixture.pluginPath;
+  const syntheticResult = successfulResult(syntheticResultSession);
+  syntheticResult.model = "<synthetic>";
+  const syntheticReceipt = await runPrimaryAgentTurn(baseConfig, { sdk: fakeSdk([
+    syntheticResultInit,
+    {
+      type: "assistant",
+      session_id: syntheticResultSession,
+      uuid: randomUUID(),
+      message: {
+        role: "assistant",
+        model: PRIMARY_AGENT_MODEL,
+        content: [{ type: "text", text: "Completed" }],
+      },
+    },
+    syntheticResult,
+  ]) });
+  assert.deepEqual(syntheticReceipt.actual_models, [PRIMARY_AGENT_MODEL]);
 });
 
 test("provider retries and session mirror failures abort instead of silently continuing", async (t) => {

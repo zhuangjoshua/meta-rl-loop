@@ -1304,7 +1304,14 @@ export async function runPrimaryAgentTurn(configuration, { sdk = null } = {}) {
         });
       }
     }
-    const reportedModel = cleanString(message?.message?.model || message?.model);
+    // Only assistant messages represent paid provider inference.  The SDK may
+    // label its own synthesized result/tool bookkeeping as `<synthetic>`;
+    // validating that envelope as a provider model falsely rejects a turn
+    // after every real assistant message already proved the pinned route.
+    // The system init model is independently verified above.
+    const reportedModel = message?.type === "assistant"
+      ? cleanString(message?.message?.model || message?.model)
+      : "";
     if (reportedModel) {
       actualModels.add(reportedModel);
       if (reportedModel !== prepared.broker.model) {
