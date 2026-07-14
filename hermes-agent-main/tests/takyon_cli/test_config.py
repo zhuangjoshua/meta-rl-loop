@@ -39,11 +39,24 @@ class TestGetTakyonHome:
 class TestEnsureTakyonHome:
     def test_creates_subdirs(self, tmp_path):
         with patch.dict(os.environ, {"TAKYON_HOME": str(tmp_path)}):
+            os.environ.pop("TAKYON_DISABLE_LEGACY_SKILL_SYNC", None)
             ensure_takyon_home()
             assert (tmp_path / "cron").is_dir()
             assert (tmp_path / "sessions").is_dir()
             assert (tmp_path / "logs").is_dir()
             assert (tmp_path / "memories").is_dir()
+            assert (tmp_path / "skills").is_dir()
+
+    def test_does_not_materialize_legacy_skills_when_disabled(self, tmp_path):
+        with patch.dict(
+            os.environ,
+            {
+                "TAKYON_HOME": str(tmp_path),
+                "TAKYON_DISABLE_LEGACY_SKILL_SYNC": "1",
+            },
+        ):
+            ensure_takyon_home()
+            assert not (tmp_path / "skills").exists()
 
     def test_creates_default_soul_md_if_missing(self, tmp_path):
         with patch.dict(os.environ, {"TAKYON_HOME": str(tmp_path)}):

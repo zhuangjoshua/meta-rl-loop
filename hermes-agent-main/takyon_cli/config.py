@@ -467,10 +467,14 @@ def ensure_takyon_home():
     else:
         home.mkdir(parents=True, exist_ok=True)
         _secure_dir(home)
-        for subdir in (
+        subdirs = [
             "cron", "sessions", "logs", "logs/curator", "memories",
-            "pairing", "hooks", "image_cache", "audio_cache", "skills",
-        ):
+            "pairing", "hooks", "image_cache", "audio_cache",
+        ]
+        disable_legacy_skills = os.getenv("TAKYON_DISABLE_LEGACY_SKILL_SYNC", "").strip().lower()
+        if disable_legacy_skills not in {"1", "true", "yes", "on"}:
+            subdirs.append("skills")
+        for subdir in subdirs:
             d = home / subdir
             d.mkdir(parents=True, exist_ok=True)
             _secure_dir(d)
