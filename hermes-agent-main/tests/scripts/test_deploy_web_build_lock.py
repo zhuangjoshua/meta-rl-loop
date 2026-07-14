@@ -754,6 +754,17 @@ def test_deploys_replace_mutable_skills_with_immutable_operator_plugin_only():
     assert '"$TAKYON_DEPLOY_SOURCE_REVISION" subuser' in subuser
     assert 'verify_subuser_runtime_surface "$TAKYON_REMOTE_STAGED_RUNTIME" 0' in subuser
     assert 'verify_subuser_runtime_surface "$TAKYON_REMOTE_RUNTIME" 1' in subuser
+    assert "rm -rf '$TAKYON_REMOTE_RUNTIME/.claude' '$TAKYON_REMOTE_RUNTIME/skills'" in subuser
+    for forbidden_runtime_file in (
+        "plugins/takyon/bootstrap_phases.py",
+        "plugins/takyon/claude_sdk_runtime.py",
+        "plugins/takyon/claude_sdk_sessions.py",
+        "scripts/build_approved_skills_manifest.py",
+        "scripts/takyon-claude-agent-task.mjs",
+        "scripts/takyon-claude-primary-entrypoint.mjs",
+        "scripts/takyon-claude-primary-runtime.mjs",
+    ):
+        assert f"rm -f '$TAKYON_REMOTE_RUNTIME/{forbidden_runtime_file}'" in subuser
     assert "rm -rf '$TAKYON_REMOTE_RUNTIME/node_modules/@anthropic-ai'/claude-agent-sdk*" in subuser
 
     release = (ROOT / "deploy/shared/runtime-release.sh").read_text()

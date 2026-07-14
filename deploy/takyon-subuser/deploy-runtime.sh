@@ -402,6 +402,14 @@ activate_subuser_host() {
   ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
     "set -euo pipefail
     rm -rf '$TAKYON_REMOTE_HOME/skills' '$TAKYON_REMOTE_HOME/claude-agent-sdk' '$TAKYON_REMOTE_HOME/runtime/claude-agent-sdk'
+    rm -rf '$TAKYON_REMOTE_RUNTIME/.claude' '$TAKYON_REMOTE_RUNTIME/skills'
+    rm -f '$TAKYON_REMOTE_RUNTIME/plugins/takyon/bootstrap_phases.py'
+    rm -f '$TAKYON_REMOTE_RUNTIME/plugins/takyon/claude_sdk_runtime.py'
+    rm -f '$TAKYON_REMOTE_RUNTIME/plugins/takyon/claude_sdk_sessions.py'
+    rm -f '$TAKYON_REMOTE_RUNTIME/scripts/build_approved_skills_manifest.py'
+    rm -f '$TAKYON_REMOTE_RUNTIME/scripts/takyon-claude-agent-task.mjs'
+    rm -f '$TAKYON_REMOTE_RUNTIME/scripts/takyon-claude-primary-entrypoint.mjs'
+    rm -f '$TAKYON_REMOTE_RUNTIME/scripts/takyon-claude-primary-runtime.mjs'
     rm -rf '$TAKYON_REMOTE_RUNTIME/node_modules/@anthropic-ai'/claude-agent-sdk*
     rm -f '$TAKYON_REMOTE_RUNTIME/node_modules/.bin'/claude*
     rm -f '$TAKYON_REMOTE_RUNTIME/plugins/takyon'/claude_sdk_runtime*.pyc
