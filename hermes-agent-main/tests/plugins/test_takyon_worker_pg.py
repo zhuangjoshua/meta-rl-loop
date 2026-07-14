@@ -2010,6 +2010,31 @@ def test_bootstrap_durable_product_requires_build_after_runtime_owned_final_pass
     ) is True
 
 
+def test_bootstrap_durable_product_prefers_authoritative_publish_columns_over_stale_attempt():
+    surface = {
+        "publish_status": "published",
+        "live_build_id": "final-build",
+        "metadata": {
+            "takyon_publish": {"status": "blocked", "blocker": "old typecheck failure"},
+            "bootstrap_final_product_pass_required": True,
+            "bootstrap_final_product_baseline_build_id": "landing-build",
+        },
+    }
+
+    class _Store:
+        @contextlib.contextmanager
+        def _connect(self):
+            yield object()
+
+        @staticmethod
+        def _app_surface_contract(_conn, _slug):
+            return surface
+
+    assert worker._bootstrap_has_durable_live_product(
+        _Store(), "acme", workflow_requested=False
+    ) is True
+
+
 def test_bootstrap_human_review_blocker_survives_same_job_retry():
     class _Conn:
         def execute(self, _sql, _params):
@@ -2336,7 +2361,12 @@ def test_ceo_bootstrap_handler_binds_owner_before_loading_summary(monkeypatch):
     class _FakeStore:
         def __init__(self, *args, **kwargs):
             self.operator_user_id = kwargs.get("operator_user_id")
-            seen["store_operator_user_id"] = self.operator_user_id
+            seen.setdefault("store_initializations", []).append(
+                {
+                    "operator_user_id": self.operator_user_id,
+                    "session_bound": bool(seen.get("session_bound")),
+                }
+            )
 
         def read(self, *, scope, query, include=None, limit=None):
             assert scope == "business:acme"
@@ -2368,7 +2398,11 @@ def test_ceo_bootstrap_handler_binds_owner_before_loading_summary(monkeypatch):
             "enabled_toolsets": ["takyon", "web", "skills"],
         },
     )
-    monkeypatch.setattr(session_context, "set_session_vars", lambda **_k: [])
+    def _bind_session(**_kwargs):
+        seen["session_bound"] = True
+        return []
+
+    monkeypatch.setattr(session_context, "set_session_vars", _bind_session)
     monkeypatch.setattr(session_context, "clear_session_vars", lambda *_a, **_k: None)
     monkeypatch.setattr(worker, "_record_runtime_event", lambda *_a, **_k: None)
     monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("ok", 0.0, "none", True))
@@ -2396,7 +2430,10 @@ def test_ceo_bootstrap_handler_binds_owner_before_loading_summary(monkeypatch):
     )
 
     assert result.result["business_slug"] == "acme"
-    assert seen["store_operator_user_id"] == operator_user_id
+    assert seen["store_initializations"][:2] == [
+        {"operator_user_id": operator_user_id, "session_bound": False},
+        {"operator_user_id": None, "session_bound": True},
+    ]
 
 
 def test_bootstrap_completed_and_published_job_completes_not_requeued(monkeypatch):
@@ -2835,20 +2872,43 @@ def test_bootstrap_post_turn_wake_commit_exception_does_not_requeue(monkeypatch)
     assert ("completed", "ceo_bootstrap") in captured["events"]
 
 
-def test_bootstrap_capped_before_publish_still_requeues(monkeypatch):
-    # The ONLY genuine requeue: the turn capped out (turn_completed=False) AND the site never
-    # published. That is a real incomplete — the handler must raise so run_one requeues for
-    # continuation. (Guards against the done-gate going too far and never retrying real failures.)
+def test_bootstrap_capped_before_publish_stops_without_requeue(monkeypatch):
+    # Two bounded SDK queries that still cannot satisfy the same deterministic phase predicate are
+    # terminal for this job generation. Requeueing the whole job would repeat model spend without
+    # changing the missing evidence.
     _install_bootstrap_handler_stubs(
         monkeypatch,
         turn_completed=False,
         surface_refresh={"publish": {"status": "build_failed", "blocker": "vite build error"}},
     )
+    recorded: list[dict[str, Any]] = []
+
+    def _record_phase_blocker(*_args, **kwargs):
+        payload = {
+            "review_required": True,
+            "blocker": str(kwargs["blocker"]),
+            "source": str(kwargs["source"]),
+        }
+        recorded.append(payload)
+        return payload
+
+    monkeypatch.setattr(worker, "_record_bootstrap_human_review_required", _record_phase_blocker)
     job = SimpleNamespace(id="job-abc-000", business_slug="acme", payload={})
 
-    with pytest.raises(RuntimeError) as exc:
-        worker.ceo_bootstrap_handler(job)
-    assert "did not produce its authoritative done predicate" in str(exc.value)
+    result = worker.ceo_bootstrap_handler(job)
+
+    assert result.terminal_status == "blocked"
+    assert result.terminal_reason == "bootstrap_human_review_required"
+    assert result.result["bootstrap_completion_status"] == "needs_human_review"
+    assert result.result["review_source"] == "bootstrap_phase_predicate"
+    assert "after two bounded SDK queries" in result.result["review_blocker"]
+    assert recorded == [
+        {
+            "review_required": True,
+            "blocker": result.result["review_blocker"],
+            "source": "bootstrap_phase_predicate",
+        }
+    ]
 
 
 def test_bootstrap_failure_cancels_and_drains_delegated_child_before_outer_requeue(monkeypatch):

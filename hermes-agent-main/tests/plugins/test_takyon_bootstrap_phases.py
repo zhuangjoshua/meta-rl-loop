@@ -406,6 +406,48 @@ def test_landing_publication_does_not_gate_on_skill_receipts() -> None:
     assert evidence.source == "live-product-publication"
 
 
+def test_landing_publication_prefers_authoritative_columns_over_stale_attempt() -> None:
+    class SurfaceStore:
+        def _business_root(self, _slug):
+            return Path(".")
+
+        def _connect(self):
+            return nullcontext(object())
+
+        def _app_surface_contract(self, _conn, _slug):
+            return {
+                "publish_status": "published",
+                "live_build_id": "landing-build",
+                "public_url": "https://acme.coscale.app/",
+                "metadata": {
+                    "takyon_publish": {
+                        "status": "blocked",
+                        "blocker": "old typecheck failure",
+                    }
+                },
+            }
+
+    evidence = worker._bootstrap_phase_authoritative_evidence(
+        SurfaceStore(),
+        SimpleNamespace(
+            business_slug="acme",
+            owner_user_id=str(uuid.uuid4()),
+            phase_receipts={"landing_build_publish": []},
+            phase_idempotency={},
+        ),
+        "landing_build_publish",
+        workflow_requested=True,
+        archetype="web_saas",
+    )
+
+    assert evidence is not None
+    assert evidence.details == {
+        "build_id": "landing-build",
+        "public_url": "https://acme.coscale.app/",
+        "status": "published",
+    }
+
+
 def test_brief_phase_does_not_gate_on_failed_skill_receipt(tmp_path) -> None:
     strategy = tmp_path / "research" / "strategy.md"
     strategy.parent.mkdir(parents=True)

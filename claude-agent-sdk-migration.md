@@ -142,6 +142,79 @@ Current bootstrap explicitly excludes deep market research, pulse work, distribu
 
 Phase order, retries, publication authority, paid-call gating, idempotency, and completion are runtime responsibilities. A landing-design, research, SEO, product-build, or distribution method can be a skill.
 
+### Bootstrap gate audit
+
+This audit covers every gate on the fresh-business create path, including the SDK phase wrapper and
+the older product, queue, authority, and publication gates it calls. “New” means introduced by this
+Claude Agent SDK migration goal; “old” means it existed before commit `111f64f4`. A new wrapper around
+an old invariant is labelled explicitly.
+
+The `signal-orchard-sdk7-20260714` brief failure was not a content failure: the SDK wrote a valid
+`research/strategy.md`, but the new brief predicate read the canonical cache through a `TakyonStore`
+created before the mounted session workspace existed, so it could not see the in-progress artifact.
+The correct fix is to reconstruct the store after session binding. The artifact predicate remains;
+the false second model call and job requeue do not.
+
+The same canary later exposed a second new-wrapper defect: the landing predicate preferred stale
+compatibility metadata from an earlier failed typecheck over the authoritative top-level published
+status, live build, and public URL. The predicate must prefer normalized surface columns and use
+attempt metadata only as a legacy fallback; this changes no publication authority or backend rail.
+
+#### New in this migration goal
+
+| Gate | Grade | Disposition |
+|---|---|---|
+| Durable phase row is scoped to the exact owner, business, job, SDK session, immutable inputs, and derived idempotency map | **Keep hard** | Prevents cross-user, cross-business, and retry drift. |
+| Phases advance only in order and only from runtime-authored evidence | **Keep hard** | Prevents model prose from declaring work complete. |
+| Per-phase tool allowlist | **Keep hard; move bindings to HANDOFF** | The restriction is correct, but exact tool names belong in HANDOFF and should resolve from semantic phase capabilities. |
+| Tool effects must use the phase's runtime-derived idempotency keys | **Keep hard** | Prevents duplicate paid calls, builds, publications, and retry side effects. |
+| Preflight owner still matches the business owner | **Keep hard** | This is tenant authority, not product quality. |
+| Brief requires a non-seeded `research/strategy.md` artifact | **Keep after fixing workspace visibility** | The artifact is valid phase evidence; the pre-session store bug caused the false rejection and is fixed by rebinding the store inside the mounted session context. |
+| Surface requires canonical source plus auth/account/profile/checkout features and `/`, `/app`, `/app/profile` routes | **Keep policy-bound; move exact values to HANDOFF** | The paid-SaaS bootstrap needs these backend rails, but exact paths and feature names are deployment policy rather than skill content. |
+| Landing requires recorded `published` status, a live build ID, and a public URL | **Keep hard** | A model statement or successful local build is not a publication. |
+| Search requires either its exact receipt or an explicit provider blocker | **Keep nonblocking** | Search remains optional; an exact blocker advances the bootstrap without pretending setup succeeded. |
+| Logo requires either its exact receipt or the existing insufficient-credit/unconfigured-provider blocker | **Keep nonblocking** | The real rail is attempted, but an allowed external blocker does not erase a valid core product. |
+| Final workflow phase delegates to the older durable-product predicate | **Keep hard** | The wrapper is new; the publication/action invariant is old and remains authoritative. |
+| Mobile requires a real build ID or one of the existing compliance/credit/EAS blockers; non-mobile records a skip | **Keep policy-bound** | It preserves the prior mobile contract without blocking web businesses. |
+| Finalize requires the product done predicate, a runtime-owned progress update, and a natural SDK turn-completion receipt | **Relax bookkeeping failure; keep product and runtime truth hard** | Missing progress bookkeeping must produce an exact terminal/degraded status, not spend another model turn or rebuild an already-live product. |
+| Per-phase SDK turn caps | **Keep hard** | They bound spend and runaway loops; values remain phase policy, not skill content. |
+| One automatic repair query when a phase predicate is still false | **Keep bounded** | One focused correction is useful when the agent stopped before producing the artifact. |
+| More than two phase queries throws a generic handler error and requeues the whole job | **Remove/replace** | Return a structured phase blocker with the exact missing predicate; never convert a deterministic phase miss into a second full-job attempt. |
+| Stable job-level SDK session may resume only from committed transcript evidence | **Keep hard** | Prevents transcript loss, cross-job resume, and fabricated resume state. |
+| SDK invocation requires an explicit session, budget, pinned runtime/model route, scoped tools, and no `Agent` tool | **Keep hard** | These are the new adapter's security and spend boundaries. |
+| Approved skill plugin manifest, digest, name, mode, resource-path, and read-only mount checks | **Keep hard** | These govern what code/guidance is exposed, not whether a product phase is complete. |
+| Product refresh preclaims a business-and-operation-scoped publication idempotency key and rejects changed or ambiguous retries | **Keep hard** | This new migration hardening prevents duplicate build/publish effects. |
+| Phase-to-skill receipt requirement (`PHASE_REQUIRED_SKILLS`) | **Remove — already removed** | It overrode Claude's native `when to use` routing and was an unauthorized completion gate. |
+| Native skill invocation and digest proof | **External audit only** | Inspect SDK receipts after the run; never block or repair the business from a hard-coded phase-to-skill map. |
+
+#### Old gates retained from before this migration goal
+
+| Gate | Grade | Disposition |
+|---|---|---|
+| Worker claim, lease heartbeat, exact owner/RLS scope, and parent-generation fences | **Keep hard** | They prevent concurrent or unauthorized mutation. |
+| Safebox capability, model pin, cumulative budget ceiling, reserve, exact settlement, and no-key-egress checks | **Keep hard** | The SDK changes the caller, not paid-call authority. |
+| Canonical product source and publish-target boundaries | **Keep hard** | Product files and public destinations must stay inside the business scope. |
+| Install/build/typecheck and build-output checks | **Keep hard** | A broken local build cannot publish. |
+| Product surface-contract validation | **Keep hard** | Published source must match the backend routes and runtime rails it claims. |
+| Visible scaffold/fallback-shell sentinel | **Keep hard** | The starter shell cannot be shipped as the customer product. |
+| Null app-access gate and incomplete cancellation-control checks | **Keep hard** | Auth and billing UI must use the real backend contract. |
+| Declared action, action file, UI call, normalized result, and persistence consistency checks | **Keep hard** | A requested workflow must be structurally real, not copy or an orphan file. |
+| Durable-product predicate: published status, final-pass marker, a live build distinct from the landing baseline, and a real HTTP action when workflow was requested | **Keep hard** | This is the authoritative core-product done gate. |
+| Immutable build staging, digest/revision checks, live-pointer compare-and-swap, activation reconciliation, and post-commit readback | **Keep hard** | Prevents stale, ambiguous, or cross-build public activation. |
+| Delegated-child drain/cancel before parent retry or settlement | **Keep hard; narrow after cleanup** | Keep `product.surface_refresh`; remove the legacy `claude.agent_task` child kind after its queue is drained and handler deleted. |
+| Hard end-to-end deadline and durable human-review stop | **Keep hard** | It prevents unbounded spend and overlapping abandoned work. |
+| New validation-passed/platform-publish blocker stops automation and suppresses wake | **Keep terminal** | A platform failure should be reported once, not trigger autonomous rebuild loops. |
+| Post-turn refresh of source changed after the last publish | **Keep temporarily, then remove if unreachable** | It predates the phase state machine; after fresh and retry canaries prove every edit is published inside an atomic phase, delete this redundant safety net rather than keep two publication orchestrators. |
+| Post-turn refresh and wake-scheduling bookkeeping are nonfatal after a proven product completion | **Keep nonfatal** | Bookkeeping must not requeue a completed paid build. |
+| Signed-in live action execution and full browser workflow verification | **External acceptance gate** | Structural action truth can complete bootstrap; CLI/browser E2E must separately prove the live customer workflow without modifying the business. |
+| Taste quality and native skill use | **External acceptance gate** | Deterministic product validators stay hard; subjective quality and correct skill routing are checked from the transcript, receipts, and live product. |
+| X publication | **Separate non-core test** | X is not a bootstrap phase; after core E2E, run an ordinary turn and report the exact X blocker if it alone fails. |
+
+The gate stack therefore has four legitimate layers: authority/spend, phase idempotency/order,
+deterministic product/publication truth, and external migration acceptance. Skill choice belongs only
+to the fourth layer. The generic two-query handler exception is the one gate in the current stack
+that should not survive.
+
 ## Wake After Migration
 
 ### Wake invariants

@@ -2287,7 +2287,7 @@ def _bootstrap_has_durable_live_product(
     metadata = surface.get("metadata") if isinstance(surface.get("metadata"), Mapping) else {}
     publish = metadata.get("takyon_publish") if isinstance(metadata.get("takyon_publish"), Mapping) else {}
     publish_status = str(
-        publish.get("status") or surface.get("publish_status") or ""
+        surface.get("publish_status") or publish.get("status") or ""
     ).strip().lower()
     if publish_status != "published":
         return False
@@ -2390,9 +2390,12 @@ def _bootstrap_phase_authoritative_evidence(
         if phase == "landing_build_publish":
             metadata = surface.get("metadata") if isinstance(surface.get("metadata"), Mapping) else {}
             publish = metadata.get("takyon_publish") if isinstance(metadata.get("takyon_publish"), Mapping) else {}
-            status = str(publish.get("status") or surface.get("publish_status") or "").lower()
+            # The normalized surface columns are durable publication truth. Compatibility metadata
+            # may retain a prior failed attempt after a later publish succeeds and must not override
+            # the live pointer, as happened in the SDK7 production canary.
+            status = str(surface.get("publish_status") or publish.get("status") or "").lower()
             build_id = str(surface.get("live_build_id") or "").strip()
-            public_url = str(publish.get("public_url") or surface.get("public_url") or "").strip()
+            public_url = str(surface.get("public_url") or publish.get("public_url") or "").strip()
             if status != "published" or not build_id or not public_url:
                 return None
             return AuthoritativePhaseEvidence(
@@ -2512,6 +2515,27 @@ def _bootstrap_phase_authoritative_evidence(
             },
         )
     return None
+
+
+def _bootstrap_phase_missing_evidence(phase: str) -> str:
+    """Human-readable predicate summary for a terminal bounded phase miss."""
+
+    return {
+        "preflight": "the owner-scoped business row",
+        "brief": "a non-seeded research/strategy.md artifact",
+        "surface": (
+            "the canonical product/site surface contract with the required runtime features "
+            "and routes"
+        ),
+        "landing_build_publish": "a published landing build ID and public URL",
+        "search": "an exact Search Console receipt or explicit provider blocker",
+        "logo": "an exact logo receipt or allowed credit/provider blocker",
+        "final_workflow_build_publish": (
+            "a distinct published final build and the requested real HTTP workflow action"
+        ),
+        "mobile": "a real mobile build ID, an allowed mobile blocker, or a non-mobile skip",
+        "finalize": "the durable product, runtime completion, and operator-update receipts",
+    }.get(str(phase or ""), "its authoritative runtime evidence")
 
 
 def _post_bootstrap_phase_operator_update(
@@ -3674,6 +3698,12 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 business_slug=slug,
                 task_kind="ceo_bootstrap",
             )
+            # The store used for preflight was created before the mounted session workspace existed.
+            # Recreate it from the now-bound session context so every phase predicate reads the same
+            # in-progress workspace the SDK and parent tools are mutating. Otherwise a direct phase
+            # artifact (notably research/strategy.md) is invisible until exception cleanup syncs the
+            # mount, forcing a false second model call and job retry.
+            store = TakyonStore()
             # run_id carries the durable job id so every cost/log event inside the turn
             # correlates to this job (operator_cost_events, migration 0070).
             with _bound_operator_task_context(
@@ -3752,9 +3782,19 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                         break
                     phase_calls_this_attempt[phase] = phase_calls_this_attempt.get(phase, 0) + 1
                     if phase_calls_this_attempt[phase] > 2:
-                        raise RuntimeError(
-                            f"bootstrap phase {phase} did not produce its authoritative done predicate"
+                        blocker = (
+                            f"bootstrap phase {phase} did not produce "
+                            f"{_bootstrap_phase_missing_evidence(phase)} after two bounded SDK queries"
                         )
+                        human_review_blocker = _record_bootstrap_human_review_required(
+                            store,
+                            slug,
+                            bootstrap_job_id=bootstrap_job_id,
+                            bootstrap_attempt=bootstrap_attempt,
+                            blocker=blocker,
+                            source="bootstrap_phase_predicate",
+                        )
+                        break
                     phase_store.start_phase(
                         bootstrap_job_id, phase, job_attempt=bootstrap_attempt
                     )
