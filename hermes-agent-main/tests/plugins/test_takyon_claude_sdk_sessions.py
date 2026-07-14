@@ -37,6 +37,7 @@ class _SessionConn:
         self.retention_scans = 0
         self.retention_scan_params: list[tuple[object, ...]] = []
         self.retention_deletes: list[tuple[object, ...]] = []
+        self.insert_batch_sizes: list[int] = []
         self.lock_hook = None
 
     def __enter__(self):
@@ -71,35 +72,41 @@ class _SessionConn:
                 self.lock_hook(str(params[0]))
             return _Cursor(one=(True,))
         if normalized.startswith("insert into public.agent_sdk_session_entries"):
-            owner, business, project, session, subpath, index, entry_uuid, encoded = params
-            duplicate = bool(
-                entry_uuid
-                and any(
-                    row["owner"] == owner
-                    and row["business"] == business
-                    and row["project"] == project
-                    and row["session"] == session
-                    and row["subpath"] == subpath
-                    and row["entry_uuid"] == entry_uuid
-                    for row in self.rows
+            owner, business, project, session, subpath, indexes, uuids, encoded = params
+            assert "from unnest(" in normalized
+            assert "with ordinality" in normalized
+            assert "order by batch.source_order" in normalized
+            assert len(indexes) == len(uuids) == len(encoded)
+            self.insert_batch_sizes.append(len(indexes))
+            for index, entry_uuid, entry_json in zip(indexes, uuids, encoded):
+                duplicate = bool(
+                    entry_uuid
+                    and any(
+                        row["owner"] == owner
+                        and row["business"] == business
+                        and row["project"] == project
+                        and row["session"] == session
+                        and row["subpath"] == subpath
+                        and row["entry_uuid"] == entry_uuid
+                        for row in self.rows
+                    )
                 )
-            )
-            if not duplicate:
-                self.rows.append(
-                    {
-                        "id": self.next_id,
-                        "owner": owner,
-                        "business": business,
-                        "project": project,
-                        "session": session,
-                        "subpath": subpath,
-                        "index": index,
-                        "entry_uuid": entry_uuid,
-                        "entry": json.loads(encoded),
-                        "created_at": self.now,
-                    }
-                )
-                self.next_id += 1
+                if not duplicate:
+                    self.rows.append(
+                        {
+                            "id": self.next_id,
+                            "owner": owner,
+                            "business": business,
+                            "project": project,
+                            "session": session,
+                            "subpath": subpath,
+                            "index": index,
+                            "entry_uuid": entry_uuid,
+                            "entry": json.loads(entry_json),
+                            "created_at": self.now,
+                        }
+                    )
+                    self.next_id += 1
             return _Cursor()
         if normalized.startswith(
             "select owner_user_id::text, coalesce(business_slug, '')"
@@ -271,6 +278,50 @@ def test_postgres_session_store_preserves_order_and_deduplicates_uuid_retries() 
     ]
     assert len(conn.locks) == 3
     assert len(set(conn.locks)) == 1
+    assert conn.insert_batch_sizes == [2, 2]
+
+
+def test_postgres_session_store_bulk_inserts_large_append_in_one_round_trip() -> None:
+    conn = _SessionConn()
+    store, key = _store(conn)
+    entries = [
+        {
+            "type": "assistant",
+            "uuid": f"bulk-{index}",
+            "message": f"entry-{index}-" + ("x" * 2_000),
+        }
+        for index in range(337)
+    ]
+
+    store.append(key, entries)
+
+    assert conn.insert_batch_sizes == [337]
+    assert store.load(key) == entries
+
+
+def test_postgres_session_store_bulk_duplicate_and_uuidless_semantics() -> None:
+    conn = _SessionConn()
+    store, key = _store(conn)
+    store.append(key, [{"type": "user", "uuid": "existing", "message": "kept"}])
+
+    store.append(
+        key,
+        [
+            {"type": "user", "uuid": "existing", "message": "retry"},
+            {"type": "assistant", "uuid": "new", "message": "first"},
+            {"type": "assistant", "uuid": "new", "message": "batch duplicate"},
+            {"type": "system", "message": "uuidless-one"},
+            {"type": "system", "message": "uuidless-two"},
+        ],
+    )
+
+    assert conn.insert_batch_sizes == [1, 4]
+    assert store.load(key) == [
+        {"type": "user", "uuid": "existing", "message": "kept"},
+        {"type": "assistant", "uuid": "new", "message": "first"},
+        {"type": "system", "message": "uuidless-one"},
+        {"type": "system", "message": "uuidless-two"},
+    ]
 
 
 def test_postgres_session_store_scopes_project_session_and_subpaths() -> None:

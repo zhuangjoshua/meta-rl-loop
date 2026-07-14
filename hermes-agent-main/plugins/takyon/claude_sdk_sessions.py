@@ -438,27 +438,38 @@ class PostgresClaudeSdkSessionStore:
         with self._connection() as conn:
             with conn.transaction():
                 self._lock_and_assert_owner(conn, validated)
-                for entry_index, (entry, encoded) in enumerate(encoded_entries):
-                    entry_uuid = str(entry.get("uuid") or "").strip() or None
-                    conn.execute(
-                        "insert into public.agent_sdk_session_entries "
-                        "(owner_user_id, business_slug, project_key, session_id, "
-                        "subpath, entry_index, entry_uuid, entry) "
-                        "values (%s::uuid, %s, %s, %s::uuid, %s, %s, %s, %s::jsonb) "
-                        "on conflict (owner_user_id, business_slug, project_key, "
-                        "session_id, subpath, entry_uuid) where entry_uuid is not null "
-                        "do nothing",
-                        (
-                            self.operator_user_id,
-                            self.business_slug or None,
-                            validated["projectKey"],
-                            validated["sessionId"],
-                            subpath,
-                            entry_index,
-                            entry_uuid,
-                            encoded.decode("utf-8"),
-                        ),
-                    )
+                entry_indexes = list(range(len(encoded_entries)))
+                entry_uuids = [
+                    str(entry.get("uuid") or "").strip() or None
+                    for entry, _encoded in encoded_entries
+                ]
+                encoded_payloads = [
+                    encoded.decode("utf-8") for _entry, encoded in encoded_entries
+                ]
+                conn.execute(
+                    "insert into public.agent_sdk_session_entries "
+                    "(owner_user_id, business_slug, project_key, session_id, "
+                    "subpath, entry_index, entry_uuid, entry) "
+                    "select %s::uuid, %s, %s, %s::uuid, %s, "
+                    "batch.entry_index, batch.entry_uuid, batch.entry_json::jsonb "
+                    "from unnest(%s::integer[], %s::text[], %s::text[]) "
+                    "with ordinality as batch("
+                    "entry_index, entry_uuid, entry_json, source_order) "
+                    "order by batch.source_order "
+                    "on conflict (owner_user_id, business_slug, project_key, "
+                    "session_id, subpath, entry_uuid) where entry_uuid is not null "
+                    "do nothing",
+                    (
+                        self.operator_user_id,
+                        self.business_slug or None,
+                        validated["projectKey"],
+                        validated["sessionId"],
+                        subpath,
+                        entry_indexes,
+                        entry_uuids,
+                        encoded_payloads,
+                    ),
+                )
 
     def load(
         self, key: Mapping[str, str]
