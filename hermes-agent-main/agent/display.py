@@ -250,7 +250,6 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
             "business_x_search": ["query", "business"],
             "business_publish_test_outreach": ["channel", "destination_label", "destination_url", "target", "business"],
             "business_reddit_publish_outreach": ["subreddit", "thread_external_id", "destination_label", "business"],
-            "business_claude_agent_task": ["workspace", "source_path", "business"],
             "business_conversation_agent_task": ["goal", "task", "context", "business"],
             "business_record_agent": ["scope", "status", "business"],
         }

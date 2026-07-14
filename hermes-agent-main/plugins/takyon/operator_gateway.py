@@ -1,10 +1,8 @@
-"""Takyon operator inference compatibility and primary-agent facade.
+"""Takyon primary Agent SDK facade and provider transport helpers.
 
 New operator turns use :class:`PrimaryAgentFacade`, which delegates the model
 loop to the shared Claude Agent SDK subprocess and retains only the metadata
-surface needed by the existing CLI/dashboard RPC layer.  The older HTTP
-transport helpers remain temporarily for rollback inspection, but no live
-Takyon builder constructs the former Hermes model loop.
+surface needed by the existing CLI/dashboard RPC layer.
 """
 
 from __future__ import annotations
@@ -199,7 +197,7 @@ def enable_operator_gateway(
     if compressor is not None:
         compressor._takyon_operator_gateway_context = context
     # Takyon CEO turns never switch provider/model. Clear every fallback-chain state even if a
-    # generic Hermes caller tried to populate it, and disable credential-pool failover.
+    # generic caller tried to populate it, and disable credential-pool failover.
     agent._fallback_chain = []
     agent._fallback_model = None
     agent._fallback_index = 0
@@ -835,7 +833,7 @@ class _OperatorGatewayHandler:
 def _operator_anthropic_broker_lockdown() -> bool:
     """Whether the operator CEO loop must route Anthropic through the safebox PROXY (key-free) rather
     than resolving a raw provider key locally. Defaults ON whenever a remote safebox is configured (same
-    contract as the coding worker's ``core._claude_agent_broker_lockdown_enabled``)."""
+    contract as the primary SDK's ``core._claude_agent_broker_lockdown_enabled``)."""
     from plugins.takyon import core as takyon_core
 
     return bool(takyon_core._claude_agent_broker_lockdown_enabled())
@@ -844,7 +842,7 @@ def _operator_anthropic_broker_lockdown() -> bool:
 def _operator_anthropic_broker_url() -> str:
     """Safebox proxy root for host-side operator gateway calls.
 
-    The coding worker may need a Docker-reachable URL such as ``host.docker.internal``, while the
+    A sandboxed SDK process may need a Docker-reachable URL such as ``host.docker.internal``, while the
     interactive CLI gateway runs on the Mac host and needs the localhost tunnel. Keep that host override
     separate so local operator chat does not inherit a container-only name.
     """
@@ -1109,7 +1107,6 @@ def _openai_like_auth_headers(runtime: dict[str, Any]) -> dict[str, str]:
     from providers import get_provider_profile
     from takyon_cli.models import copilot_default_headers
     from utils import base_url_host_matches
-    import run_agent
 
     base_url = str(runtime.get("base_url") or "")
     provider = str(runtime.get("provider") or "").strip().lower()
@@ -1121,13 +1118,25 @@ def _openai_like_auth_headers(runtime: dict[str, Any]) -> dict[str, str]:
     elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
         headers.update(build_nvidia_nim_headers(base_url))
     elif base_url_host_matches(base_url, "api.routermint.com"):
-        headers.update(run_agent._routermint_headers())
+        from takyon_cli import __version__ as takyon_version
+
+        headers["User-Agent"] = f"TakyonAgent/{takyon_version}"
     elif base_url_host_matches(base_url, "api.githubcopilot.com"):
         headers.update(copilot_default_headers())
     elif base_url_host_matches(base_url, "api.kimi.com"):
         headers["User-Agent"] = "claude-code/0.1.0"
     elif base_url_host_matches(base_url, "portal.qwen.ai"):
-        headers.update(run_agent._qwen_portal_headers())
+        import platform
+
+        user_agent = f"QwenCode/0.14.1 ({platform.system().lower()}; {platform.machine()})"
+        headers.update(
+            {
+                "User-Agent": user_agent,
+                "X-DashScope-CacheControl": "enable",
+                "X-DashScope-UserAgent": user_agent,
+                "X-DashScope-AuthType": "qwen-oauth",
+            }
+        )
     elif base_url_host_matches(base_url, "chatgpt.com"):
         from agent.auxiliary_client import _codex_cloudflare_headers
 

@@ -58,7 +58,7 @@ gateway suite green; product `/generate`+`/search` work through the broker.
 
 **D. Worker.** Create the confined network; provision `TAKYON_DOCKER_BROKER_TOKEN`; set
 `TAKYON_CLAUDE_AGENT_BROKER=1`. GATE: `ps` on worker host → no key; container has no default-bridge egress;
-a real `business_claude_agent_task` still runs. Then delete the flag's OFF branch.
+a real primary Agent SDK bootstrap still runs through the Safebox route. Then delete the flag's OFF branch.
 
 **E. Delete unsafe.** Remove `GET /v1/env/{key}`, `/v1/env/first`, `/v1/env/snapshot`, `/v1/env` from
 `safebox_app.py`; replace shared-bearer auth on remaining admin routes with capability/role checks. GATE:

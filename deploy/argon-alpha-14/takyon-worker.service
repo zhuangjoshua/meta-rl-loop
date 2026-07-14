@@ -69,7 +69,6 @@ Environment=TAKYON_CLAUDE_SKILLS_PLUGIN=/opt/takyon/.takyon/runtime/claude-agent
 Environment=TAKYON_CLAUDE_SKILLS_MANIFEST=/opt/takyon/.takyon/runtime/claude-agent-sdk/current/plugin/approved-skills.json
 Environment=TAKYON_CLAUDE_NODE_RUNTIME=/opt/takyon/.takyon/runtime/claude-agent-sdk/current/node-runtime
 Environment=TAKYON_DISABLE_LEGACY_SKILL_SYNC=1
-Environment=TAKYON_WORKER_AGENT_RUNTIME=claude-agent-sdk
 Environment=TAKYON_HOST_ROLE=operator
 Environment=TAKYON_ENV=prod
 Environment=TAKYON_STRIPE_MODE=live

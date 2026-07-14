@@ -1158,17 +1158,16 @@ function phaseTraceArray(workspace: WorkspaceLike): PhaseTrace[] {
   return out;
 }
 
-// The 6 canonical bootstrap phases, in order, each keyed to the tool whose
-// completion marks the phase done. Sign-on AND Subscription/account are both
-// wired by the SECOND business_claude_agent_task pass (the /app access shell +
-// /app/profile account page), so they share that pass's second occurrence.
+// The customer-facing bootstrap phases, keyed to guarded product/publication
+// tools. Sign-on and subscription are both completed by the second surface
+// publication, which contains the final signed-in product pass.
 const PHASE_LABELS: { id: string; label: string }[] = [
   { id: "landing", label: "Building your landing page" },
-  { id: "logo", label: "Adding your logo" },
   { id: "search_console", label: "Getting found on Google" },
+  { id: "logo", label: "Adding your logo" },
   { id: "sign_on", label: "Wiring sign-in" },
   { id: "subscription", label: "Turning on subscriptions" },
-  { id: "launch", label: "Putting your launch post out" },
+  { id: "launch", label: "Completing launch checks" },
 ];
 
 /**
@@ -1181,14 +1180,13 @@ const PHASE_LABELS: { id: string; label: string }[] = [
 export function livePhases(workspace: WorkspaceLike): LivePhase[] {
   const traces = phaseTraceArray(workspace);
 
-  // Index the bootstrap tool events in chronological order. The two
-  // business_claude_agent_task passes are distinguished by occurrence: the
-  // first is the landing build (2a), the second is the app-shell pass (2b).
-  const claudeTasks = traces.filter((t) => t.toolName === "business_claude_agent_task");
+  // The two guarded surface publications are distinguished by occurrence: the
+  // first is the landing pass and the second is the signed-in product pass.
+  const surfacePublishes = traces.filter((t) => t.toolName === "business_refresh_product_surface");
   const logo = traces.find((t) => t.toolName === "business_generate_logo");
   const searchConsole = traces.find((t) => t.toolName === "business_register_search_console");
-  const landingTask = claudeTasks[0];
-  const appShellTask = claudeTasks[1];
+  const landingTask = surfacePublishes[0];
+  const appShellTask = surfacePublishes[1];
 
   const isComplete = (t?: PhaseTrace) =>
     Boolean(t) && (t!.status === "completed" || t!.status === "complete");
@@ -1210,13 +1208,10 @@ export function livePhases(workspace: WorkspaceLike): LivePhase[] {
     landing: landingTask,
     logo,
     search_console: searchConsole,
-    // Sign-on and Subscription/account are the same 2b pass; both light up
-    // together with the second claude_agent_task.
+    // Sign-on and Subscription/account are the same final product pass.
     sign_on: appShellTask,
     subscription: appShellTask,
-    // The launch post phase has no single durable tool trace keyed here yet
-    // (the X publish records a job, not a tool.complete trace), so it stays
-    // queued/running off the upstream phases rather than fabricating a time.
+    // Final launch checks complete with the final guarded publication.
     launch: undefined,
   };
 

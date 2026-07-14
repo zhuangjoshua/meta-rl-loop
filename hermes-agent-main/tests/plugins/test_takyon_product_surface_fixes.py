@@ -117,7 +117,7 @@ def test_terminal_worker_failure_names_the_new_key_affordance():
     # identical replay to budget exhaustion; the side-effect lane must additionally warn that a
     # fresh key re-executes the action.
     fields = takyon_core._terminal_worker_retry_fields(
-        "business_claude_agent_task", "run-1", "failed", side_effect=False
+        "business_refresh_product_surface", "run-1", "failed", side_effect=False
     )
     assert fields["terminal"] is True
     assert "NEW idempotency_key" in fields["retry_guidance"]

@@ -222,7 +222,7 @@ def _line_for_pattern(path: Path, pattern: str) -> int | None:
 
 
 def _registry_snapshot() -> tuple[dict[str, Any], list[str]]:
-    return {"version": None, "priority_bands": {}, "categories": {}, "tools": [], "skills": []}, ["takyon registry removed; using Hermes skill files directly"]
+    return {"version": None, "priority_bands": {}, "categories": {}, "tools": [], "skills": []}, ["takyon registry removed; using the approved Agent SDK skill plugin"]
 
 
 def _load_harness_settings() -> tuple[dict[str, Any], list[str]]:
@@ -383,7 +383,7 @@ async def graph() -> dict[str, Any]:
         label="./takyon",
         kind="entrypoint",
         lane="entry",
-        description="Workspace entrypoint that sets TAKYON_HOME to the workspace .takyon directory and launches the Hermes trunk.",
+        description="Workspace entrypoint that sets TAKYON_HOME and launches the Takyon runtime.",
         source_path=ROOT_LAUNCHER,
         source_kind="entrypoint",
         tags=["operator", "TAKYON_HOME"],
@@ -391,16 +391,16 @@ async def graph() -> dict[str, Any]:
     _add_node(
         nodes,
         sources,
-        node_id="hermes-launcher",
+        node_id="runtime-launcher",
         label="hermes-agent-main/takyon",
         kind="entrypoint",
         lane="entry",
-        description="Hermes/Takyon launcher that resolves Python and imports plugins.takyon.cli.",
+        description="Takyon launcher that resolves Python and imports plugins.takyon.cli.",
         source_path=HERMES_LAUNCHER,
         source_kind="entrypoint",
         tags=["runtime"],
     )
-    _add_edge(edges, edge_keys, "workspace-launcher", "hermes-launcher", "execs")
+    _add_edge(edges, edge_keys, "workspace-launcher", "runtime-launcher", "execs")
 
     _add_node(
         nodes,
@@ -419,13 +419,13 @@ async def graph() -> dict[str, Any]:
             "shell_history": ((settings.get("ui") or {}).get("shellHistory") or {}),
         },
     )
-    _add_edge(edges, edge_keys, "hermes-launcher", "shell-settings", "loads")
+    _add_edge(edges, edge_keys, "runtime-launcher", "shell-settings", "loads")
 
     for function_name, label, node_id, desc in [
         ("_operator_context_message", "Scope wrapper", "operator-context", "Wraps plain text with global or business scope before the CEO sees it."),
         ("_run_agent", "Initial CEO run prompt", "manual-ceo-prompt", "Builds the manual-turn operator prompt and passes the Takyon CEO prompt as the ephemeral system prompt."),
         ("_business_bootstrap_instruction", "Create bootstrap prompt", "bootstrap-prompt", "Operational /create bootstrap instruction used by create/build when auto-starting a business."),
-        ("_queue_skill_invocation", "Skill invocation wrapper", "skill-invocation-wrapper", "Loads a Hermes skill and wraps the operator instruction for direct skill invocation."),
+        ("_queue_skill_invocation", "Skill invocation wrapper", "skill-invocation-wrapper", "Requests one approved native skill for direct Agent SDK invocation."),
         ("_load_ceo_prompt", "CEO prompt loader", "ceo-prompt-loader", "Loads the stable Takyon CEO prompt file."),
     ]:
         start, end = _function_span(CLI_PATH, function_name, tree=_parse_tree(CLI_PATH, tree_cache))
@@ -476,7 +476,7 @@ async def graph() -> dict[str, Any]:
             label=skill_ref,
             kind="skill",
             lane="skills",
-            description=file_info.get("description") or "Takyon Hermes skill",
+            description=file_info.get("description") or "Takyon native skill",
             source_path=Path(file_info["path"]),
             source_kind="skill",
             tags=["takyon"],
@@ -628,7 +628,6 @@ async def graph() -> dict[str, Any]:
     tool_names = [
         "business_calculate_pulse",
         "business_schedule_ceo_wakeup",
-        "business_claude_agent_task",
         "business_x_publish_outreach",
         "business_x_search",
         "business_publish_test_outreach",

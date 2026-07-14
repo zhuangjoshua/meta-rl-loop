@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-# The outer Takyon workspace owns runtime state. This keeps Hermes cron,
+# The outer Takyon workspace owns runtime state. This keeps Takyon cron,
 # control state, and business memory in one visible place.
 export TAKYON_HOME="${TAKYON_HOME:-$ROOT/.takyon}"
 
@@ -34,7 +34,6 @@ export CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro
 export TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD=5
 export TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD=2
 export TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD=2000000
-export TAKYON_WORKER_AGENT_RUNTIME=claude-agent-sdk
 
 cd "$ROOT/hermes-agent-main"
 exec ./takyon "$@"

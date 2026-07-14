@@ -66,7 +66,7 @@ _DEFAULT_WAKE_WALL_TIMEOUT = 1800.0
 # store-signed publish push a single turn well past the web default without being stuck.
 _MOBILE_BOOTSTRAP_TURN_TIMEOUT = 1800.0
 # A bootstrap is one bounded launch transaction, not an unbounded background agent session.  The
-# coding workers inside it retain their own tighter per-call ceilings; these bounds cap the outer
+# SDK calls inside it retain their own tighter per-call ceilings; these bounds cap the outer
 # CEO choreography even while it remains active.  The short completion grace may start only after
 # the required product has a durable live outcome,
 # never at the earlier landing-only milestone; an absolute ceiling catches runs that never reach
@@ -332,7 +332,7 @@ def _update_work_request(
 ) -> None:
     """Flip the canonical run row (business_work_requests) for one worker-executed job and emit the
     status event. ``rewrite_distribution`` stays on for outreach kinds (their run state feeds the
-    distribution files); worker-executed tool runs (claude.agent_task, product.surface_refresh)
+    distribution files); worker-executed product publication runs
     pass False."""
     if not work_request_id:
         return
@@ -743,7 +743,7 @@ def _record_ceo_turn_chat(slug: str, text: str) -> None:
 
     Pure read of text the agent ALREADY produced and appended to its own messages —
     it never mutates the agent's persisted context, so a bubble can never affect a
-    future Hermes turn. Stored on the business scope (not /runtime) so the
+    future Agent SDK turn. Stored on the business scope (not /runtime) so the
     overview/boot builders pick it up; the read-side ``_takyon_ceo_chat_stream``
     lightly cleans it. Best-effort: a failure here must NOT fail the turn (the caller
     is on the billing/settlement path)."""
@@ -939,18 +939,15 @@ def _humanize_trace_label(value: str) -> str:
 def _tool_trace_shape(name: str, args: Mapping[str, Any] | None = None) -> tuple[str, str, str]:
     tool_name = str(name or "").strip()
     arguments = args if isinstance(args, Mapping) else {}
-    if tool_name == "skill_view":
-        skill_name = str(arguments.get("name") or "").strip()
+    if tool_name == "Skill":
+        skill_name = str(arguments.get("skill") or arguments.get("name") or "").strip()
         label = skill_name or "Skill"
-        detail = f"Loaded skill {skill_name}." if skill_name else "Loaded a skill."
+        detail = f"Invoked skill {skill_name}." if skill_name else "Invoked a skill."
         return "skill", label, detail
     if tool_name == "todo":
         todos = arguments.get("todos")
         count = len(todos) if isinstance(todos, list) else 0
         return "tool", "Todo", (f"Updated {count} task{'s' if count != 1 else ''}." if count else "Updated task list.")
-    if tool_name == "business_claude_agent_task":
-        workspace = str(arguments.get("workspace") or arguments.get("source_path") or "").strip()
-        return "tool", "Delegated worker", workspace or "Delegated workspace task."
     return "tool", _humanize_trace_label(tool_name), ""
 
 
@@ -1098,7 +1095,11 @@ class _RuntimeProgress:
         self._touch_activity()
         preview = build_tool_preview(tool_name, args if isinstance(args, dict) else {}, max_len=120) or ""
         entry_kind, label, default_detail = _tool_trace_shape(tool_name, args)
-        skill_name = str((args or {}).get("name") or "").strip() if tool_name == "skill_view" else ""
+        skill_name = (
+            str((args or {}).get("skill") or (args or {}).get("name") or "").strip()
+            if tool_name == "Skill"
+            else ""
+        )
         self._record_trace(
             entry_kind=entry_kind,
             entry_key=f"tool:{tool_call_id or tool_name}",
@@ -1178,7 +1179,11 @@ class _RuntimeProgress:
         for line in lines[:2]:
             self.emit(line)
         entry_kind, label, default_detail = _tool_trace_shape(name, args)
-        skill_name = str((args or {}).get("name") or "").strip() if name == "skill_view" else ""
+        skill_name = (
+            str((args or {}).get("skill") or (args or {}).get("name") or "").strip()
+            if name == "Skill"
+            else ""
+        )
         detail = next((str(line).strip() for line in lines if str(line).strip()), "")
         self._record_trace(
             entry_kind=entry_kind,
@@ -1219,34 +1224,21 @@ def _ceo_turn_bound_reason(
     return ""
 
 
-_WORKER_AGENT_RUNTIME_ENV = "TAKYON_WORKER_AGENT_RUNTIME"
-_WORKER_AGENT_RUNTIME_HERMES = "hermes"
 _WORKER_AGENT_RUNTIME_SDK = "claude-agent-sdk"
 
 
 def _selected_worker_agent_runtime() -> str:
-    """Return the explicit canary runtime; never fall back after an SDK error."""
+    """Return the sole production agent runtime."""
 
-    selected = str(
-        os.getenv(_WORKER_AGENT_RUNTIME_ENV) or _WORKER_AGENT_RUNTIME_HERMES
-    ).strip().lower()
-    if selected not in {
-        _WORKER_AGENT_RUNTIME_HERMES,
-        _WORKER_AGENT_RUNTIME_SDK,
-    }:
-        raise RuntimeError(
-            f"unsupported {_WORKER_AGENT_RUNTIME_ENV}={selected!r}; expected "
-            f"{_WORKER_AGENT_RUNTIME_HERMES!r} or {_WORKER_AGENT_RUNTIME_SDK!r}"
-        )
-    return selected
+    return _WORKER_AGENT_RUNTIME_SDK
 
 
 def _job_billing_mode(job: Job, handler: jobs.Handler) -> str:
     """Bind queue billing to the selected handler runtime before any hold."""
 
     if handler in {ceo_bootstrap_handler, ceo_wake_handler}:
-        if _selected_worker_agent_runtime() == _WORKER_AGENT_RUNTIME_SDK:
-            return jobs.BILLING_MODE_PROVIDER_BROKER
+        _selected_worker_agent_runtime()
+        return jobs.BILLING_MODE_PROVIDER_BROKER
     return jobs.BILLING_MODE_JOB_RESERVATION
 
 
@@ -1271,481 +1263,6 @@ def _sdk_turn_budget_usd(
     return value
 
 
-def _run_hermes_ceo_turn(
-    *,
-    slug: str,
-    system_prompt: str,
-    user_prompt: str,
-    toolsets: list[str],
-    max_turns: int,
-    inactivity_limit: float,
-    wall_clock_limit: float = 0.0,
-    completion_probe: Callable[[], bool] | None = None,
-    completion_grace_seconds: float = 0.0,
-    external_activity_probe: Callable[[], bool] | None = None,
-    terminal_review_probe: Callable[[], bool] | None = None,
-    hard_stop_callback: Callable[[str], None] | None = None,
-    api_retry_floor: int = 0,
-    progress: _RuntimeProgress | None = None,
-    record_final_chat: bool = True,
-) -> tuple[str, float, str, bool]:
-    """Run ONE CEO wake turn for ``business:<slug>`` and return ``(final_response, cost_usd,
-    cost_status, turn_completed)``.
-
-    Built to be the SAME CEO the interactive shell runs (``cli._run_agent``): the stable
-    ``prompts/ceo.md`` as the ephemeral system prompt, the per-business wake instructions
-    (``core._ceo_cron_prompt``) as the user turn, the wake toolsets (``core._ceo_cron_toolsets``),
-    and the model/provider resolved the same way (``cli._require_agent_model_config`` — which raises
-    loudly if unconfigured, invariant #8). The difference vs. the shell path is purely operational:
-    no interactive operator-envelope wrapping, a daemon-grade inactivity timeout (mirrors
-    ``cron/scheduler.py``), and the turn's true cost extracted for billing settlement.
-
-    Raises on a failed/aborted turn (so ``jobs.run_one`` releases the reservation and fails/requeues
-    rather than recording a fake completion)."""
-    import concurrent.futures
-    import contextvars
-
-    from takyon_cli.runtime_provider import resolve_runtime_provider
-
-    from .turn_runtime import (
-        _read_model_config,
-        _reasoning_progress_callback,
-        _require_agent_model_config,
-        _takyon_reasoning_config,
-    )
-    from .core import (
-        TakyonStore,
-        _active_operator_task_receipt_context,
-        _bound_claude_worker_activity,
-        _claude_worker_activity_run_identity,
-        load_takyon_env,
-    )
-    from .operator_gateway import build_operator_gateway_agent
-
-    load_takyon_env()
-    model_config = _read_model_config(TakyonStore())
-    resolved_model = _require_agent_model_config(model_config)  # raises TakyonError if missing
-    provider = model_config.get("provider", "")
-    runtime = resolve_runtime_provider(
-        requested=provider or None,
-        target_model=resolved_model,
-    )
-    agent = build_operator_gateway_agent(
-        runtime=runtime,
-        model=resolved_model,
-        operator_user_id=_business_owner_user_id(slug),
-        business_slug=slug,
-        agent_kwargs={
-            "max_iterations": max_turns,
-            "enabled_toolsets": list(toolsets),
-            # Same suppressions as the interactive CEO turn: no cron/messaging/clarify side channels,
-            # no memory writes (a wake must not corrupt user representations), no shell-only toolsets.
-            "disabled_toolsets": [
-                "cronjob",
-                "messaging",
-                "clarify",
-                "memory",
-                "session_search",
-                "terminal",
-                "file",
-                "browser",
-                "code_execution",
-            ],
-            "ephemeral_system_prompt": system_prompt,
-            "load_soul_identity": False,
-            "skip_memory": True,
-            "skip_context_files": True,
-            "platform": "takyon",
-            "quiet_mode": True,
-            "reasoning_config": _takyon_reasoning_config(),
-            "reasoning_callback": _reasoning_progress_callback(progress) if progress is not None else None,
-            "tool_progress_callback": progress.tool_progress if progress is not None else None,
-            "tool_start_callback": progress.tool_started if progress is not None else None,
-            "tool_gen_callback": progress.tool_generating if progress is not None else None,
-            "tool_complete_callback": progress.tool_completed if progress is not None else None,
-        },
-    )
-    agent._memory_nudge_interval = 0
-    agent._skill_nudge_interval = 0
-    agent.suppress_status_output = True
-    # Worker CEO turns (bootstrap/wake) block for many minutes on child tool calls —
-    # business_claude_agent_task builds run 5-30 minutes — so the default 5m prompt-cache TTL
-    # expires between iterations and every post-build API call re-reads the whole prefix cold.
-    # The 1h TTL (GA, plain cache_control {"ttl": "1h"} in the request body — no beta header,
-    # so it passes through the safebox proxy untouched) keeps the prefix warm across those
-    # gaps. Economics: 1h writes cost 2x vs 1.25x, but a bootstrap re-reads the prefix dozens
-    # of times, so it pays for itself within the first build gap. Env-overridable escape hatch.
-    if getattr(agent, "_use_prompt_caching", False):
-        _worker_cache_ttl = str(os.getenv("TAKYON_WORKER_CACHE_TTL", "") or "").strip() or "1h"
-        if _worker_cache_ttl in {"5m", "1h"}:
-            agent._cache_ttl = _worker_cache_ttl
-    agent.activity_callback = progress.activity if progress is not None else None
-    if api_retry_floor > 0:
-        try:
-            agent._api_max_retries = max(
-                int(getattr(agent, "_api_max_retries", 0) or 0),
-                int(api_retry_floor),
-            )
-        except (TypeError, ValueError):
-            agent._api_max_retries = int(api_retry_floor)
-    # Stream each model response (mid-loop assistant message) to the business chat as
-    # its own bubble, the instant it completes — so a long bootstrap/wake reads like a
-    # live agent conversation (a message per step), not a single end-of-turn summary.
-    # Display-only by construction: _emit_interim_assistant_message (run_agent.py) only
-    # forwards text the loop ALREADY appended to messages; it never mutates the agent's
-    # context, so this cannot affect a future Hermes turn. The final no-tool-call
-    # response is still recorded once more after the turn returns (deduped).
-    agent.interim_assistant_callback = (
-        (lambda text, already_streamed=False: _record_ceo_turn_chat(slug, text))
-        if record_final_chat
-        else None
-    )
-
-    # Run on a worker thread and watch the agent's own activity tracker, so a hung turn is caught
-    # without killing a healthy long-running one. (Mirrors cron/scheduler.py's inactivity guard.)
-    limit = inactivity_limit if inactivity_limit and inactivity_limit > 0 else None
-    def _claude_worker_activity(line: str) -> None:
-        if progress is None:
-            return
-        nested = getattr(progress, "nested_activity", None)
-        if callable(nested):
-            nested(line)
-
-    turn_started = time.time()
-    turn_started_monotonic = time.monotonic()
-    watchdog_activity_run_id, watchdog_activity_attempt = (
-        _claude_worker_activity_run_identity()
-    )
-
-    def _emit_turn_event(
-        status: str,
-        *,
-        error: str | None = None,
-        completed: bool | None = None,
-        response_head: str | None = None,
-    ) -> None:
-        """Turn-level slice of the cost/log ledger (operator_cost_events, migration 0070).
-
-        Fires on EVERY outcome — success, failure, timeout — because a failed turn still burned
-        real tokens and that partial spend is exactly what post-hoc debugging needs. Carries the
-        agent's reply head so a task is debuggable from the ledger alone (the full transcript
-        stays in ``events``/``business.ceo_turn``). Best-effort by construction."""
-        try:
-            from . import cost_events
-
-            payload: dict[str, Any] = {
-                "api_calls": int(getattr(agent, "session_api_calls", 0) or 0),
-            }
-            if completed is not None:
-                payload["turn_completed"] = completed
-            if response_head:
-                payload["response_head"] = response_head[:500]
-            ctx_vars = cost_events.operator_context()
-            cost_now = float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
-            cost_events.record_operator_event_autoconn(
-                event_kind=cost_events.KIND_TURN,
-                business_slug=slug,
-                user_id=ctx_vars.get("user_id") or None,
-                job_id=ctx_vars.get("run_id") or None,
-                run_id=ctx_vars.get("run_id") or None,
-                session_id=str(getattr(agent, "session_id", "") or "") or None,
-                task_kind=ctx_vars.get("task_kind") or None,
-                name=ctx_vars.get("task_kind") or "ceo_turn",
-                status=status,
-                provider=str(getattr(agent, "provider", "") or "") or None,
-                model=str(getattr(agent, "model", "") or "") or None,
-                input_tokens=int(getattr(agent, "session_input_tokens", 0) or 0),
-                output_tokens=int(getattr(agent, "session_output_tokens", 0) or 0),
-                cache_read_tokens=int(getattr(agent, "session_cache_read_tokens", 0) or 0),
-                cache_write_tokens=int(getattr(agent, "session_cache_write_tokens", 0) or 0),
-                reasoning_tokens=int(getattr(agent, "session_reasoning_tokens", 0) or 0),
-                cost_microusd=int(round(cost_now * 1_000_000)),
-                cost_status=str(getattr(agent, "session_cost_status", "unknown") or "unknown"),
-                duration_ms=int((time.time() - turn_started) * 1000),
-                error=error,
-                payload=payload,
-            )
-        except Exception:  # noqa: BLE001 — observability must never break the turn
-            pass
-
-    worker_activity_binding = (
-        _bound_claude_worker_activity(_claude_worker_activity)
-        if progress is not None
-        else nullcontext()
-    )
-    # The plugin registry loads Takyon handlers under ``takyon_plugins.takyon.core``, a twin
-    # module with separate ContextVars. Discovery has completed by the time the agent is built;
-    # mirror the exact canonical parent identity before copying context into the agent thread.
-    registered_tool_context_binding = nullcontext()
-    operator_task_context = _active_operator_task_receipt_context()
-    if operator_task_context:
-        import sys
-
-        registered_core = sys.modules.get("takyon_plugins.takyon.core")
-        registered_binder = getattr(
-            registered_core, "_bound_operator_task_context", None
-        )
-        if callable(registered_binder):
-            registered_tool_context_binding = registered_binder(
-                **operator_task_context
-            )
-    with worker_activity_binding, registered_tool_context_binding:
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        ctx = contextvars.copy_context()
-        run_kwargs = (
-            {"stream_callback": progress.stream_delta}
-            if progress is not None and record_final_chat
-            else {}
-        )
-        future = pool.submit(ctx.run, agent.run_conversation, user_prompt, **run_kwargs)
-        timed_out = False
-        ownership_lost_reason = ""
-        bounded_stop_reason = ""
-        completion_observed_at: float | None = None
-        next_completion_probe_at = turn_started_monotonic
-        try:
-            if limit is None:
-                result = future.result()
-            else:
-                result = None
-                while True:
-                    done, _ = concurrent.futures.wait({future}, timeout=5.0)
-                    if done:
-                        result = future.result()
-                        break
-                    active_claim = jobs.current_job_claim()
-                    if active_claim is not None and active_claim.lost:
-                        ownership_lost_reason = active_claim.reason
-                        break
-                    idle = 0.0
-                    if hasattr(agent, "get_activity_summary"):
-                        try:
-                            idle = float(agent.get_activity_summary().get("seconds_since_activity", 0.0))
-                        except Exception:
-                            idle = 0.0
-                    if progress is not None:
-                        try:
-                            idle = min(idle, float(progress.seconds_since_activity()))
-                        except Exception:
-                            pass
-                    # Context-free worker clock: the Claude-worker stderr reader stamps the exact
-                    # (business, durable run, attempt) directly, so a lost activity-sink binding
-                    # cannot false-kill a healthy run. Never fold in "any worker" activity: the Mac
-                    # and VPS pools run several businesses concurrently, and B must not keep A alive
-                    # or suppress A's wall-clock bound.
-                    claude_worker_idle = float("inf")
-                    try:
-                        from .core import claude_worker_seconds_since_activity
-
-                        claude_worker_idle = float(
-                            claude_worker_seconds_since_activity(
-                                slug,
-                                run_id=watchdog_activity_run_id,
-                                attempt=watchdog_activity_attempt,
-                            )
-                        )
-                        idle = min(idle, claude_worker_idle)
-                    except Exception:
-                        pass
-                    now_monotonic = time.monotonic()
-                    if callable(terminal_review_probe):
-                        try:
-                            if bool(terminal_review_probe()):
-                                bounded_stop_reason = (
-                                    "durable bootstrap blocker requires human review"
-                                )
-                                break
-                        except Exception as exc:
-                            # Unknown proof state cannot authorize another model/tool iteration.
-                            # Interrupt and join this turn; the outer handler pins the parent claim
-                            # while retrying the durable read before any continuation can start.
-                            bounded_stop_reason = (
-                                f"human-review proof read unavailable: {exc}"
-                            )
-                            break
-                    active_tool_probe = getattr(progress, "has_active_tool", None)
-                    active_tool = bool(
-                        callable(active_tool_probe) and active_tool_probe()
-                    )
-                    active_external_work = claude_worker_idle < 60.0 or active_tool
-                    if active_tool:
-                        idle = 0.0
-                    # A delegated child job has its own durable claim heartbeat.  Consult it when
-                    # the in-process clocks look quiet or the outer wall limit is due.  This covers
-                    # a child running in another worker process: the parent CEO claim must remain
-                    # live until that bounded child terminates, never requeue alongside it.
-                    if not active_external_work and callable(external_activity_probe) and (
-                        idle >= min(30.0, float(limit) / 4.0)
-                        or (
-                            wall_clock_limit
-                            and now_monotonic - turn_started_monotonic
-                            >= float(wall_clock_limit)
-                        )
-                    ):
-                        try:
-                            active_external_work = bool(external_activity_probe())
-                        except Exception:
-                            # Fail closed against duplicate builds: if canonical child-liveness
-                            # state cannot be read, do not expire/requeue the parent on that poll.
-                            # The child subprocess keeps its own hard timeout and the next poll
-                            # retries the durable claim read.
-                            active_external_work = True
-                        if active_external_work:
-                            idle = 0.0
-                    if callable(completion_probe) and now_monotonic >= next_completion_probe_at:
-                        next_completion_probe_at = (
-                            now_monotonic + _BOOTSTRAP_COMPLETION_PROBE_INTERVAL
-                        )
-                        try:
-                            if bool(completion_probe()) and completion_observed_at is None:
-                                completion_observed_at = now_monotonic
-                        except Exception:
-                            # A transient read failure must not stop a live launch.  The absolute
-                            # ceiling remains, and the next bounded probe retries canonical state.
-                            pass
-                    if active_external_work and completion_observed_at is not None:
-                        # The post-publish grace is for CEO launch bookkeeping, not time spent
-                        # blocked on a still-running delegated child.  Pause it until that child's
-                        # durable claim ends; the absolute outer ceiling is applied immediately
-                        # afterward if the child itself ran beyond it.
-                        completion_observed_at = now_monotonic
-                    bounded_stop_reason = _ceo_turn_bound_reason(
-                        now=now_monotonic,
-                        started_at=turn_started_monotonic,
-                        wall_clock_limit=wall_clock_limit,
-                        completion_observed_at=completion_observed_at,
-                        completion_grace_seconds=completion_grace_seconds,
-                        active_external_work=active_external_work,
-                    )
-                    if bounded_stop_reason:
-                        if (
-                            bounded_stop_reason.startswith("reached ")
-                            and callable(hard_stop_callback)
-                        ):
-                            try:
-                                hard_stop_callback(bounded_stop_reason)
-                            except Exception as exc:
-                                # Unknown durable stop state cannot authorize returning/requeueing.
-                                # Keep the parent claim pinned and retry the stop request next poll.
-                                _log.warning(
-                                    "worker: bootstrap hard-stop request failed for business:%s; "
-                                    "pinning the parent claim: %s",
-                                    slug,
-                                    exc,
-                                )
-                                bounded_stop_reason = ""
-                                continue
-                        break
-                    if idle >= limit:
-                        timed_out = True
-                        break
-        finally:
-            # ``Future.cancel`` cannot stop a running thread.  Interrupt the agent first, then JOIN
-            # the thread before this handler is allowed to raise/return.  The old wait=False path
-            # requeued the durable bootstrap while its agent/tool thread was still editing the same
-            # business (BriefVault/AppKitProof), creating overlapping revisions and stale-base
-            # conflicts.  run_one continues heartbeating the parent claim while this join waits.
-            if timed_out or bounded_stop_reason or ownership_lost_reason:
-                if hasattr(agent, "interrupt"):
-                    if ownership_lost_reason:
-                        agent.interrupt("CEO worker claim lost")
-                    elif timed_out:
-                        agent.interrupt("CEO wake timed out (inactivity)")
-                    else:
-                        agent.interrupt(f"CEO bootstrap stopped: {bounded_stop_reason}")
-                interrupt_started = time.monotonic()
-                next_pinned_log = interrupt_started + 30.0
-                while not future.done():
-                    concurrent.futures.wait({future}, timeout=2.0)
-                    if future.done():
-                        break
-                    if time.monotonic() >= next_pinned_log:
-                        # Python cannot safely kill a live thread.  This is an explicit fail-closed
-                        # posture, not a silent wrapper hang: retain/heartbeat the current claim and
-                        # forbid requeue until the agent/tool thread acknowledges interrupt.  Its
-                        # subprocess/container has a separately enforced hard deadline + process-
-                        # group reap, and every durable write is claim-generation fenced.
-                        _log.error(
-                            "worker: interrupted CEO thread for business:%s still alive after %.0fs; "
-                            "pinning claim and refusing requeue until it exits",
-                            slug,
-                            time.monotonic() - interrupt_started,
-                        )
-                        next_pinned_log = time.monotonic() + 30.0
-                try:
-                    future.result()
-                except Exception:
-                    # The requested interrupt normally surfaces as an exception from the agent
-                    # thread.  Joining it is the invariant; its interrupt exception is represented
-                    # by the explicit timeout/bounded/lost-claim outcome below.
-                    pass
-            if progress is not None:
-                progress.finish_stream()
-            pool.shutdown(wait=True, cancel_futures=True)
-
-    if ownership_lost_reason:
-        raise jobs.JobClaimLost(
-            f"CEO turn for business:{slug} lost its exact worker claim: {ownership_lost_reason}"
-        )
-
-    if timed_out:
-        _emit_turn_event(
-            "timeout",
-            error=f"idle past {int(limit)}s inactivity limit",
-        )
-        raise TimeoutError(
-            f"CEO wake for business:{slug} idle past {int(limit)}s inactivity limit"
-        )
-
-    if bounded_stop_reason:
-        final_response = f"Launch work stopped at its bounded runtime: {bounded_stop_reason}."
-        if record_final_chat:
-            _record_ceo_turn_chat(slug, final_response)
-        cost_usd = float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
-        cost_status = str(getattr(agent, "session_cost_status", "unknown") or "unknown")
-        _emit_turn_event(
-            "bounded",
-            error=bounded_stop_reason,
-            completed=False,
-            response_head=final_response,
-        )
-        # The bootstrap handler resolves this incomplete turn against durable publish/actions
-        # truth.  A complete live product settles once; a pre-publish cap fails/requeues normally.
-        return final_response, cost_usd, cost_status, False
-
-    if not isinstance(result, dict):
-        raise RuntimeError(
-            f"agent.run_conversation returned {type(result).__name__} instead of dict for "
-            f"business:{slug}"
-        )
-    # A turn that reported failure must NOT be billed or marked completed — raise so run_one
-    # releases and fails/requeues (invariant #8). BUT exhausting the iteration budget is NOT a
-    # failure: at the cap the loop force-summarizes (turn_exit_reason='max_iterations_reached'),
-    # so completed=False there means "ran out of calls", not "the work failed". Surface that via
-    # the returned `turn_completed` so a done-gated caller (bootstrap) can judge real success by
-    # durable state (did the surface publish?) instead of the raw iteration count.
-    hit_iteration_cap = str(result.get("turn_exit_reason") or "").startswith("max_iterations")
-    if result.get("failed") is True or (result.get("completed") is False and not hit_iteration_cap):
-        turn_error = str(
-            result.get("error") or (result.get("final_response") or "").strip() or "CEO wake reported failure"
-        )
-        _emit_turn_event("error", error=turn_error, completed=False)
-        raise RuntimeError(turn_error)
-
-    final_response = str(result.get("final_response") or "")
-    # The chat IS the turn: record this wake/bootstrap turn's own reply as one chat
-    # bubble (business.ceo_turn). Display-only mirror of final_response — never feeds
-    # back into the agent's context.
-    if record_final_chat:
-        _record_ceo_turn_chat(slug, final_response)
-    cost_usd = float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
-    cost_status = str(getattr(agent, "session_cost_status", "unknown") or "unknown")
-    # turn_completed is False when the loop hit the iteration cap (a clean finish under the cap
-    # sets it True). Callers use it to tell "finished" from "ran out of budget"; the bootstrap
-    # handler resolves the latter against the product's publish (done-gate) state.
-    turn_completed = bool(result.get("completed"))
-    _emit_turn_event("ok", completed=turn_completed, response_head=final_response)
-    return final_response, cost_usd, cost_status, turn_completed
 
 
 def _run_claude_sdk_ceo_turn(
@@ -1888,7 +1405,7 @@ def _run_claude_sdk_ceo_turn(
         detail = _normalize_worker_progress_text(event.get("detail"), limit=4000)
         trace = event.get("trace") if isinstance(event.get("trace"), Mapping) else {}
         if kind == "assistant" and status == "output":
-            # Match the prior Hermes live-chat contract: each completed
+            # Preserve the live-chat contract: each completed
             # tool-continuing assistant message is visible immediately, while a
             # phase-internal final summary stays private when record_final_chat
             # is disabled. Wake/interactive turns expose their final response;
@@ -1957,7 +1474,7 @@ def _run_claude_sdk_ceo_turn(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 # HANDOFF's reviewed runtime baseline includes the bounded
-                # todo tool in every mode. Bootstrap's legacy Hermes config did
+                # todo tool in every mode. The prior bootstrap runtime did
                 # not list that toolset, so add it before the exact policy
                 # filter; the compiled allowlist still prevents any widening.
                 enabled_toolsets=list(dict.fromkeys([*toolsets, "todo"])),
@@ -2089,7 +1606,7 @@ def _run_ceo_turn(
     hard_stop_callback: Callable[[str], None] | None = None,
     api_retry_floor: int = 0,
     progress: _RuntimeProgress | None = None,
-    agent_runtime: str = _WORKER_AGENT_RUNTIME_HERMES,
+    agent_runtime: str = _WORKER_AGENT_RUNTIME_SDK,
     sdk_session_id: str = "",
     sdk_resume_session: bool = False,
     sdk_max_budget_usd: float = 0.0,
@@ -2100,25 +1617,6 @@ def _run_ceo_turn(
     record_final_chat: bool = True,
 ) -> tuple[str, float, str, bool]:
     selected = str(agent_runtime or "").strip().lower()
-    if selected == _WORKER_AGENT_RUNTIME_HERMES:
-        _LAST_SDK_TURN_RECEIPT.set(None)
-        return _run_hermes_ceo_turn(
-            slug=slug,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            toolsets=toolsets,
-            max_turns=max_turns,
-            inactivity_limit=inactivity_limit,
-            wall_clock_limit=wall_clock_limit,
-            completion_probe=completion_probe,
-            completion_grace_seconds=completion_grace_seconds,
-            external_activity_probe=external_activity_probe,
-            terminal_review_probe=terminal_review_probe,
-            hard_stop_callback=hard_stop_callback,
-            api_retry_floor=api_retry_floor,
-            progress=progress,
-            record_final_chat=record_final_chat,
-        )
     if selected != _WORKER_AGENT_RUNTIME_SDK:
         raise RuntimeError(f"unsupported CEO agent runtime {selected!r}")
     if not sdk_session_id:
@@ -3037,7 +2535,7 @@ def _bootstrap_delegated_children(
             SELECT id, status, locked_by, attempts, payload
             FROM jobs
             WHERE business_slug = ?
-              AND kind IN ('claude.agent_task', 'product.surface_refresh')
+              AND kind = 'product.surface_refresh'
               AND status = ANY(?)
               AND COALESCE(payload -> 'parent_operator_task', '{}'::jsonb) @> ?::jsonb
             ORDER BY created_at, id
@@ -3156,7 +2654,7 @@ def _cancel_bootstrap_delegated_children(
                 "payload = COALESCE(payload, '{}'::jsonb) || ?::jsonb, "
                 "locked_by = NULL, locked_at = NULL, updated_at = now() "
                 "WHERE business_slug = ? "
-                "AND kind IN ('claude.agent_task', 'product.surface_refresh') "
+                "AND kind = 'product.surface_refresh' "
                 "AND status = 'queued' "
                 "AND COALESCE(payload -> 'parent_operator_task', '{}'::jsonb) @> ?::jsonb",
                 (error, cancellation, slug, parent_identity),
@@ -3165,7 +2663,7 @@ def _cancel_bootstrap_delegated_children(
                 "UPDATE jobs SET payload = COALESCE(payload, '{}'::jsonb) || ?::jsonb, "
                 "updated_at = now() "
                 "WHERE business_slug = ? "
-                "AND kind IN ('claude.agent_task', 'product.surface_refresh') "
+                "AND kind = 'product.surface_refresh' "
                 "AND status = 'running' "
                 "AND COALESCE(payload -> 'parent_operator_task', '{}'::jsonb) @> ?::jsonb",
                 (cancellation, slug, parent_identity),
@@ -4771,14 +4269,6 @@ def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobR
     return JobRunResult(result={"status": status, "work_request_id": work_request_id or None}, actual_cost_cents=0)
 
 
-def claude_agent_task_handler(job: Job) -> JobRunResult:
-    from .core import handle_business_claude_agent_task
-
-    return _operator_tool_task_handler(
-        job, tool_name="business_claude_agent_task", handler_fn=handle_business_claude_agent_task
-    )
-
-
 def product_surface_refresh_handler(job: Job) -> JobRunResult:
     from .core import handle_business_refresh_product_surface
 
@@ -4790,8 +4280,8 @@ def product_surface_refresh_handler(job: Job) -> JobRunResult:
 def store_mobile_release_handler(job: Job) -> JobRunResult:
     """Execute a deferred ``store.build`` (business_publish_mobile_release) on the worker plane.
 
-    Reuses the deferred-operator-tool machinery exactly like claude.agent_task: the tool re-runs
-    INLINE here (TAKYON_WORKER_PROCESS suppresses re-deferral) and owns its own money flow on the
+    Reuses the deferred-operator-tool machinery: the tool re-runs INLINE here
+    (TAKYON_WORKER_PROCESS suppresses re-deferral) and owns its own money flow on the
     creative-credit rail (reserve→settle-at-trigger→release), so this wrapper carries no estimate and
     run_one never double-settles. Fail-closed until the real EAS builder lands: the tool returns an
     ``eas_builder_unconfigured`` result, which becomes a recorded blocked/failed run — never an
@@ -4881,7 +4371,6 @@ HANDLERS: dict[str, jobs.Handler] = {
     "ceo_wake": ceo_wake_handler,
     "x.publish_outreach": x_publish_outreach_handler,
     "reddit.publish_outreach": reddit_publish_outreach_handler,
-    "claude.agent_task": claude_agent_task_handler,
     "product.surface_refresh": product_surface_refresh_handler,
     "store.build": store_mobile_release_handler,
     "product_action": product_action_handler,

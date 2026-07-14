@@ -88,7 +88,7 @@
     {"name": "memory", "description": "List or record business memory", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "advanced"},
     {
       "name": "wake",
-      "description": "Wake Hermes CEO for the current business",
+      "description": "Wake the Takyon CEO for the current business",
       "requiresBusiness": true,
       "priorityBand": "p1_ceo",
       "palette": "default",

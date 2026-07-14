@@ -296,7 +296,7 @@ def test_claim_one_serializes_per_lane_not_per_business(pg_conn):
 
 def test_claim_one_serializes_all_product_writers_but_not_parent_ceo(pg_conn):
     slug, _uid = _provision_business(pg_conn)
-    claude = jobs.enqueue(pg_conn, slug, "claude.agent_task", idempotency_key="product-claude")
+    claude = jobs.enqueue(pg_conn, slug, "product.surface_refresh", idempotency_key="product-claude")
     refresh = jobs.enqueue(
         pg_conn, slug, "product.surface_refresh", idempotency_key="product-refresh"
     )
@@ -1150,7 +1150,7 @@ def test_product_writer_lease_waits_for_stale_attempt_to_join(pg_conn, monkeypat
     jobs.enqueue(
         pg_conn,
         slug,
-        "claude.agent_task",
+        "product.surface_refresh",
         idempotency_key=f"writer-lease-{uuid.uuid4().hex}",
         max_attempts=2,
     )
@@ -1179,7 +1179,7 @@ def test_product_writer_lease_waits_for_stale_attempt_to_join(pg_conn, monkeypat
             outcomes["first"] = jobs.run_one(
                 conn,
                 worker_id="writer-one",
-                handlers={"claude.agent_task": first_handler},
+                handlers={"product.surface_refresh": first_handler},
                 heartbeat_interval_seconds=0.05,
                 heartbeat_conn_factory=conn_factory,
             )
@@ -1200,7 +1200,7 @@ def test_product_writer_lease_waits_for_stale_attempt_to_join(pg_conn, monkeypat
             outcomes["second"] = jobs.run_one(
                 conn,
                 worker_id="writer-two",
-                handlers={"claude.agent_task": second_handler},
+                handlers={"product.surface_refresh": second_handler},
                 heartbeat_interval_seconds=0.05,
                 heartbeat_conn_factory=conn_factory,
             )
@@ -1226,7 +1226,7 @@ def test_product_writer_lease_preserves_parallel_different_businesses(pg_conn):
         jobs.enqueue(
             pg_conn,
             slug,
-            "claude.agent_task",
+            "product.surface_refresh",
             idempotency_key=f"parallel-{slug}-{uuid.uuid4().hex}",
         )
     dsn = pg_conn.info.dsn
@@ -1254,7 +1254,7 @@ def test_product_writer_lease_preserves_parallel_different_businesses(pg_conn):
                 jobs.run_one(
                     conn,
                     worker_id=worker_id,
-                    handlers={"claude.agent_task": handler},
+                    handlers={"product.surface_refresh": handler},
                     heartbeat_interval_seconds=0.05,
                     heartbeat_conn_factory=conn_factory,
                 )
@@ -1280,7 +1280,7 @@ def test_product_writer_connection_loss_aborts_old_handler_before_replacement_cl
     first = jobs.enqueue(
         pg_conn,
         slug,
-        "claude.agent_task",
+        "product.surface_refresh",
         idempotency_key=f"lease-loss-first-{uuid.uuid4().hex}",
     )
     jobs.enqueue(
@@ -1319,7 +1319,7 @@ def test_product_writer_connection_loss_aborts_old_handler_before_replacement_cl
                 jobs.run_one(
                     conn,
                     worker_id="lease-loss-owner",
-                    handlers={"claude.agent_task": handler},
+                    handlers={"product.surface_refresh": handler},
                     heartbeat_interval_seconds=0.05,
                     heartbeat_conn_factory=conn_factory,
                 )
@@ -1353,7 +1353,7 @@ def test_product_writer_acquires_business_lease_before_budget_reserve(pg_conn, m
     jobs.enqueue(
         pg_conn,
         slug,
-        "claude.agent_task",
+        "product.surface_refresh",
         idempotency_key=f"lease-before-money-{uuid.uuid4().hex}",
         payload={"estimate_cents": 50},
     )
@@ -1374,7 +1374,7 @@ def test_product_writer_acquires_business_lease_before_budget_reserve(pg_conn, m
     outcome = jobs.run_one(
         pg_conn,
         worker_id="lease-before-money",
-        handlers={"claude.agent_task": lambda _job: jobs.JobRunResult(result={"ok": True})},
+        handlers={"product.surface_refresh": lambda _job: jobs.JobRunResult(result={"ok": True})},
         heartbeat_conn_factory=conn_factory,
     )
 

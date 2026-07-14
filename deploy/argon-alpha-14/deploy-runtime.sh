@@ -993,8 +993,7 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
 wait_for_remote_service_env \
   takyon-worker.service \
   - \
-  "${OPERATOR_SERVICE_ENV_PINS[@]}" \
-  TAKYON_WORKER_AGENT_RUNTIME=claude-agent-sdk
+  "${OPERATOR_SERVICE_ENV_PINS[@]}"
 
 operator_runtime_activation_started=0
 operator_services_activated=1

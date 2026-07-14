@@ -13314,7 +13314,7 @@ Examples:
         default=None,
         help=(
             "Claim only this job kind; repeat for multiple lanes, e.g. "
-            "--kind ceo_bootstrap --kind claude.agent_task. When omitted, drain all kinds."
+            "--kind ceo_bootstrap --kind product.surface_refresh. When omitted, drain all kinds."
         ),
     )
     worker_parser.add_argument(

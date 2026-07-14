@@ -2,7 +2,7 @@
 
 ## Decision
 
-Yes: build from the existing Claude Agent SDK worker in `hermes-agent-main/scripts/takyon-claude-agent-task.mjs`, but refactor it from a nested, one-shot coding worker into Takyon's primary, session-aware agent runtime.
+Yes: the migration starts from the existing Claude Agent SDK worker implementation, promotes its SDK transport into Takyon's primary session-aware runtime, and deletes the retired nested-worker script in the final cleanup commit.
 
 Keep `takyon-worker.service` as the durable queue consumer; remove the second model-agent delegation layer represented by `business_claude_agent_task`.
 
@@ -639,7 +639,7 @@ Any semantic difference is a migration failure unless the operator separately ap
 
 ## Hermes Cleanup After Cutover
 
-Cleanup begins only after the SDK path passes the full acceptance suite and production cutover is verified. Cleanup means removing Hermes from live Takyon execution paths through forward commits; it does not mean rewriting Git history or deleting durable records.
+Cleanup begins after the SDK production canary passes the core bootstrap/product/skill cutover checks; final completion still requires the full acceptance suite. Cleanup means removing Hermes from live Takyon execution paths through forward commits; it does not mean rewriting Git history or deleting durable records.
 
 ### Tracked source and `main`
 
@@ -689,12 +689,22 @@ The migration is not complete when it works locally or is committed; it must be 
 
 Direct VPS edits, ad hoc `rsync`, local-only proof, hand-patched business files, manual publication, or a successful frontdoor/Vercel deploy do not satisfy this release contract.
 
+### Candidate cutover evidence before final cleanup
+
+- Candidate revision `c1913693b849f6bc80bdcdd3e43151d488e7c320` was present on local, `origin/main`, `origin/dev`, and the operator plane before the cleanup revision began.
+- Fresh production CLI bootstrap job `f9f8ea9c-e8e3-4e98-bc70-b2926b148c3d` completed on its first attempt for `signal-orchard-sdk10-20260714`, publishing build `6f8fe1dd88ff60a75a7dc02aeb927bce` at `https://signal-orchard-sdk10-20260714.coscale.app/`.
+- The candidate receipt stream showed native `design-taste-frontend`, `takyon-product`, and applicable app-runtime skill use from the exact 17-skill approved manifest; skill selection was inspected externally and was not a bootstrap completion gate.
+- A separate market-research turn routed natively to `takyon-market-research`.
+- A separate X turn routed natively to `takyon-x` and published `https://x.com/CoscaleAI/status/2076937599030030722` with receipt `metrics/receipts/outreach/20260714T075129Z-x-2076937599030030722.json`.
+- The candidate structurally built and published the requested `generate-plan` customer workflow; signed-in paid-customer execution remained an external acceptance item because no real paid product-user session was available and none was fabricated.
+- Before handler deletion, the production legacy queue audit found no queued or running `claude.agent_task` jobs; historical completed/failed rows remain preserved.
+
 ## Implementation Plan
 
-### 1. Freeze behavior and add a cutover flag
+### 1. Freeze behavior and add a temporary cutover flag
 
 - Snapshot current CEO, interactive, bootstrap, wake, worker, completion, event, spend, and publication behavior.
-- Add a per-user or per-job runtime selector so Hermes and SDK paths can be compared and rolled back.
+- Add a temporary selector for candidate comparison, then delete it in final cleanup so production has one runtime.
 
 ### 2. Promote the existing SDK worker into a runtime module
 

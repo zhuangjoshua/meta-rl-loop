@@ -96,15 +96,13 @@ class NonRetryableJobError(JobError):
 
 _TERMINAL = ("completed", "blocked", "failed", "cancelled")
 
-# Lanes: CEO turns serialize with CEO turns but remain separate from the canonical product-writer
-# lane so a CEO can await its delegated build without deadlocking.  All jobs capable of advancing
-# product source/build/live pointers share ONE lane; otherwise a refresh or store build can overlap a
-# Claude writer for the same business even though same-kind attempts are generation-fenced.
-_PRODUCT_WRITER_KINDS = ("claude.agent_task", "product.surface_refresh", "store.build")
+# Lanes: CEO turns serialize with CEO turns. Jobs capable of advancing product build/live pointers
+# share one product lane so refresh and store publication cannot overlap for the same business.
+_PRODUCT_WRITER_KINDS = ("product.surface_refresh", "store.build")
 _LANE_SQL = (
     "(case "
     "when {a}.kind in ('ceo_bootstrap', 'ceo_wake') then 'ceo' "
-    "when {a}.kind in ('claude.agent_task', 'product.surface_refresh', 'store.build') then 'product' "
+    "when {a}.kind in ('product.surface_refresh', 'store.build') then 'product' "
     "else {a}.kind end)"
 )
 
@@ -1136,7 +1134,7 @@ def requeue_stale(conn, *, older_than_seconds: int = 900, worker_id: str = "reap
         " and not (kind = 'ceo_bootstrap' and exists ("
         "select 1 from jobs child where child.business_slug = jobs.business_slug "
         "and child.id <> jobs.id "
-        "and child.kind in ('claude.agent_task', 'product.surface_refresh') "
+        "and child.kind = 'product.surface_refresh' "
         "and child.status in ('queued', 'running') "
         "and coalesce(child.payload -> 'parent_operator_task', '{}'::jsonb) @> "
         "jsonb_build_object('task_kind', 'ceo_bootstrap', 'run_id', jobs.id, "
@@ -1409,7 +1407,7 @@ def run_one(
             # waiting behind a still-draining predecessor therefore cannot hold budget or begin any
             # side effect. Non-product jobs pass through this context without serialization.
             if billing_mode == BILLING_MODE_PROVIDER_BROKER:
-                # A previous attempt may have run under the legacy Hermes
+                # A previous attempt may have run under the retired model loop
                 # contract. Release its stale outer hold before the SDK makes
                 # any Safebox-authoritatively gated provider call.
                 if job.reserved_billing_entry_id:

@@ -135,7 +135,7 @@ os.replace(sys.argv[1], sys.argv[2])
 PY
 
 # The reviewed plugin is the only skill source for the primary SDK runtime.
-# Refuse symlink tricks, then remove the obsolete mutable Hermes copy from this home.
+# Refuse symlink tricks, then remove the obsolete mutable skill copy from this home.
 legacy_skills="$TAKYON_HOME_DIR/skills"
 if [[ -L "$legacy_skills" ]]; then
   echo "refusing to remove symlinked legacy skills path: $legacy_skills" >&2

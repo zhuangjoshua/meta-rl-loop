@@ -130,7 +130,7 @@ if [[ "$ROLE" == "operator" ]]; then
     --workdir /takyon-runtime \
     '$DOCKER_IMAGE' \
     --input-type=module \
-    -e 'import fs from \"node:fs\"; import fsp from \"node:fs/promises\"; import path from \"node:path\"; const pkg = JSON.parse(fs.readFileSync(\"package.json\", \"utf8\")); const lock = JSON.parse(fs.readFileSync(\"package-lock.json\", \"utf8\")); const sdk = \"@anthropic-ai/claude-agent-sdk\"; if (!pkg.dependencies?.[sdk] || !lock.packages?.[\`node_modules/\${sdk}\`]) throw new Error(\"Agent SDK dependency is not pinned\"); const root = await fsp.mkdtemp(\"/tmp/takyon-native-skill-\"); const nativeDir = path.join(root, \"skills\", \"design-taste-frontend\"); await fsp.mkdir(path.dirname(nativeDir), { recursive: true }); const canonicalDir = \"/takyon-runtime/skills/creative/taste-frontend\"; await fsp.symlink(canonicalDir, nativeDir, \"dir\"); const { validateNativeTasteSkill } = await import(\"./scripts/takyon-claude-agent-task.mjs\"); await validateNativeTasteSkill({ nativeDir, canonicalDir });' >/dev/null"
+    -e 'import fs from \"node:fs\"; const pkg = JSON.parse(fs.readFileSync(\"package.json\", \"utf8\")); const lock = JSON.parse(fs.readFileSync(\"package-lock.json\", \"utf8\")); const sdk = \"@anthropic-ai/claude-agent-sdk\"; if (!pkg.dependencies?.[sdk] || !lock.packages?.[\`node_modules/\${sdk}\`]) throw new Error(\"Agent SDK dependency is not pinned\"); await import(\"./scripts/takyon-claude-primary-runtime.mjs\");' >/dev/null"
 fi
 
 # The dashboard web dist is a BUILT artifact shipped inside the prod tree (the unit starts with

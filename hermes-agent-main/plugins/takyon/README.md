@@ -1,6 +1,6 @@
 # Takyon Business Plugin
 
-Takyon is a terminal-first CEO operator layer on top of Hermes. It keeps one stable CEO runtime prompt, a small set of real Hermes skills, and guarded `business_*` tools for durable state changes.
+Takyon is a terminal-first CEO operator built on the Claude Agent SDK, one stable policy compiler, one approved native skill plugin, and guarded `business_*` tools for durable state changes.
 
 ## Commands
 
@@ -76,7 +76,7 @@ So Takyon does not rely on `SOUL.md`, curator routing, or self-improvement promp
 
 ## Skills
 
-Takyon leaf workflows are normal Hermes skills, not plugin-only Takyon skills:
+Takyon leaf workflows are approved native Agent SDK skills:
 
 ```text
 skills/takyon/takyon-market-research/
@@ -84,48 +84,30 @@ skills/takyon/takyon-product/
 skills/takyon/takyon-app-runtime/
 skills/takyon/takyon-distribution/
 skills/takyon/takyon-x/
-skills/takyon/takyon-conversation-followup/
 skills/takyon/takyon-business-metrics/
 ```
 
-Each skill is discovered the Hermes way: `SKILL.md` frontmatter supplies name/description/platform metadata, Hermes builds a compact skills index, and the model loads a skill with `skill_view(...)` when it matches.
+Each release skill is published into the single read-only Agent SDK plugin declared by `skills/release-skills.yaml`; its native `SKILL.md` description supplies autonomous "when to use" routing, while tools, paths, authority, and publication bindings live separately under `skills/HANDOFF/`.
 
-Takyon skill frontmatter is strict YAML. Invalid or malformed frontmatter should fail normal runtime skill discovery/build; it should not degrade into ad hoc parsing.
+Takyon skill frontmatter is strict YAML. Invalid or malformed frontmatter fails release-manifest compilation and runtime discovery; it never degrades into ad hoc parsing.
 
-Bundled Takyon skills sync automatically on CLI launch and gateway startup. After changing skills, start a fresh `./takyon` run or relaunch the shell so Hermes can rebuild the compact skills index from the updated skill tree.
+Skills are compiled and published at release time, not installed or synchronized per turn, business, user profile, or runtime startup.
 
 ## Canonical Skill Shape
 
-Takyon skills follow Hermes-style frontmatter plus a small Takyon block for output roots:
+Takyon skills keep portable routing and method guidance in `SKILL.md`; runtime bindings belong in HANDOFF:
 
 ```md
 ---
 name: takyon-market-research
 description: Gather customer, competitor, channel, pricing, and demand evidence for one business.
-version: 1.0.0
-author: Four Manifold
-license: Proprietary
-platforms: [linux, macos]
-
-metadata:
-  hermes:
-    category: research
-    tags: [takyon, market-research]
-    related_skills: [takyon-product]
-    requires_toolsets: []
-    requires_tools: []
-  takyon:
-    scope: business
-    allowed_roots: [research, metrics]
-    output_root: research
-    publication:
-      - research/market.md
-      - research/sources.jsonl
-      - metrics/research-summary.json
-
-required_environment_variables: []
-required_credential_files: []
 ---
+
+# Market Research
+
+## When to use
+
+Use for current customer, competitor, pricing, channel, or demand evidence; do not use for product implementation or publication.
 ```
 
 Useful optional subdirectories:
@@ -155,7 +137,7 @@ skills/takyon/<skill-name>/
 
 Only `SKILL.md` is required. Add the optional subdirectories only when the skill really needs them.
 
-Hermes-side tool availability gating belongs in `metadata.hermes.requires_toolsets` and `metadata.hermes.requires_tools`. The exact durable Takyon tools a skill expects to use should be named in the skill body itself. If a skill needs a durable action and no canonical `business_*` tool exists for it yet, the skill does not plug in by itself; add or modify the owning tool in code and then reference it from the skill.
+Tool availability, scoped paths, publication targets, authority, and receipts belong in `skills/HANDOFF/`; portable skill bodies describe domain method and verification without embedding deployment bindings. If a skill needs a durable action and no canonical `business_*` tool exists, add or modify the owning backend tool and bind its capability in HANDOFF.
 
 ## Tools
 

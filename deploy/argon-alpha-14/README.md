@@ -32,10 +32,9 @@ Repair legacy product-service drift on the activation host with:
 deploy/argon-alpha-14/repair-product-runtime.sh
 ```
 
-The operator plane's tracked runtime contract includes Docker because
-`business_claude_agent_task` runs `product/site` work on the isolated Docker
-rail with the deployment-pinned DeepSeek model. `deploy-runtime.sh` now bootstraps/verifies Docker and fails fast
-if the operator host cannot run the tracked Claude Agent SDK container image.
+The operator plane's tracked runtime contract retains Docker for isolated execution processes and
+build sandboxes; model reasoning runs only in the primary Agent SDK session. `deploy-runtime.sh`
+bootstraps/verifies Docker without exposing host Docker authority to the dashboard or queue worker.
 The tracked contract now also includes a pinned system-wide `deno` install plus
 `systemd-run`, because scheduled product actions execute on this plane through
 the shared actions runtime.

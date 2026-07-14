@@ -57,7 +57,6 @@ provides_tools:
   - business_reddit_ad_insights_sync
   - business_generate_logo
   - business_register_search_console
-  - business_claude_agent_task
   - business_upsert_conversation_thread
   - business_record_conversation_message
   - business_update_conversation_message_status

@@ -7044,7 +7044,7 @@ def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tm
     assert any(task["status"] == "blocked" and task["label"] == "Product publish blocker" for task in snapshot["overview"]["tasks"])
 
 
-def test_business_home_snapshot_surfaces_nested_worker_failure_detail(tmp_path):
+def test_business_home_snapshot_surfaces_build_process_failure_detail(tmp_path):
     class _SnapshotStore:
         def __init__(self):
             self.conn = sqlite3.connect(":memory:")
@@ -7093,7 +7093,7 @@ def test_business_home_snapshot_surfaces_nested_worker_failure_detail(tmp_path):
                 (
                     "job-1",
                     "demo",
-                    "claude.agent_task",
+                    "product.surface_refresh",
                     "failed",
                     json.dumps(
                         {
@@ -7147,9 +7147,9 @@ def test_business_home_snapshot_surfaces_nested_worker_failure_detail(tmp_path):
     snapshot = server._takyon_business_home_snapshot(_SnapshotStore(), "demo")
 
     assert snapshot["overview"]["current_action"]["status"] == "blocked"
-    assert snapshot["overview"]["current_action"]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
-    assert snapshot["overview"]["jobs"][0]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
-    assert snapshot["overview"]["tasks"][0]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
+    assert snapshot["overview"]["current_action"]["detail"] == "worker process was interrupted by SIGTERM before completion"
+    assert snapshot["overview"]["jobs"][0]["detail"] == "worker process was interrupted by SIGTERM before completion"
+    assert snapshot["overview"]["tasks"][0]["detail"] == "worker process was interrupted by SIGTERM before completion"
 
 
 # --- Dashboard CEO-chat rendering fixes (dedup re-posts, truthful thinking dots) ---
@@ -7199,10 +7199,10 @@ def test_clean_chat_text_never_empties_what_the_ban_list_would_have_deleted():
     'Working on your business.' placeholder — must now survive intact. The light
     cleaner never returns '' for non-empty input (abstraction by generation, not
     subtraction)."""
-    plumbing = "Ran business_claude_agent_task, vite build, vercel deploy of product/site/app.tsx."
+    plumbing = "Ran business_refresh_product_surface, vite build, vercel deploy of product/site/app.tsx."
     cleaned = server._takyon_clean_chat_text(plumbing)
     assert cleaned  # not emptied
-    assert "vercel" in cleaned and "business_claude_agent_task" in cleaned
+    assert "vercel" in cleaned and "business_refresh_product_surface" in cleaned
     assert "Working on your business" not in cleaned
 
 

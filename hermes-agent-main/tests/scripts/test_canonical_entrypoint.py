@@ -49,7 +49,7 @@ def test_canonical_entrypoint_prepares_primary_sdk_policy_before_exec(tmp_path):
         "import json, os, sys\n"
         "keys = ['TAKYON_HOME', 'TAKYON_CLAUDE_SKILLS_PLUGIN', "
         "'TAKYON_CLAUDE_NODE_RUNTIME', 'TAKYON_DISABLE_LEGACY_SKILL_SYNC', "
-        "'TAKYON_MODEL', 'TAKYON_WORKER_AGENT_RUNTIME']\n"
+        "'TAKYON_MODEL']\n"
         "print(json.dumps({'argv': sys.argv[1:], 'env': {key: os.environ.get(key) for key in keys}}))\n"
         "PY\n",
         encoding="utf-8",
@@ -74,5 +74,4 @@ def test_canonical_entrypoint_prepares_primary_sdk_policy_before_exec(tmp_path):
         "TAKYON_CLAUDE_NODE_RUNTIME": "/sealed/node-runtime",
         "TAKYON_DISABLE_LEGACY_SKILL_SYNC": "1",
         "TAKYON_MODEL": "deepseek-v4-pro",
-        "TAKYON_WORKER_AGENT_RUNTIME": "claude-agent-sdk",
     }

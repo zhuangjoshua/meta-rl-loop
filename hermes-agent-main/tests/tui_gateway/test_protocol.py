@@ -1127,8 +1127,8 @@ def test_takyon_dashboard_runtime_tails_incrementally(server, monkeypatch):
                         {
                             "kind": "ceo_bootstrap",
                             "status": "output",
-                            "detail": "tool started -> business_claude_agent_task · product/site",
-                            "line": "tool started -> business_claude_agent_task · product/site",
+                            "detail": "tool started -> business_refresh_product_surface · product/site",
+                            "line": "tool started -> business_refresh_product_surface · product/site",
                             "command": "/create demo",
                         }
                     ),

@@ -550,13 +550,10 @@ class WorkerPool:
             except Exception as exc:  # noqa: BLE001
                 _log.warning("worker[%s]: pool decommission failed: %s", worker_id, exc)
 
-        # Dedicated operator-task lane (fire-and-continue enabler): a CEO turn occupies its drain
-        # thread for the WHOLE bootstrap/wake, so a claude.agent_task / product.surface_refresh job
-        # it fires with wait_ms:0 would otherwise queue behind the turn itself on a small pool —
-        # a livelock, not overlap. One extra kinds-scoped daemon thread claims exactly those job
-        # kinds; it spends its life blocked on the brokered docker build + provider calls, so it
-        # adds no meaningful CPU. Full-service pools only (never --once/--max-jobs/kinds-scoped
-        # pools), TAKYON_WORKER_OPERATOR_TASK_LANE=0 disables.
+        # Dedicated operator-task lane: a CEO turn occupies its drain thread for the whole
+        # bootstrap/wake, so worker-backed publication and outreach jobs need a separate claim
+        # thread on small pools. Full-service pools only; TAKYON_WORKER_OPERATOR_TASK_LANE=0
+        # disables it.
         operator_task_lane = (
             self.kinds is None
             and not once
@@ -581,7 +578,7 @@ class WorkerPool:
                     # publishes are worker-backed too: without this lane they queue behind the
                     # CEO's own turn on a concurrency-1 pool, so every launch-post call hits its
                     # wait bound and the post publishes only after the turn ends (observed live).
-                    kinds_override=("claude.agent_task", "product.surface_refresh", "x.publish_outreach"),
+                    kinds_override=("product.surface_refresh", "x.publish_outreach"),
                     # Sub-jobs are fired BY a turn already running here; the Mac-first queue-age
                     # delay only stalls that turn's own wait (measured: every launch post aged
                     # 180s before the lane could claim it). Claim immediately.

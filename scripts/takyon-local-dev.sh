@@ -90,7 +90,6 @@ prepare_primary_agent_runtime() {
   export TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD=5
   export TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD=2
   export TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD=2000000
-  export TAKYON_WORKER_AGENT_RUNTIME=claude-agent-sdk
 }
 
 validate_local_supabase_auth() {

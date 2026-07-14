@@ -179,8 +179,8 @@ def _runtime_event_tail_entry(event: Mapping[str, Any] | dict[str, Any] | None) 
 def _runtime_event_tail_label(entry: Mapping[str, Any] | dict[str, Any]) -> str:
     status = str(entry.get("status") or "").strip().lower()
     if not status or status == "output":
-        return "— Claude worker —"
-    return f"— Claude worker:{status} —"
+        return "— Agent SDK —"
+    return f"— Agent SDK:{status} —"
 
 
 def _deduped_worker_note_text(text: Any, *, last_text: str = "") -> str:
@@ -467,9 +467,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Tail agent.log inline while CEO-backed commands run",
     )
     parser.add_argument(
-        "--raw-hermes",
+        "--raw-agent",
         action="store_true",
-        help="Print raw Hermes tool-call args/results while CEO-backed commands run",
+        help="Print raw Agent SDK tool-call args/results while CEO-backed commands run",
     )
 
 
@@ -2499,7 +2499,7 @@ def _format_duration_seconds(seconds: float) -> str:
 def _bootstrap_phase_durations(store: TakyonStore, slug: str) -> list[tuple[str, float]]:
     """Per-workspace worker-phase durations (seconds) from the recorded runtime events.
 
-    Groups the Claude-worker progress events (``command = 'Claude worker -> <workspace>'``)
+    Groups historical build-process progress events (``command = 'Claude worker -> <workspace>'``)
     by workspace and takes first->last event time per group. Display-only: derived entirely
     from already-recorded events, so it works cross-machine and after reattach."""
     phases: dict[str, list[Any]] = {}
@@ -3017,7 +3017,7 @@ def _render_harness_command(command: dict[str, Any], *, business: str | None, ar
     body = body.replace("$BUSINESS", business or "")
     body = body.replace("$WORKSPACE_ROOT", workspace_root)
     header = [
-        f"Hermes Takyon harness command: /{command['name']}{f' {argument_text}' if argument_text else ''}",
+        f"Takyon harness command: /{command['name']}{f' {argument_text}' if argument_text else ''}",
         f"Business: {business}" if business else "",
         f"Workspace: {workspace_root}" if workspace_root else "",
         f"Description: {command['description']}" if command.get("description") else "",
@@ -3345,11 +3345,11 @@ def _shell_history_config() -> dict[str, Any]:
 
 
 
-def _raw_hermes_default() -> bool:
-    return _config_bool(os.getenv("TAKYON_SHELL_RAW_HERMES"), default=False)
+def _raw_agent_default() -> bool:
+    return _config_bool(os.getenv("TAKYON_SHELL_RAW_AGENT"), default=False)
 
 
-def _raw_hermes_max_chars() -> int:
+def _raw_agent_max_chars() -> int:
     raw = str(os.getenv("TAKYON_SHELL_RAW_MAX_CHARS") or "").strip()
     if raw:
         try:
@@ -3388,7 +3388,7 @@ def _shell_json_dump(value: Any) -> str:
         return str(value)
 
 
-def _truncate_raw_hermes(text: str, max_chars: int) -> str:
+def _truncate_raw_agent(text: str, max_chars: int) -> str:
     clean = str(text or "")
     if max_chars <= 0 or len(clean) <= max_chars:
         return clean
@@ -3774,7 +3774,7 @@ def _handle_credits_command(
 
 
 class _ShellProgress:
-    def __init__(self, enabled: bool, *, raw_hermes: bool = False):
+    def __init__(self, enabled: bool, *, raw_agent: bool = False):
         config = _shell_progress_config()
         typewriter = _shell_typewriter_config()
         self.enabled = bool(enabled and config["enabled"])
@@ -3785,8 +3785,8 @@ class _ShellProgress:
         self._reasoning_buf = ""
         self._stream_open = False
         self.streamed_chars = 0
-        self.raw_hermes = bool(raw_hermes)
-        self.raw_max_chars = _raw_hermes_max_chars()
+        self.raw_agent = bool(raw_agent)
+        self.raw_max_chars = _raw_agent_max_chars()
         self.typewriter_enabled = bool(typewriter["enabled"] and sys.stdout.isatty())
         self.typewriter_cps = int(typewriter["chars_per_second"])
         self.typewriter_chunk_chars = int(typewriter["chunk_chars"])
@@ -3887,20 +3887,20 @@ class _ShellProgress:
         self._write(f"{_color('->', _THEME['secondary'])} {line}\n")
 
     def raw_event(self, label: str, payload: Any) -> None:
-        if self.fd is None or not self.raw_hermes:
+        if self.fd is None or not self.raw_agent:
             return
         self.finish_stream()
-        body = _truncate_raw_hermes(_shell_json_dump(payload), self.raw_max_chars)
-        self._write(f"{_color('hermes.raw', _THEME['warning'])} {label}\n{body}\n")
+        body = _truncate_raw_agent(_shell_json_dump(payload), self.raw_max_chars)
+        self._write(f"{_color('agent.raw', _THEME['warning'])} {label}\n{body}\n")
 
-    def hermes_turn(self, text: str, *, already_streamed: bool = False) -> None:
+    def agent_turn(self, text: str, *, already_streamed: bool = False) -> None:
         if self.fd is None or already_streamed:
             return
         clean = str(text or "").strip()
         if not clean:
             return
         self.finish_stream()
-        self._write(f"{_color('— Hermes —', _THEME['primary'])}\n")
+        self._write(f"{_color('— Takyon —', _THEME['primary'])}\n")
         self._write_natural_text(f"{clean}\n")
 
     def stream_delta(self, delta: Any) -> None:
@@ -4060,13 +4060,13 @@ class _ShellRuntimeStream:
         if "\n" in self._stream_buffer or len(self._stream_buffer) >= 80 or now - self._stream_last_emit >= 0.35:
             self._flush_stream_buffer()
 
-    def hermes_turn(self, text: str, *, already_streamed: bool = False) -> None:
+    def agent_turn(self, text: str, *, already_streamed: bool = False) -> None:
         if already_streamed:
             return
         clean = str(text or "").strip()
         if not clean:
             return
-        self.progress.hermes_turn(clean, already_streamed=False)
+        self.progress.agent_turn(clean, already_streamed=False)
         self._record(
             status="output",
             detail=clean,
@@ -4517,7 +4517,7 @@ def _interactive_shell(
     model: str,
     max_turns: int,
     follow_logs: bool = False,
-    raw_hermes: bool = False,
+    raw_agent: bool = False,
 ) -> None:
     store = TakyonStore()
     _seed_platform_owner_at_startup(store)
@@ -4529,7 +4529,7 @@ def _interactive_shell(
     print(_startup_graphic(current_business))
     shell_history: list[dict[str, str]] = []
     sdk_session_id = f"cli-shell:{uuid.uuid4()}"
-    raw_hermes_enabled = bool(raw_hermes or _raw_hermes_default())
+    raw_agent_enabled = bool(raw_agent or _raw_agent_default())
 
     while True:
         try:
@@ -4552,18 +4552,18 @@ def _interactive_shell(
         if raw_tokens and raw_tokens[0].lower() == "raw":
             mode = raw_tokens[1].lower() if len(raw_tokens) >= 2 else "status"
             if mode in {"on", "true", "1", "yes"}:
-                raw_hermes_enabled = True
+                raw_agent_enabled = True
             elif mode in {"off", "false", "0", "no"}:
-                raw_hermes_enabled = False
+                raw_agent_enabled = False
             elif mode in {"status", ""}:
                 pass
             else:
                 print("usage: /raw [on|off|status]")
                 continue
-            state = "on" if raw_hermes_enabled else "off"
-            limit = _raw_hermes_max_chars()
+            state = "on" if raw_agent_enabled else "off"
+            limit = _raw_agent_max_chars()
             limit_text = "full" if limit <= 0 else f"{limit} chars/event"
-            print(f"Raw Hermes: {state} ({limit_text})")
+            print(f"Raw Agent SDK: {state} ({limit_text})")
             continue
         try:
             output, current_business = _handle_shell_line(
@@ -4575,7 +4575,7 @@ def _interactive_shell(
                 shell_history=shell_history,
                 sdk_session_id=sdk_session_id,
                 follow_logs=follow_logs,
-                raw_hermes=raw_hermes_enabled,
+                raw_agent=raw_agent_enabled,
             )
             if output:
                 print(output)
@@ -4605,7 +4605,7 @@ def _handle_shell_line(
     sdk_session_id: str | None = None,
     operator_user_id: str | None = None,
     follow_logs: bool = False,
-    raw_hermes: bool = False,
+    raw_agent: bool = False,
 ) -> tuple[str, str | None]:
     is_slash = line.startswith("/")
     raw = line.lstrip("/") if is_slash else line
@@ -4641,7 +4641,7 @@ def _handle_shell_line(
             shell_history=shell_history,
             operator_user_id=operator_user_id,
             follow_logs=follow_logs,
-            raw_hermes=raw_hermes,
+            raw_agent=raw_agent,
         )
         actual_slug = requested_slug
         if isinstance(result, dict):
@@ -4680,7 +4680,7 @@ def _handle_shell_line(
             current_business=current_business,
             sdk_session_id=sdk_session_id,
             follow_logs=follow_logs,
-            raw_hermes=raw_hermes,
+            raw_agent=raw_agent,
         ), current_business
     if not tokens:
         return "", current_business
@@ -4729,7 +4729,7 @@ def _handle_shell_line(
             current_business=business,
             sdk_session_id=sdk_session_id,
             follow_logs=follow_logs,
-            raw_hermes=raw_hermes,
+            raw_agent=raw_agent,
         ), current_business
 
     if (
@@ -4748,7 +4748,7 @@ def _handle_shell_line(
             shell_history=shell_history,
             operator_user_id=operator_user_id,
             follow_logs=follow_logs,
-            raw_hermes=raw_hermes,
+            raw_agent=raw_agent,
         )
         next_business = current_business
         if normalized and normalized[0].lower() == "delete":
@@ -4784,7 +4784,7 @@ def _handle_shell_line(
                 current_business=current_business,
                 sdk_session_id=sdk_session_id,
                 follow_logs=follow_logs,
-                raw_hermes=raw_hermes,
+                raw_agent=raw_agent,
             ), current_business
         return f"Unknown slash command: /{command}. Use /commands.", current_business
 
@@ -4803,7 +4803,7 @@ def _handle_shell_line(
         current_business=current_business,
         sdk_session_id=sdk_session_id,
         follow_logs=follow_logs,
-        raw_hermes=raw_hermes,
+        raw_agent=raw_agent,
     ), current_business
 
 
@@ -4984,7 +4984,7 @@ def _run_agent_with_meta(
     current_business: str | None = None,
     sdk_session_id: str | None = None,
     follow_logs: bool = False,
-    raw_hermes: bool = False,
+    raw_agent: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     load_takyon_env()
     from .claude_sdk_runtime import (
@@ -5025,10 +5025,10 @@ def _run_agent_with_meta(
         "for manual turns and scheduled wakes. Keep every write business-scoped. "
         "Do not claim a file write, budget allocation, job enqueue, agent record, wakeup schedule, auth state, billing state, "
         "checkout, subscription, entitlement, deploy, outreach, revenue, metric, or provider result succeeded unless the specific "
-        "business tool returned success or a concrete receipt exists. Never fake product behavior; use Hermes rails or keep unavailable features out of customer-facing debug states."
+        "business tool returned success or a concrete receipt exists. Never fake product behavior; use Takyon rails or keep unavailable features out of customer-facing debug states."
     )
 
-    progress = _ShellProgress(show_indicator and not show_agent_activity, raw_hermes=raw_hermes)
+    progress = _ShellProgress(show_indicator and not show_agent_activity, raw_agent=raw_agent)
     stream = _ShellRuntimeStream(
         progress=progress,
         store=store,
@@ -5231,7 +5231,7 @@ def _run_agent(
     current_business: str | None = None,
     sdk_session_id: str | None = None,
     follow_logs: bool = False,
-    raw_hermes: bool = False,
+    raw_agent: bool = False,
 ) -> str:
     response, _meta = _run_agent_with_meta(
         message,
@@ -5244,7 +5244,7 @@ def _run_agent(
         current_business=current_business,
         sdk_session_id=sdk_session_id,
         follow_logs=follow_logs,
-        raw_hermes=raw_hermes,
+        raw_agent=raw_agent,
     )
     return response
 
@@ -5266,7 +5266,7 @@ def run_takyon_command(
     shell_history: list[dict[str, str]] | None = None,
     operator_user_id: str | None = None,
     follow_logs: bool = False,
-    raw_hermes: bool = False,
+    raw_agent: bool = False,
 ) -> Any:
     load_takyon_env()
     from .core import operator_identity_mode
@@ -5307,7 +5307,7 @@ def run_takyon_command(
             model=model or os.getenv("TAKYON_MODEL", ""),
             max_turns=int(max_turns or 30),
             follow_logs=follow_logs,
-            raw_hermes=raw_hermes,
+            raw_agent=raw_agent,
         )
         return None
 
@@ -5330,7 +5330,7 @@ def run_takyon_command(
         return _secret_command(store, argv)
 
     if command == "connect":
-        return "Connector setup is handled by provider-specific skills/tools. Use `takyon secret set KEY VALUE` for credentials and keep business state in Hermes Takyon."
+        return "Connector setup is handled by provider-specific skills/tools. Use `takyon secret set KEY VALUE` for credentials and keep business state in Takyon."
 
     if command == "env":
         # Thin delegation to the canonical Stage-3b handler (takyon_cli.env.cmd_env) so the
@@ -5415,7 +5415,7 @@ def run_takyon_command(
         )
 
     if command == "registry":
-        raise SystemExit("takyon registry was removed. Takyon bundled skills sync automatically on startup and the Hermes skills index rebuilds at runtime.")
+        raise SystemExit("takyon registry was removed. Approved skills are published once in the immutable Agent SDK plugin.")
 
     if command in {"status"}:
         if len(argv) < 2:
@@ -5531,7 +5531,7 @@ def run_takyon_command(
         return {
             "success": True,
             "business": slug,
-            "message": "Takyon capabilities come from Hermes skills plus business_* tool gates. Skill-specific API readiness is declared in skill frontmatter.",
+            "message": "Takyon capabilities come from approved native skills plus business_* tool gates. Skill-specific API readiness is declared in skill frontmatter.",
             "skills": [
                 {
                     "name": item.get("name"),
@@ -5883,7 +5883,7 @@ def run_takyon_command(
             operator_user_id=resolved_operator_user_id,
             current_business=slug,
             follow_logs=follow_logs,
-            raw_hermes=raw_hermes,
+            raw_agent=raw_agent,
         )
 
     if command in {"run", "goal", "/goal"}:
@@ -5901,7 +5901,7 @@ def run_takyon_command(
             operator_user_id=resolved_operator_user_id,
             current_business=slug,
             follow_logs=follow_logs,
-            raw_hermes=raw_hermes,
+            raw_agent=raw_agent,
         )
 
     if command == "gc":
@@ -5927,7 +5927,7 @@ def run_takyon_command(
         shell_history=shell_history,
         operator_user_id=resolved_operator_user_id,
         follow_logs=follow_logs,
-        raw_hermes=raw_hermes,
+        raw_agent=raw_agent,
     )
 
 
@@ -5942,7 +5942,7 @@ def takyon_command(args) -> None:
             max_turns=int(getattr(args, "max_turns", 30) or 30),
             show_indicator=not raw_json,
             follow_logs=bool(getattr(args, "follow_logs", False)),
-            raw_hermes=bool(getattr(args, "raw_hermes", False)),
+            raw_agent=bool(getattr(args, "raw_agent", False)),
         )
         _print(result, raw_json=raw_json)
     except SystemExit:

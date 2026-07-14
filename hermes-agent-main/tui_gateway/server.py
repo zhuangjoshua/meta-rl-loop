@@ -1888,8 +1888,8 @@ def _takyon_trace_tool_shape(
     tool_name = str(name or "").strip()
     tool_args = args if isinstance(args, dict) else {}
     preview = str(context or "").strip()
-    if tool_name == "skill_view":
-        skill_name = str(tool_args.get("name") or preview).strip()
+    if tool_name == "Skill":
+        skill_name = str(tool_args.get("skill") or tool_args.get("name") or preview).strip()
         label = skill_name or "Skill"
         detail = preview or (f"Loaded skill {skill_name}." if skill_name else "Loaded a skill.")
         return "skill", label, detail, skill_name
@@ -1898,13 +1898,6 @@ def _takyon_trace_tool_shape(
         count = len(todos) if isinstance(todos, list) else 0
         detail = f"Updated {count} task{'s' if count != 1 else ''}." if count else "Updated task list."
         return "tool", "Todo", detail, ""
-    if tool_name == "business_claude_agent_task":
-        # General, customer-safe label — never the internal "Delegated worker" /
-        # "Claude agent task" identifier. The card shows business-language work,
-        # not the tool/worker that performed it (TASK 10, fail-closed below via
-        # _takyon_task_intent_title token stripping).
-        workspace = str(tool_args.get("workspace") or tool_args.get("source_path") or preview).strip()
-        return "tool", "Working on the product", workspace or "Working on the product.", ""
     return "tool", _takyon_trace_label(tool_name), preview, ""
 
 
@@ -7374,7 +7367,6 @@ def _takyon_registry_display_payload() -> dict[str, Any]:
         "business_x_search": ["query", "business"],
         "business_publish_test_outreach": ["channel", "destination_label", "destination_url", "target", "business"],
         "business_reddit_publish_outreach": ["subreddit", "thread_external_id", "destination_label", "business"],
-        "business_claude_agent_task": ["workspace", "source_path", "business"],
         "business_conversation_agent_task": ["goal", "task", "context", "business"],
         "business_record_agent": ["scope", "status", "business"],
     }
@@ -7916,7 +7908,7 @@ def _takyon_business_overview_payload(
                 }
             )
             if source or workspace or brief_text(run.get("scope")).startswith(f"business:{slug}/workspace:"):
-                worker_tool = "business_claude_agent_task" if source == "claude-agent-sdk" else "business_record_agent"
+                worker_tool = "business_record_agent"
                 purpose = workspace or brief_text(run.get("scope")).replace(f"business:{slug}/workspace:", "").strip()
                 workers.append(
                     {
@@ -7926,7 +7918,7 @@ def _takyon_business_overview_payload(
                         # "Delegated worker" / "Agent run" identifier (TASK 10).
                         # The raw tool_name stays available for the expanded
                         # "raw:" detail only.
-                        "name": "Working on the product" if worker_tool == "business_claude_agent_task" else "Working on the company",
+                        "name": "Working on the product" if source == "claude-agent-sdk" else "Working on the company",
                         "purpose": purpose or summary_text or brief_text(run.get("prompt"))[:120],
                         "status": brief_text(run.get("status")) or "recorded",
                         "updated_at": brief_text(run.get("updated_at") or run.get("created_at")),
@@ -10473,15 +10465,13 @@ def _takyon_session_bootstrap_is_live(session: dict | None, business: str) -> bo
 # real per-tool traces drive the ladder.
 _TAKYON_BOOTSTRAP_PHASE_KEYING_TOOLS = frozenset(
     {
-        "business_claude_agent_task",
+        "business_refresh_product_surface",
         "business_generate_logo",
         "business_register_search_console",
     }
 )
-# The first phase (landing) is keyed to the first `business_claude_agent_task`
-# pass. The seed uses this tool so the landing phase renders RUNNING the moment
-# the bootstrap is live, before any real keying-tool trace has been recorded.
-_TAKYON_BOOTSTRAP_PHASE_SEED_TOOL = "business_claude_agent_task"
+# The first phase (landing) is keyed to the first guarded surface publication.
+_TAKYON_BOOTSTRAP_PHASE_SEED_TOOL = "business_refresh_product_surface"
 
 
 def _takyon_bootstrap_phase_trace_seed(
@@ -10495,13 +10485,13 @@ def _takyon_bootstrap_phase_trace_seed(
     livePhases) is driven by `overview.trace` rows whose `tool_name` matches a
     bootstrap keying tool, and the screen hides the whole ladder while every
     phase is still queued (`showPhases`). On a fresh streaming bootstrap, the CEO
-    spends its opening steps researching / posting operator updates before the
-    first keying tool (`business_claude_agent_task`) fires, so `overview.trace`
+    spends its opening steps defining the offer before the first guarded surface
+    publication fires, so `overview.trace`
     carries no keying-tool row yet and the named landing -> logo -> Search
     Console -> sign-on -> subscription ladder never appears during the build.
 
     When this session has a LIVE bootstrap for `slug` and the real trace has no
-    keying-tool row yet, return a single `business_claude_agent_task` row marked
+    keying-tool row yet, return a single surface-publication row marked
     RUNNING (the landing build is the bootstrap's first build target), timed from
     the pending-create start so the elapsed clock is truthful. This is dropped
     the instant a real keying-tool trace is recorded — the frontend reads
@@ -10907,8 +10897,8 @@ def _takyon_live_state_payload(
     else:
         live_tasks = [task for task in live_tasks if not _is_orphan_runtime_row(task)]
 
-    # TASK 17: surface the Claude-agent worker's live step onto the RUNNING
-    # anchor card. While business_claude_agent_task runs, its progress is recorded
+    # Surface the primary Agent SDK runtime's live step onto the RUNNING
+    # anchor card. While a phase runs, its progress is recorded
     # as nested runtime/trace child rows; the collapsed running card would
     # otherwise sit on a static label for the whole worker phase. Lift the
     # freshest customer-clean child progress line onto the anchor's detail so the

@@ -17,18 +17,14 @@ Modes:
   --fake-ceo            plumbing self-test, zero tokens: a scripted actor reads the same
                         run history and calls the REAL launch handler. Validates stubs,
                         credits, receipts, injection, assembler, scoring end to end.
-  (default: real CEO)   worker.ceo_wake_handler fires a genuine agent turn per wake.
-                        Model/provider come from --model/--provider; --transport direct
-                        builds a plain client from ANTHROPIC_API_KEY (no safebox broker),
-                        --transport gateway uses the operator-gateway lane as configured.
+  (default: real CEO)   worker.ceo_wake_handler fires a genuine primary Agent SDK turn per wake
+                        through the gated operator transport.
 
 Usage (throwaway migrated Postgres, exactly like rl_sim):
     export TAKYON_TEST_PG_DSN=postgres://postgres:postgres@127.0.0.1:55432/rlsim_demo
     export TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS=1
     python -m plugins.takyon.rl_wake_rig --fake-ceo --wakes 6          # plumbing, free
-    export ANTHROPIC_API_KEY=sk-ant-...
-    python -m plugins.takyon.rl_wake_rig --wakes 5 --model claude-sonnet-5 \
-        --provider anthropic --transport direct                        # the real thing
+    python -m plugins.takyon.rl_wake_rig --wakes 5 --transport gateway
 """
 
 from __future__ import annotations
@@ -197,8 +193,7 @@ def rig_environment(dsn: str, home: Path, *, model: str = "", provider: str = ""
       REAL takyon-meta-ads-v2, including its run-history instruction) and a model config;
     - local storage backend; store constructor defaulted to the rig DSN (fixture pattern);
     - the RigSafebox patched over the exact safebox attributes meta_ads_v2 calls;
-    - optionally (--transport direct) a plain model client instead of the operator-gateway
-      broker, built from ANTHROPIC_API_KEY.
+    - the gated operator transport used by the primary Agent SDK runtime.
     """
     from plugins.takyon import core as takyon_core
 
@@ -314,47 +309,8 @@ def rig_environment(dsn: str, home: Path, *, model: str = "", provider: str = ""
 
     saved_builder = None
     saved_runtime_resolver = None
-    if transport == "direct":
-        from plugins.takyon import operator_gateway
-        import takyon_cli.runtime_provider as _rtp_mod
-
-        saved_builder = operator_gateway.build_operator_gateway_agent
-        saved_runtime_resolver = _rtp_mod.resolve_runtime_provider
-
-        def _direct_runtime_resolver(**_kw: Any) -> dict[str, Any]:
-            # Direct transport replaces the agent builder outright, so runtime
-            # resolution only feeds provider/api_mode strings into _direct_builder.
-            # Bypass the provider registry (it has no plain "openai" entry — only
-            # OAuth openai-codex) and echo the rig's configured provider.
-            return {"provider": provider or "anthropic", "api_mode": None,
-                    "base_url": "", "api_key": "", "source": "rig-direct"}
-
-        _rtp_mod.resolve_runtime_provider = _direct_runtime_resolver  # type: ignore[assignment]
-
-        def _direct_builder(*, runtime: dict[str, Any], model: str, agent_kwargs: Any = None, **_kw: Any):
-            from run_agent import AIAgent
-
-            rt_provider = runtime.get("provider") or "anthropic"
-            extra: dict[str, Any] = {}
-            if rt_provider == "openai":
-                # AIAgent's explicit-credentials lane needs BOTH api_key and base_url
-                # (there is no registered "openai" provider profile, so key-only init
-                # dies in the provider router). gpt-5.x on api.openai.com auto-upgrades
-                # to the Responses API inside agent_init.
-                key = os.environ.get("OPENAI_API_KEY", "")
-                if not key:
-                    raise RuntimeError(
-                        "--transport direct with --provider openai requires OPENAI_API_KEY in the environment")
-                extra["base_url"] = "https://api.openai.com/v1"
-            else:
-                key = os.environ.get("ANTHROPIC_API_KEY", "")
-                if not key:
-                    raise RuntimeError("--transport direct requires ANTHROPIC_API_KEY in the environment")
-            return AIAgent(model=model, provider=rt_provider,
-                           api_key=key, api_mode=runtime.get("api_mode"),
-                           **extra, **dict(agent_kwargs or {}))
-
-        operator_gateway.build_operator_gateway_agent = _direct_builder  # type: ignore[assignment]
+    if transport != "gateway":
+        raise RuntimeError("the wake rig supports only the gated primary Agent SDK transport")
 
     try:
         yield {"safebox": safebox, "store_cls": _RigStore}
@@ -394,7 +350,7 @@ def _rig_purchase_conversion_id(slug: str) -> str:
 
 def seed_business(dsn: str, store: Any, slug: str) -> None:
     """A live-mode business pinned to the meta-ads task: goal + work_focus make 'launch a
-    meta traffic campaign' the wake's one obvious move (Hermes-native pinning through
+    meta traffic campaign' the wake's one obvious move (native skill pinning through
     business state), credits + allowance make the real money gates pass, and both creative
     assets exist so the CEO can genuinely choose video vs image."""
     import psycopg
@@ -809,7 +765,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="plumbing self-test: scripted actor + real launch tool, zero tokens")
     ap.add_argument("--model", default="claude-sonnet-5")
     ap.add_argument("--provider", default="anthropic")
-    ap.add_argument("--transport", choices=("gateway", "direct"), default="direct",
+    ap.add_argument("--transport", choices=("gateway",), default="gateway",
                     help="'direct' builds a plain model client from ANTHROPIC_API_KEY; "
                          "'gateway' uses the operator-gateway lane as configured")
     ap.add_argument("--max-turns", type=int, default=24,

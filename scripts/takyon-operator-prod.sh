@@ -51,7 +51,6 @@ prepare_primary_agent_runtime() {
   export TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD=5
   export TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD=2
   export TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD=2000000
-  export TAKYON_WORKER_AGENT_RUNTIME=claude-agent-sdk
 }
 
 # ── Named operator profiles ──────────────────────────────────────────────────────────────
@@ -1586,7 +1585,7 @@ require_docker_for_worker() {
     --workdir /takyon-runtime \
     "$worker_image" \
     --input-type=module \
-    -e 'import fs from "node:fs/promises"; import path from "node:path"; await import("@anthropic-ai/claude-agent-sdk"); const root = await fs.mkdtemp("/tmp/takyon-native-skill-"); const nativeDir = path.join(root, "skills", "design-taste-frontend"); await fs.mkdir(path.dirname(nativeDir), { recursive: true }); const canonicalDir = "/takyon-runtime/skills/creative/taste-frontend"; await fs.symlink(canonicalDir, nativeDir, "dir"); const { validateNativeTasteSkill } = await import("./scripts/takyon-claude-agent-task.mjs"); await validateNativeTasteSkill({ nativeDir, canonicalDir });' \
+    -e 'await import("@anthropic-ai/claude-agent-sdk"); await import("./scripts/takyon-claude-primary-runtime.mjs");' \
     >/dev/null 2>&1; then
     die "Claude worker runtime is missing the Agent SDK or cannot start its preflight: $RUNTIME_DIR"
   fi

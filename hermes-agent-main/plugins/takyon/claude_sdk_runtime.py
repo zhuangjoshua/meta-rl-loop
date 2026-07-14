@@ -91,9 +91,8 @@ SDK_SKILL_RESOURCE_GUIDANCE = (
     "path. No host filesystem Read tool is available."
 )
 
-# These tools belong to the orchestration layer being replaced.  They may stay
-# registered during a reversible canary, but the primary SDK can never see or
-# invoke them.
+# Permanently retired orchestration and delegation names remain denylisted so a
+# stale plugin or payload cannot reactivate them.
 LEGACY_OR_DELEGATING_TOOLS = frozenset(
     {
         "business_claude_agent_task",
@@ -258,11 +257,11 @@ def sdk_tool_definitions(
     """Return the exact existing Takyon schemas exposed through the SDK bridge.
 
     The model-facing names and JSON schemas come from ``model_tools`` so the SDK
-    cannot drift from the guarded handlers used by Hermes during the canary.
-    Legacy skill/delegation tools are removed unconditionally.
+    cannot drift from the guarded Takyon handlers. Retired skill/delegation
+    tools are removed unconditionally.
     """
 
-    # The standalone Takyon CLI does not bootstrap Hermes' full tool-module
+    # The standalone Takyon CLI does not bootstrap every ambient tool module.
     # loader.  Register the existing web handlers explicitly when HANDOFF asks
     # for that toolset so schema discovery and bridge dispatch see the same
     # guarded web_search/web_extract implementations as the dashboard runtime.
@@ -270,7 +269,7 @@ def sdk_tool_definitions(
     if "web" in normalized_enabled:
         importlib.import_module("tools.web_tools")
 
-    # Hermes' `browser` composite includes web_search as a convenience.  The
+    # The ambient `browser` composite includes web_search as a convenience. The
     # generic disabled-toolset subtraction therefore removes web_search even
     # when this SDK invocation explicitly enables the separate `web` toolset.
     # Browser tools were never added to this explicit selection, so omitting
@@ -1321,8 +1320,7 @@ def run_primary_sdk_subprocess(
 
     There is no implicit fallback. Any missing immutable plugin, durable
     SessionStore, broker capability, malformed receipt, timeout, or process
-    failure raises. The caller may explicitly select the separate Hermes
-    canary path before entering this function.
+    failure raises; there is no alternate model-loop path.
     """
 
     if session_store is None:

@@ -64,6 +64,7 @@ def _local_safebox_authority(monkeypatch):
     # worker_pg test has run). Tests that need env values set them explicitly via monkeypatch.
     monkeypatch.setattr(core, "load_takyon_env", lambda *a, **k: [])
     monkeypatch.setattr(turn_runtime, "load_takyon_env", lambda *a, **k: [])
+    monkeypatch.setenv("TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD", "5")
 
 
 def _credentialed_dsn(pg_conn) -> str:
@@ -2210,6 +2211,14 @@ def _install_bootstrap_phase_store_stub(monkeypatch) -> None:
             self.job_id = str(job_id)
             self.sdk_session_id = str(sdk_session_id)
             self.immutable_inputs = dict(immutable_inputs)
+            if str(self.immutable_inputs.get("archetype") or "").lower() == "mobile_app":
+                self.current_phase = "mobile"
+                self.phase_idempotency = {
+                    "mobile": {
+                        "release_1": "test:mobile-release-1",
+                        "operator_update": "test:mobile-update",
+                    }
+                }
             return self._run()
 
         def load(self, _job_id):
@@ -2228,6 +2237,8 @@ def _install_bootstrap_phase_store_stub(monkeypatch) -> None:
             if self.current_phase is None or not self._verify_after_turn:
                 return self._run()
             self._verify_after_turn = False
+            if self.current_phase == "mobile":
+                return self._run()
             workflow_requested = bool(self.immutable_inputs.get("workflow_requested"))
             if worker._bootstrap_has_durable_live_product(
                 None,
@@ -2561,10 +2572,13 @@ def test_mobile_bootstrap_never_settles_on_web_product_before_mobile_release(mon
         worker, "_bootstrap_has_durable_live_product", lambda *_a, **_k: True
     )
 
-    with pytest.raises(RuntimeError, match="mobile release phase"):
-        worker.ceo_bootstrap_handler(
-            SimpleNamespace(id="job-mobile", business_slug="acme", payload={})
-        )
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(id="job-mobile", business_slug="acme", payload={})
+    )
+
+    assert result.terminal_status == "blocked"
+    assert result.terminal_reason == "bootstrap_human_review_required"
+    assert result.result["bootstrap_completion_status"] == "needs_human_review"
 
 
 def test_bootstrap_incomplete_workflow_continues_in_same_job_and_preserves_identity(monkeypatch):
@@ -2777,7 +2791,7 @@ def test_bootstrap_child_liveness_uses_fresh_durable_job_claim():
         bootstrap_job_id="bootstrap-job",
         bootstrap_attempt=2,
     ) is True
-    assert "claude.agent_task" in seen["sql"]
+    assert "product.surface_refresh" in seen["sql"]
     assert "status = ANY" in seen["sql"]
     assert "parent_operator_task" in seen["sql"]
     assert seen["params"][:2] == ("acme", ["queued", "running"])
@@ -2815,8 +2829,8 @@ def test_worker_deferred_child_carries_exact_parent_bootstrap_identity(monkeypat
             core._run_operator_task_on_worker(
                 store=_Store(),
                 business="acme",
-                kind="claude.agent_task",
-                tool_name="business_claude_agent_task",
+                kind="product.surface_refresh",
+                tool_name="business_refresh_product_surface",
                 deferred_args={"business": "acme", "instruction": "build"},
                 commit_idempotency_key="worker-child",
                 wait_seconds=0,

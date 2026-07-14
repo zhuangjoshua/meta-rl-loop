@@ -18,14 +18,13 @@ from plugins.takyon import claim_scope
 _REAL_RUNTIME_RELEASE_SHA = claim_scope.runtime_release_sha
 
 
-def test_all_canonical_product_writers_share_one_lane_separate_from_ceo():
+def test_canonical_product_publication_jobs_share_one_lane_separate_from_ceo():
     assert {
-        jobs.job_lane("claude.agent_task"),
         jobs.job_lane("product.surface_refresh"),
         jobs.job_lane("store.build"),
     } == {"product"}
     assert jobs.job_lane("ceo_bootstrap") == "ceo"
-    assert jobs.job_lane("ceo_bootstrap") != jobs.job_lane("claude.agent_task")
+    assert jobs.job_lane("ceo_bootstrap") != jobs.job_lane("product.surface_refresh")
 
 
 class _RowsConn:
@@ -64,155 +63,6 @@ def test_platform_publish_blocker_requires_a_new_validation_passed_refresh():
     assert worker._product_publish_blocker_after(store, "demo", "event-2") == (
         "event-2",
         "",
-    )
-
-
-def test_product_worker_uses_an_immutable_claimed_release_snapshot(tmp_path, monkeypatch):
-    release = "a" * 40
-    runtime = tmp_path / "runtime"
-    (runtime / "scripts").mkdir(parents=True)
-    canonical_skill = (
-        Path(core.__file__).resolve().parents[2]
-        / "skills"
-        / "creative"
-        / "taste-frontend"
-        / "SKILL.md"
-    ).read_bytes()
-    files = {
-        "package.json": b'{"dependencies":{"@anthropic-ai/claude-agent-sdk":"1.0.0"}}',
-        "package-lock.json": b'{"lockfileVersion":3,"packages":{}}',
-        "scripts/takyon-claude-agent-task.mjs": b"console.log('sealed');\n",
-        "skills/creative/taste-frontend/SKILL.md": canonical_skill,
-    }
-    for relative, content in files.items():
-        (runtime / relative).parent.mkdir(parents=True, exist_ok=True)
-        (runtime / relative).write_bytes(content)
-    (runtime / ".takyon-deploy-artifact.json").write_text(
-        json.dumps({"source_revision": release}), encoding="utf-8"
-    )
-    monkeypatch.setattr(claim_scope, "runtime_release_sha", lambda **_kwargs: release)
-    monkeypatch.setattr(core, "get_default_takyon_root", lambda: tmp_path / "home")
-    monkeypatch.setattr(core, "_resolve_runtime_executable", lambda _name: "/usr/bin/npm")
-    monkeypatch.setattr(core, "_shared_npm_cache_dir", lambda: tmp_path / "npm-cache")
-
-    def fake_run(command, **kwargs):
-        assert command[1:3] == ["ci", "--ignore-scripts"]
-        sdk = Path(kwargs["cwd"]) / "node_modules" / "@anthropic-ai" / "claude-agent-sdk"
-        sdk.mkdir(parents=True)
-        (sdk / "package.json").write_text('{"version":"1.0.0"}', encoding="utf-8")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(core.subprocess, "run", fake_run)
-    snapshot = core._product_worker_runtime_snapshot(runtime)
-    (runtime / "scripts" / "takyon-claude-agent-task.mjs").write_text(
-        "console.log('mutated');\n", encoding="utf-8"
-    )
-
-    assert core._product_worker_runtime_snapshot(runtime) == snapshot
-    assert (snapshot / "scripts" / "takyon-claude-agent-task.mjs").read_bytes() == files[
-        "scripts/takyon-claude-agent-task.mjs"
-    ]
-    assert not (snapshot / "plugins" / "takyon" / "taste_publication_gate.py").exists()
-    native = snapshot / ".claude" / "skills" / "design-taste-frontend"
-    assert native.is_symlink()
-    assert native.readlink() == Path("../../skills/creative/taste-frontend")
-    assert native.resolve() == snapshot / "skills" / "creative" / "taste-frontend"
-    (snapshot / "skills" / "creative" / "taste-frontend" / "SKILL.md").write_text(
-        "invalid Taste bytes\n", encoding="utf-8"
-    )
-    assert core._product_worker_runtime_snapshot(runtime) == snapshot
-    (snapshot / "scripts" / "takyon-claude-agent-task.mjs").write_text(
-        "console.log('corrupt');\n", encoding="utf-8"
-    )
-    with pytest.raises(core.TakyonError, match="product worker release cache is corrupt"):
-        core._product_worker_runtime_snapshot(runtime)
-
-
-def test_non_docker_native_taste_install_is_shared_under_takyon_home(tmp_path, monkeypatch):
-    runtime = tmp_path / "runtime"
-    canonical_dir = runtime / "skills" / "creative" / "taste-frontend"
-    canonical_dir.mkdir(parents=True)
-    source_skill = (
-        Path(core.__file__).resolve().parents[2]
-        / "skills"
-        / "creative"
-        / "taste-frontend"
-        / "SKILL.md"
-    )
-    (canonical_dir / "SKILL.md").write_bytes(source_skill.read_bytes())
-    takyon_home = tmp_path / "operator-home"
-    monkeypatch.setenv("TAKYON_HOME", str(takyon_home))
-
-    config = core._shared_claude_config_dir(runtime)
-    native = config / "skills" / "design-taste-frontend"
-
-    assert config == takyon_home / ".claude"
-    assert native.is_symlink()
-    assert native.resolve() == canonical_dir
-    native.unlink()
-    native.symlink_to(tmp_path / "forbidden-business-override", target_is_directory=True)
-    assert core._shared_claude_config_dir(runtime) == config
-    assert native.resolve() == canonical_dir
-    native.unlink()
-    native.mkdir()
-    assert core._shared_claude_config_dir(runtime) == config
-    assert native.is_dir() and not native.is_symlink()
-    monkeypatch.setattr(core, "_repo_root", lambda: runtime)
-    monkeypatch.setattr(
-        core,
-        "_mint_claude_agent_operator_session_token",
-        lambda _business, _operator_user_id: "operator-session-capability",
-    )
-    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
-    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
-    env = core._claude_agent_non_docker_worker_env("native-taste", "owner-1")
-    assert env["CLAUDE_CONFIG_DIR"] == str(config)
-    source = Path(core.__file__).read_text(encoding="utf-8")
-    assert '"claudeConfigDir": worker_env["CLAUDE_CONFIG_DIR"]' in source
-
-
-def test_docker_native_taste_config_is_writable_but_skill_is_release_readonly(
-    tmp_path, monkeypatch
-):
-    from tools.environments import docker as docker_env
-
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    snapshot = tmp_path / "snapshot"
-    (snapshot / ".claude" / "skills").mkdir(parents=True)
-    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
-    monkeypatch.setattr(docker_env, "_resolve_host_user_spec", lambda: None)
-    monkeypatch.setattr(docker_env, "_host_user_identity_mount_args", lambda _spec: [])
-    monkeypatch.setattr(docker_env, "_build_security_args", lambda _as_user=False: [])
-    monkeypatch.setattr(core, "_repo_root", lambda: tmp_path / "runtime")
-    monkeypatch.setattr(core, "_product_worker_runtime_snapshot", lambda _root: snapshot)
-    monkeypatch.setattr(core, "_docker_claude_worker_binary_mounts", lambda **_kwargs: ([], {}))
-    monkeypatch.setattr(core, "_runtime_env", lambda extra=None: dict(extra or {}))
-    monkeypatch.setattr(core, "_shared_npm_cache_dir", lambda: tmp_path / "npm-cache")
-    monkeypatch.setattr(
-        core,
-        "_mint_claude_agent_operator_session_token",
-        lambda _business, _operator_user_id: "operator-session-capability",
-    )
-    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
-    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
-    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_MODEL", "deepseek-v4-pro")
-
-    command, payload, _worker_cwd, _worker_env = core._run_claude_agent_task_in_docker(
-        payload={"business": "native-taste", "workspace": "product/site", "instruction": "x"},
-        workspace_path=workspace,
-        timeout_ms=30_000,
-        business="native-taste",
-        operator_user_id="owner-1",
-    )
-
-    assert payload["claudeConfigDir"] == "/repo/.claude"
-    assert "CLAUDE_CONFIG_DIR=/repo/.claude" in command
-    assert "/repo/.claude:rw,nosuid,nodev,noexec,mode=1777,size=64m" in command
-    assert f"type=bind,src={snapshot},dst=/repo,readonly" in command
-    assert (
-        f"type=bind,src={snapshot / '.claude' / 'skills'},dst=/repo/.claude/skills,readonly"
-        in command
     )
 
 
@@ -332,7 +182,7 @@ def test_product_writer_same_connection_loss_cancels_bound_claim_before_unwind(m
     monkeypatch.setattr(jobs, "_PRODUCT_WRITER_LEASE_PROBE_SECONDS", 0.01)
     conn = _MonitoredLeaseConn()
     claim = jobs.JobClaimGuard(job_id="writer-job", worker_id="worker-a", attempt=1)
-    job = SimpleNamespace(kind="claude.agent_task", business_slug="alpha")
+    job = SimpleNamespace(kind="product.surface_refresh", business_slug="alpha")
     child_entered = threading.Event()
     child_aborted = threading.Event()
 
@@ -370,24 +220,6 @@ def test_product_writer_same_connection_loss_cancels_bound_claim_before_unwind(m
     assert conn.transaction_exited.is_set()
 
 
-def test_inline_product_writer_same_connection_loss_fails_closed(monkeypatch):
-    monkeypatch.setattr(jobs, "_PRODUCT_WRITER_LEASE_PROBE_SECONDS", 0.01)
-    conn = _MonitoredLeaseConn()
-    store = SimpleNamespace(_connect=lambda: conn)
-
-    with pytest.raises(jobs.JobClaimLost, match="product-writer lease lost"):
-        with core._hold_business_product_writer_lease(store, business="alpha"):
-            guard = jobs.current_execution_lease_guard()
-            assert guard is not None
-            conn.fail_probe.set()
-            deadline = time.monotonic() + 2
-            while not guard.lost and time.monotonic() < deadline:
-                time.sleep(0.005)
-            core._assert_active_product_writer_lease("inline source write")
-
-    assert conn.transaction_exited.is_set()
-
-
 class _CaptureConn:
     def __init__(self):
         self.calls: list[tuple[str, tuple]] = []
@@ -413,169 +245,9 @@ def test_stale_reaper_skips_live_local_handler_and_bootstrap_with_child(monkeypa
     assert len(update_calls) == 2
     for sql, params in update_calls:
         assert "not (id = any(%s))" in sql
-        assert "child.kind in ('claude.agent_task', 'product.surface_refresh')" in sql
+        assert "child.kind = 'product.surface_refresh'" in sql
         assert "child.status in ('queued', 'running')" in sql
         assert ["briefvault-parent"] in params
-
-
-class _HungProcess:
-    pid = 424242
-
-    def __init__(self):
-        self.reaped = False
-        self.wait_calls: list[float | None] = []
-
-    def poll(self):
-        return None
-
-    def terminate(self):
-        raise AssertionError("POSIX process group should be signalled, not only the wrapper")
-
-    def kill(self):
-        raise AssertionError("POSIX process group should be killed, not only the wrapper")
-
-    def wait(self, timeout=None):
-        self.wait_calls.append(timeout)
-        if timeout == 5:
-            raise subprocess.TimeoutExpired(["docker", "run"], timeout)
-        self.reaped = True
-        return -int(signal.SIGKILL)
-
-
-def test_worker_termination_kills_group_container_and_reaps(tmp_path, monkeypatch):
-    """Hard fallback must not leave Docker or a grandchild editor alive."""
-    proc = _HungProcess()
-    cidfile = tmp_path / "worker.cid"
-    cidfile.write_text("container-123\n", encoding="utf-8")
-    group_signals: list[tuple[int, signal.Signals]] = []
-    docker_calls: list[list[str]] = []
-
-    monkeypatch.setattr(
-        core.os,
-        "killpg",
-        lambda pid, sig: group_signals.append((pid, signal.Signals(sig))),
-    )
-
-    def fake_run(command, **_kwargs):
-        docker_calls.append(list(command))
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(core.subprocess, "run", fake_run)
-
-    core._terminate_claude_worker_process(
-        proc,
-        run_cmd=["/usr/bin/docker", "run", "--rm", "image"],
-        cidfile=cidfile,
-    )
-
-    assert group_signals == [(proc.pid, signal.SIGKILL)]
-    assert docker_calls == [
-        ["/usr/bin/docker", "kill", "container-123"],
-        ["/usr/bin/docker", "rm", "-f", "container-123"],
-    ]
-    assert proc.reaped is True
-    assert proc.wait_calls[-1] is None
-
-
-class _GracefulProcess:
-    pid = 515151
-
-    def __init__(self):
-        self.exited = False
-        self.wait_calls: list[float | None] = []
-
-    def poll(self):
-        return 0 if self.exited else None
-
-    def wait(self, timeout=None):
-        self.wait_calls.append(timeout)
-        self.exited = True
-        return 143
-
-    def terminate(self):
-        raise AssertionError("Docker cancellation must signal the container, not only its client")
-
-
-def test_worker_cancellation_soft_aborts_and_drains_before_hard_fallback(tmp_path, monkeypatch):
-    proc = _GracefulProcess()
-    cidfile = tmp_path / "worker.cid"
-    cidfile.write_text("container-456\n", encoding="utf-8")
-    docker_calls: list[list[str]] = []
-
-    def fake_run(command, **_kwargs):
-        docker_calls.append(list(command))
-        if "inspect" in command:
-            return SimpleNamespace(returncode=0, stdout="false\n")
-        return SimpleNamespace(returncode=0, stdout="")
-
-    monkeypatch.setattr(core.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        core,
-        "_terminate_claude_worker_process",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("graceful drain must not use hard fallback")
-        ),
-    )
-
-    core._cancel_claude_worker_process(
-        proc,
-        run_cmd=["/usr/bin/docker", "run", "--rm", "image"],
-        cidfile=cidfile,
-        grace_seconds=2,
-    )
-
-    assert docker_calls == [
-        ["/usr/bin/docker", "kill", "--signal=TERM", "container-456"],
-        ["/usr/bin/docker", "wait", "container-456"],
-        ["/usr/bin/docker", "inspect", "--format", "{{.State.Running}}", "container-456"],
-        ["/usr/bin/docker", "rm", "-f", "container-456"],
-    ]
-    assert proc.exited is True
-
-
-def test_node_worker_has_no_independent_timeout_clock():
-    script = (
-        Path(__file__).resolve().parents[2]
-        / "scripts"
-        / "takyon-claude-agent-task.mjs"
-    ).read_text(encoding="utf-8")
-
-    main_body = script.split("async function main()", 1)[1].split("\nexport {", 1)[0]
-    assert "setTimeout(" not in main_body
-    assert 'process.once("SIGTERM", requestParentAbort)' in script
-    assert "abortController.abort()" in script
-
-
-def test_every_business_claude_worker_fails_on_first_sdk_retry():
-    source = Path(core.__file__).read_text(encoding="utf-8")
-
-    assert '"failOnApiRetry": True' in source
-
-
-def test_product_worker_preflights_release_and_never_starts_a_repair_model_call():
-    source = Path(core.__file__).read_text(encoding="utf-8")
-    owned = source.split("def _handle_business_claude_agent_task_owned", 1)[1].split(
-        "\ndef ", 1
-    )[0]
-
-    assert owned.index("runtime_release_sha(runtime_root=_repo_root())") < owned.index(
-        "_reserve_operator_task_budget("
-    )
-    assert "should_retry_surface_build" not in owned
-    assert "should_retry_turn_cap" not in owned
-    assert "Hermes automatic build-fix retry" not in owned
-    assert "Hermes automatic continuation retry" not in source
-
-
-def test_product_site_capabilities_are_selected_by_workspace_not_guidance():
-    source = Path(core.__file__).read_text(encoding="utf-8")
-    owned = source.split("def _handle_business_claude_agent_task_owned", 1)[1].split(
-        "\ndef ", 1
-    )[0]
-
-    assert "guidance_skills" not in owned
-    assert "if _workspace_needs_runtime_ui_contract(workspace_rel):\n" in owned
-    assert "_site_image_worker_bridge(" in owned
 
 
 def _clean_git_runtime(tmp_path: Path) -> tuple[Path, str]:
@@ -641,30 +313,11 @@ def test_runtime_release_sha_timeout_is_unavailable_not_invalid(tmp_path, monkey
         _REAL_RUNTIME_RELEASE_SHA(runtime_root=root)
 
 
-def test_core_does_not_inject_taste_or_guidance_skill_prose():
+def test_core_has_no_nested_model_tool_or_guidance_injection():
     source = Path(core.__file__).read_text(encoding="utf-8")
-    task = next(
-        item
-        for item in core.TAKYON_TOOL_DEFINITIONS
-        if item["name"] == "business_claude_agent_task"
-    )
-
-    assert "guidance_skills" not in task["schema"]["parameters"]["properties"]
+    assert "business_claude_agent_task" not in {
+        item["name"] for item in core.TAKYON_TOOL_DEFINITIONS
+    }
     assert "[Hermes guidance skill:" not in source
     assert "_compose_worker_guidance_block" not in source
     assert "_resolve_worker_guidance_skills" not in source
-
-
-def test_taste_design_contract_requires_all_dials_in_range(tmp_path):
-    (tmp_path / "DESIGN.md").write_text(
-        "# Design Read\nA precise editorial landing.\n\n"
-        "DESIGN_VARIANCE: 6\nMOTION_INTENSITY: 11\n",
-        encoding="utf-8",
-    )
-
-    contract, blocker = core._read_taste_design_contract(tmp_path)
-
-    assert contract == {}
-    assert blocker == (
-        "Taste design contract invalid: MOTION_INTENSITY must be an integer from 1 to 10."
-    )

@@ -2083,7 +2083,7 @@ def test_business_home_payload_reads_reddit_campaign_state(tmp_path, monkeypatch
     assert channels["reddit"]["campaigns"][0]["latest_action"]["operation"] == "activate"
 
 
-def test_business_home_payload_surfaces_nested_worker_failure_detail(monkeypatch):
+def test_business_home_payload_surfaces_build_process_failure_detail(monkeypatch):
     import plugins.takyon.core as core
     import takyon_cli.web_server as web_server
 
@@ -2108,7 +2108,7 @@ def test_business_home_payload_surfaces_nested_worker_failure_detail(monkeypatch
                         {
                             "id": "req-1",
                             "business_slug": "alpha",
-                            "kind": "claude.agent_task",
+                            "kind": "product.surface_refresh",
                             "status": "failed",
                             "payload_json": json.dumps(
                                 {
@@ -2157,9 +2157,9 @@ def test_business_home_payload_surfaces_nested_worker_failure_detail(monkeypatch
     payload = web_server._takyon_business_home_payload("user-123", "alpha")
 
     assert payload["overview"]["current_action"]["status"] == "blocked"
-    assert payload["overview"]["current_action"]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
-    assert payload["overview"]["tasks"][0]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
-    assert payload["overview"]["jobs"][0]["error"] == "Claude worker was interrupted by SIGTERM before completion"
+    assert payload["overview"]["current_action"]["detail"] == "worker process was interrupted by SIGTERM before completion"
+    assert payload["overview"]["tasks"][0]["detail"] == "worker process was interrupted by SIGTERM before completion"
+    assert payload["overview"]["jobs"][0]["error"] == "worker process was interrupted by SIGTERM before completion"
 
 
 def test_outreach_start_endpoint_enqueues_channel_request(tmp_path, monkeypatch):

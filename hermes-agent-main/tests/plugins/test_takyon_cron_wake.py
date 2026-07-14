@@ -63,9 +63,9 @@ def test_wake_prompt_caps_tasks_and_sleeps(tmp_path):
 def test_wake_prompt_keeps_outreach_lifecycle_ladder(tmp_path):
     prompt = _store(tmp_path)._ceo_cron_prompt("demo")
     assert "Advance the outreach lifecycle" in prompt
-    assert "takyon-conversation-followup" in prompt
     assert "takyon-x" in prompt
     assert "takyon-distribution" in prompt
+    assert "inspect the actual conversation threads" in prompt
 
 
 def test_wake_prompt_routes_daily_summary_to_business_metrics(tmp_path):

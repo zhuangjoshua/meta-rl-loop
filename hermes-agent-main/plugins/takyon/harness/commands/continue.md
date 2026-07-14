@@ -1,5 +1,5 @@
 ---
-description: Wake Hermes CEO to continue the business from current evidence
+description: Wake the Takyon CEO to continue the business from current evidence
 requires-business: true
 priority-band: p1_ceo
 allowed-tools: [read, workspace, memory, budget, control, skills]

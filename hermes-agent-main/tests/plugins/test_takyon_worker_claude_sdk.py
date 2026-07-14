@@ -1,20 +1,36 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import pytest
 
 from plugins.takyon import claude_sdk_runtime, claude_sdk_sessions, core, cost_events, worker
 
 
-def test_worker_runtime_selector_is_explicit_and_fail_closed(monkeypatch) -> None:
-    monkeypatch.delenv("TAKYON_WORKER_AGENT_RUNTIME", raising=False)
-    assert worker._selected_worker_agent_runtime() == "hermes"
-    monkeypatch.setenv("TAKYON_WORKER_AGENT_RUNTIME", "claude-agent-sdk")
+def test_worker_runtime_has_no_rollout_selector(monkeypatch) -> None:
+    monkeypatch.setenv("TAKYON_WORKER_AGENT_RUNTIME", "retired-value")
     assert worker._selected_worker_agent_runtime() == "claude-agent-sdk"
-    monkeypatch.setenv("TAKYON_WORKER_AGENT_RUNTIME", "unknown")
-    with pytest.raises(RuntimeError, match="unsupported"):
-        worker._selected_worker_agent_runtime()
+
+
+def test_final_cutover_has_one_agent_loop_and_no_nested_model_worker() -> None:
+    project = Path(__file__).resolve().parents[2]
+    assert "business_claude_agent_task" not in {
+        item["name"] for item in core.TAKYON_TOOL_DEFINITIONS
+    }
+    assert "claude.agent_task" not in worker.HANDLERS
+    assert not hasattr(worker, "_run_hermes_ceo_turn")
+    assert not hasattr(core, "handle_business_claude_agent_task")
+    assert not (project / "scripts" / "takyon-claude-agent-task.mjs").exists()
+    for relative in (
+        "plugins/takyon/cli.py",
+        "plugins/takyon/worker.py",
+        "plugins/takyon/operator_gateway.py",
+        "plugins/takyon/turn_runtime.py",
+    ):
+        source = (project / relative).read_text(encoding="utf-8")
+        assert "from run_agent import AIAgent" not in source
+        assert "import run_agent" not in source
 
 
 def test_run_ceo_turn_passes_stable_sdk_contract_without_fallback(monkeypatch) -> None:

@@ -211,7 +211,7 @@ client code; product `/generate`+`/search` E2E still works through the broker.
 injection; add `--network` confinement to ONLY the safebox; route the SDK at the safebox broker
 (`ANTHROPIC_BASE_URL=<safebox>`) with a minted operator-plane token; meter via the broker reserve. Give the
 docker-broker its OWN credential (stop reusing `TAKYON_SAFEBOX_TOKEN`). **Codex gate:** `ps` on the worker
-host shows no key; the container has no default-bridge egress; a real `business_claude_agent_task` still runs.
+host shows no key; the container has no default-bridge egress; a real primary Agent SDK bootstrap still runs.
 
 **STEP E — DELETE the raw-key egress + shared token (`safebox_app.py`).** Remove `GET /v1/env/{key}`,
 `POST /v1/env/first`, `GET /v1/env/snapshot`, `GET /v1/env`; replace the shared-bearer auth on remaining
@@ -252,7 +252,7 @@ host only, and a dedicated **`TAKYON_DOCKER_BROKER_TOKEN`** for the docker-broke
    suite green; product `/generate`+`/search` work through the broker.
 4. **STEP D — worker.** Create the confined docker network (egress ONLY to the safebox); set
    `TAKYON_CLAUDE_AGENT_BROKER=1`. **GATE:** `ps` on the worker host shows no key; container has no
-   default-bridge egress; a real `business_claude_agent_task` still runs. Then delete the OFF branch.
+   default-bridge egress; a real primary Agent SDK bootstrap still runs. Then delete the OFF branch.
 5. **STEP E — delete unsafe.** Remove `GET /v1/env/{key}`, `/v1/env/first`, `/v1/env/snapshot`, `/v1/env`
    from safebox_app.py; replace shared-bearer auth on remaining admin routes. **GATE:** safebox boots;
    `curl …/v1/env/snapshot` → 404; all product/worker AI still works (only via broker).

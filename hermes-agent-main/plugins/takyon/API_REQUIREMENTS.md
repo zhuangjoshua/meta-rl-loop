@@ -32,17 +32,17 @@ Observed key names are present locally as of 2026-05-25; values are intentionall
 - `takyon-distribution`
 - `takyon-business-metrics`
 - `takyon-x`
-- `takyon-reddit`
 - `takyon-meta-ads-v2`
 - `takyon-reddit-ads`
 
-These skills should declare readiness in Hermes-native frontmatter:
+These skills declare portable routing in native frontmatter and bind runtime readiness in `skills/HANDOFF/bindings.yaml`:
 
-- `required_environment_variables`
-- `required_credential_files`
-- `metadata.hermes.*`
+- capabilities and guarded tools
+- authority and business scope
+- output and publication paths
+- receipt requirements
 
-Takyon should not depend on a separate registry for skill API readiness.
+Raw environment-variable and credential-file requirements do not belong in skill bodies.
 
 ## Tool Surface
 

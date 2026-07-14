@@ -100,47 +100,6 @@ def test_system_plane_is_narrow_and_code_only(tmp_path, monkeypatch):
         clear_session_vars(tokens)
 
 
-def test_business_session_product_deferral_freezes_refresh_surface_true(monkeypatch):
-    class _StoreStub:
-        _workspace_root_override = "/tmp/takyon-session-workspace"
-
-        def __init__(self):
-            self.commits = []
-
-        def commit(self, **kwargs):
-            self.commits.append(kwargs)
-            return {
-                "success": True,
-                "results": [{"action": "job.enqueue", "job": "run-1", "worker_job": "wj-1"}],
-            }
-
-    store = _StoreStub()
-    monkeypatch.setenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", "1")
-    monkeypatch.delenv("TAKYON_WORKER_PROCESS", raising=False)
-    monkeypatch.setattr(takyon_core, "_store", lambda: store)
-    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "acme")
-    monkeypatch.setattr(takyon_core, "_require_api_access", lambda op, **kw: {})
-    monkeypatch.setattr(
-        takyon_core,
-        "_read_work_request_run",
-        lambda _store, _run_id: ("completed", {"result": {"success": True, "summary": "done"}}),
-    )
-    monkeypatch.setattr(takyon_core, "_WORKER_DEFERRAL_POLL_SECONDS", 0.0)
-
-    raw = takyon_core._defer_claude_agent_task_to_worker(
-        {
-            "business": "acme",
-            "instruction": "build",
-            "idempotency_key": "task-override",
-            "workspace": "product/site",
-        }
-    )
-
-    result = json.loads(raw)
-    assert result["success"] is True
-    assert store.commits[0]["operations"][0]["payload"]["args"]["refresh_surface"] is True
-
-
 def test_worker_tool_handler_binds_workspace_root_into_session(monkeypatch):
     from plugins.takyon import worker as takyon_worker
 
@@ -181,7 +140,7 @@ def test_worker_tool_handler_binds_workspace_root_into_session(monkeypatch):
     job = takyon_worker.Job(
         id="job-ctx",
         business_slug="acme",
-        kind="claude.agent_task",
+        kind="product.surface_refresh",
         status="running",
         idempotency_key="ik-ctx",
         payload={"args": {"business": "acme"}, "work_request_id": "wr-ctx"},
@@ -198,7 +157,7 @@ def test_worker_tool_handler_binds_workspace_root_into_session(monkeypatch):
 
     outcome = takyon_worker._operator_tool_task_handler(
         job,
-        tool_name="business_claude_agent_task",
+        tool_name="business_refresh_product_surface",
         handler_fn=_tool,
     )
 
@@ -211,11 +170,11 @@ def test_worker_tool_handler_binds_workspace_root_into_session(monkeypatch):
         "user_id": "user-123",
         "workspace_root": "/tmp/takyon-worker-test-home",
         "business_slug": "acme",
-        "task_kind": "business_claude_agent_task",
+        "task_kind": "business_refresh_product_surface",
     }
     assert observed["clear_session_vars"] == ["token"]
     assert observed["run_id"] == "wr-ctx"
-    assert observed["task_kind"] == "business_claude_agent_task"
+    assert observed["task_kind"] == "business_refresh_product_surface"
     assert outcome.result == {"status": "completed", "work_request_id": "wr-ctx"}
 
 
@@ -244,7 +203,7 @@ def test_worker_tool_handler_restores_exact_parent_bootstrap_context(monkeypatch
     job = takyon_worker.Job(
         id="child-job",
         business_slug="acme",
-        kind="claude.agent_task",
+        kind="product.surface_refresh",
         status="running",
         idempotency_key="child-idem",
         payload={
@@ -269,7 +228,7 @@ def test_worker_tool_handler_restores_exact_parent_bootstrap_context(monkeypatch
 
     outcome = takyon_worker._operator_tool_task_handler(
         job,
-        tool_name="business_claude_agent_task",
+        tool_name="business_refresh_product_surface",
         handler_fn=_tool,
     )
 

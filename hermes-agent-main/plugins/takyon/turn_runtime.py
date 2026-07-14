@@ -698,22 +698,6 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
                 if checkout_id:
                     lines.append(f"checkout receipt -> {_business_artifact_path(business, f'metrics/receipts/app-checkout/{checkout_id}.json')}")
         return lines
-    if not results and str(name or "") == "business_claude_agent_task":
-        business = str(data.get("business") or args.get("business") or "").strip()
-        workspace = str(data.get("workspace") or args.get("workspace") or ".").strip() or "."
-        lines = []
-        if business:
-            lines.append(f"agent workspace -> {_business_artifact_path(business, workspace)}")
-            surface_refresh = data.get("surface_refresh") if isinstance(data.get("surface_refresh"), dict) else {}
-            if surface_refresh:
-                status = surface_refresh.get("status") or "unrefreshed"
-                receipt = surface_refresh.get("receipt_path") or ""
-                suffix = f" -> {_business_artifact_path(business, receipt)}" if receipt else ""
-                lines.append(f"product publish check {status}{suffix}")
-            agent_record = data.get("agent_record") if isinstance(data.get("agent_record"), dict) else {}
-            for line in _tool_progress_lines("business_record_agent", {"business": business}, agent_record)[:1]:
-                lines.append(line)
-        return lines
     if not results and str(name or "") == "business_refresh_product_surface":
         business = str(data.get("business") or args.get("business") or "").strip()
         surface_refresh = data.get("surface_refresh") if isinstance(data.get("surface_refresh"), dict) else {}

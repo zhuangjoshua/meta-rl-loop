@@ -72,7 +72,7 @@ We want all of the following at once:
 - Business-scoped CEO turns already run inside `isolated_business_workspace(...)`.
 - In a scoped turn, `business_*` tools are bound to `TAKYON_SESSION_BUSINESS_SLUG`, so an agent in `business:alpha` cannot pass `business=beta` and escape to another business in the same session.
 - Business file writes also resolve through the canonical business-root containment checks, so output paths cannot escape the current business root.
-- `business_claude_agent_task` is already a bounded workspace worker lane: it allows only `Read`, `Write`, `Edit`, `MultiEdit`, `Grep`, and `Glob`, and explicitly denies `Bash`.
+- The primary Agent SDK session reaches business files only through the reviewed HANDOFF tool allowlist and canonical business-root containment checks; it cannot spawn a nested model worker.
 - Safebox is live as a separate service now; the remaining gap on this plane is per-turn process/container freshness, not raw shared-secret reads through in-process Safebox.
 
 ### Sub-user app path
@@ -297,7 +297,7 @@ Current repo status:
 - Current repo status:
   - partially implemented through the existing terminal/file Docker backend on the tracked operator services
   - business-scoped file tools already bind to the current session business and current isolated workspace
-  - `business_claude_agent_task` already runs in a bounded workspace with no Bash or generic shell
+  - the primary Agent SDK session uses guarded business-scoped file tools and the isolated terminal/build sandbox, with no nested model worker
   - remaining delta: ordinary scoped CEO turns still reuse the live operator process instead of always becoming one explicit fresh worker/container per turn
   - business-scoped CEO turns already run inside `isolated_business_workspace(...)`
   - remaining gap is to finish reducing non-terminal mutation paths to explicit isolated-worker semantics, not to invent a brand-new Docker backend

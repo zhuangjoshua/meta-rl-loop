@@ -25,7 +25,7 @@ def test_predicate_only_true_for_wake():
         assert core._is_autonomous_wake_turn() is True
     finally:
         core._ACTIVE_OPERATOR_TASK_KIND.reset(tok)
-    for kind in ("ceo_bootstrap", "", "claude.agent_task"):
+    for kind in ("ceo_bootstrap", "", "product.surface_refresh"):
         tok = _with_task_kind(kind)
         try:
             assert core._is_autonomous_wake_turn() is False, kind
@@ -79,7 +79,6 @@ def test_product_file_edit_guard_is_path_scoped():
 @pytest.mark.parametrize(
     "handler_name",
     [
-        "handle_business_claude_agent_task",
         "handle_business_upsert_app_surface_contract",
         "handle_business_refresh_product_surface",
         "handle_business_upsert_app_plan",
