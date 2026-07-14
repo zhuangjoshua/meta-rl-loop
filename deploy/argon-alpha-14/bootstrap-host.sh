@@ -56,6 +56,13 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y ca-certificates chromium curl gnupg rsync caddy docker.io ffmpeg
+  if ! command -v google-chrome-stable >/dev/null 2>&1; then
+    chrome_deb=\"\$(mktemp --suffix=.deb)\"
+    curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+      -o \"\$chrome_deb\"
+    apt-get install -y \"\$chrome_deb\"
+    rm -f \"\$chrome_deb\"
+  fi
   node_major=\"\$(node -p 'process.versions.node.split(\".\")[0]' 2>/dev/null || true)\"
   if [[ ! \"\$node_major\" =~ ^[0-9]+$ ]] || (( node_major < 20 )); then
     install -d -m 0755 /etc/apt/keyrings
@@ -70,7 +77,7 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   fi
   node -e 'const major=Number(process.versions.node.split(\".\")[0]); if (major < 20) process.exit(1)'
   npm --version >/dev/null
-  chromium --version >/dev/null
+  google-chrome-stable --version >/dev/null
   if ! command -v xurl >/dev/null 2>&1; then
     curl -fsSL https://raw.githubusercontent.com/xdevplatform/xurl/main/install.sh | bash
   fi

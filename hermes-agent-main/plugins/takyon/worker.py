@@ -45,7 +45,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from . import app_usage, billing, composio_distribution, jobs, wakes
 from .jobs import Job, JobOutcome, JobRunResult
@@ -1286,6 +1286,7 @@ def _run_claude_sdk_ceo_turn(
     hard_stop_callback: Callable[[str], None] | None = None,
     progress: _RuntimeProgress | None = None,
     sdk_allowed_tools: frozenset[str] | None = None,
+    sdk_tool_preflight_callback: Callable[[str, Mapping[str, Any]], None] | None = None,
     sdk_tool_receipt_callback: Callable[[str, Mapping[str, Any], str], None] | None = None,
     record_final_chat: bool = True,
 ) -> tuple[str, float, str, bool]:
@@ -1445,6 +1446,18 @@ def _run_claude_sdk_ceo_turn(
         if callable(sdk_tool_receipt_callback):
             sdk_tool_receipt_callback(name, args, result)
 
+    def tool_started(
+        tool_use_id: str,
+        name: str,
+        args: Mapping[str, Any],
+    ) -> None:
+        # Policy validation belongs before dispatch. A callback failure is returned to the model
+        # without running the tool, so no durable or paid effect can be mislabeled as failed.
+        if callable(sdk_tool_preflight_callback):
+            sdk_tool_preflight_callback(name, args)
+        if progress is not None:
+            progress.tool_started(tool_use_id, name, args)
+
     disabled_toolsets = [
         "cronjob",
         "messaging",
@@ -1493,7 +1506,7 @@ def _run_claude_sdk_ceo_turn(
                 stop_probe=stop_probe,
                 active_work_probe=active_work,
                 progress_callback=on_progress,
-                on_tool_start=(progress.tool_started if progress is not None else None),
+                on_tool_start=tool_started,
                 on_tool_complete=tool_completed,
             )
     except ClaudeSdkProcessStopped as exc:
@@ -1612,6 +1625,7 @@ def _run_ceo_turn(
     sdk_effort: str = "high",
     sdk_epoch: str = "",
     sdk_allowed_tools: frozenset[str] | None = None,
+    sdk_tool_preflight_callback: Callable[[str, Mapping[str, Any]], None] | None = None,
     sdk_tool_receipt_callback: Callable[[str, Mapping[str, Any], str], None] | None = None,
     record_final_chat: bool = True,
 ) -> tuple[str, float, str, bool]:
@@ -1635,6 +1649,7 @@ def _run_ceo_turn(
         sdk_resume_session=sdk_resume_session,
         sdk_epoch=sdk_epoch,
         sdk_allowed_tools=sdk_allowed_tools,
+        sdk_tool_preflight_callback=sdk_tool_preflight_callback,
         sdk_tool_receipt_callback=sdk_tool_receipt_callback,
         record_final_chat=record_final_chat,
         wall_clock_limit=wall_clock_limit,
@@ -1895,9 +1910,15 @@ def _bootstrap_phase_authoritative_evidence(
             public_url = str(surface.get("public_url") or publish.get("public_url") or "").strip()
             if status != "published" or not build_id or not public_url:
                 return None
+            visual_audit = _bootstrap_visual_audit_status(receipts)
             return AuthoritativePhaseEvidence(
                 "live-product-publication",
-                {"build_id": build_id, "public_url": public_url, "status": status},
+                {
+                    "build_id": build_id,
+                    "public_url": public_url,
+                    "status": status,
+                    "visual_audit": visual_audit,
+                },
             )
         if not _bootstrap_has_durable_live_product(
             store, slug, workflow_requested=workflow_requested
@@ -1996,6 +2017,25 @@ def _bootstrap_phase_authoritative_evidence(
             {"product_complete": True},
         )
     return None
+
+
+def _bootstrap_visual_audit_status(
+    receipts: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    """Return advisory visual-inspection status without creating a design gate."""
+
+    browser = [
+        receipt
+        for receipt in receipts
+        if str(receipt.get("tool") or "").startswith("browser_")
+    ]
+    if not browser:
+        return {"status": "not_run", "detail": "rendered-page audit was not run"}
+    if any(bool(receipt.get("success")) for receipt in browser):
+        return {"status": "completed", "detail": "rendered-page browser inspection completed"}
+    latest = browser[-1]
+    detail = str(latest.get("error") or latest.get("status") or "browser unavailable")
+    return {"status": "unavailable", "detail": detail[:500]}
 
 
 def _bootstrap_phase_missing_evidence(phase: str) -> str:
@@ -2108,9 +2148,17 @@ def _post_bootstrap_phase_operator_update(
         )
     if completed:
         headline = "Your launch is ready"
-        summary = (
-            "The core launch work is complete, the product is published, and the final checks are finished."
-        )
+        landing_receipts = list(run.phase_receipts.get("landing_build_publish") or [])
+        visual_audit = _bootstrap_visual_audit_status(landing_receipts)
+        if visual_audit["status"] == "completed":
+            summary = (
+                "The core launch work is complete, the product is published, and the rendered-page inspection completed."
+            )
+        else:
+            summary = (
+                "The product is published and its technical checks passed. Visual inspection was "
+                f"{visual_audit['status'].replace('_', ' ')}: {visual_audit['detail']}."
+            )
     else:
         headline, summary = copy[phase]
     update_key_name = "operator_update_completed" if completed else "operator_update"
@@ -3352,6 +3400,14 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                         # job-level cumulative Safebox spend envelope.
                         sdk_epoch="bootstrap",
                         sdk_allowed_tools=PHASE_ALLOWED_TOOLS[phase],
+                        sdk_tool_preflight_callback=(
+                            lambda name, args, active_phase=phase: phase_store.validate_tool_call(
+                                bootstrap_job_id,
+                                active_phase,
+                                tool_name=name,
+                                args=args,
+                            )
+                        ),
                         sdk_tool_receipt_callback=lambda name, args, result, active_phase=phase: (
                             phase_store.record_tool_receipt(
                                 bootstrap_job_id,

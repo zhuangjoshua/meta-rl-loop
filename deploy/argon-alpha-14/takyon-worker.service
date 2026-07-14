@@ -53,6 +53,8 @@ UnsetEnvironment=TAKYON_CAP_SIGNING_KEY
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
+Environment=AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+Environment=AGENT_BROWSER_ARGS=--no-sandbox,--disable-dev-shm-usage
 # The primary operator agent is one Claude Agent SDK session pinned to DeepSeek through Safebox.
 Environment=TAKYON_STRICT_MODEL_ROLES=1
 Environment=TAKYON_MODEL=deepseek-v4-pro

@@ -118,9 +118,43 @@ PHASE_ALLOWED_TOOLS: dict[str, frozenset[str]] = {
 }
 
 
+# These tools cross an external or durable control boundary. Their exact phase-owned key must be
+# checked before dispatch; checking after dispatch can report a failure after money was spent or
+# state was already committed. Ordinary workspace writes and patches intentionally stay outside
+# this map: they are normal reversible build work, not independently policy-gated side effects.
+PHASE_IDEMPOTENCY_TOOL_SLOTS: dict[str, dict[str, frozenset[str]]] = {
+    "surface": {
+        "business_upsert_app_surface_contract": frozenset({"contract"}),
+        "business_upsert_app_plan": frozenset({"plan"}),
+    },
+    "landing_build_publish": {
+        "business_generate_site_image": frozenset(
+            {"image_1", "image_2", "image_3", "image_4"}
+        ),
+        "business_refresh_product_surface": frozenset({"publish"}),
+    },
+    "search": {
+        "business_register_search_console": frozenset({"register"}),
+    },
+    "logo": {
+        "business_generate_logo": frozenset({"generate"}),
+    },
+    "final_workflow_build_publish": {
+        "business_upsert_app_surface_contract": frozenset({"contract"}),
+        "business_refresh_product_surface": frozenset({"publish"}),
+    },
+    "mobile": {
+        "business_publish_mobile_release": frozenset(
+            {"release_1", "release_2", "release_3"}
+        ),
+    },
+}
+
+
 PHASE_MAX_TURNS = {
     "brief": 12,
-    "surface": 10,
+    "surface": 24,
+    "landing_build_publish": 60,
     "search": 10,
     "logo": 16,
     "final_workflow_build_publish": 60,
@@ -198,6 +232,10 @@ def bootstrap_phase_idempotency(job_id: str) -> dict[str, dict[str, str]]:
             "operator_update": f"{prefix}:surface-update",
         },
         "landing_build_publish": {
+            "image_1": f"{prefix}:landing-image-1",
+            "image_2": f"{prefix}:landing-image-2",
+            "image_3": f"{prefix}:landing-image-3",
+            "image_4": f"{prefix}:landing-image-4",
             "publish": f"{prefix}:landing-publish",
             "operator_update": f"{prefix}:landing-update",
         },
@@ -447,13 +485,7 @@ class PostgresBootstrapPhaseStore:
             run = self._run(self._select(conn, job_uuid, lock=True))
             if run.current_phase != phase:
                 return
-            allowed_keys = {
-                str(value)
-                for value in dict(run.phase_idempotency.get(phase) or {}).values()
-            }
             observed_key = str(args.get("idempotency_key") or "")
-            if observed_key and observed_key not in allowed_keys:
-                raise BootstrapPhaseError("phase tool used an unbound idempotency key")
             safe = {
                 "tool": tool_name,
                 "idempotency_key": observed_key,
@@ -476,6 +508,39 @@ class PostgresBootstrapPhaseStore:
                 job_uuid,
             )
             conn.execute(sql, params)
+
+    def validate_tool_call(
+        self,
+        job_id: str,
+        phase: str,
+        *,
+        tool_name: str,
+        args: Mapping[str, Any],
+    ) -> None:
+        """Validate policy-owned side effects before the tool can mutate anything."""
+
+        if tool_name not in PHASE_ALLOWED_TOOLS.get(phase, frozenset()):
+            raise BootstrapPhaseError(
+                f"tool {tool_name!r} is outside bootstrap phase {phase!r}"
+            )
+        required_slots = PHASE_IDEMPOTENCY_TOOL_SLOTS.get(phase, {}).get(tool_name)
+        if not required_slots:
+            return
+        job_uuid = str(uuid.UUID(str(job_id)))
+        run = self.load(job_uuid)
+        if run.current_phase != phase:
+            raise BootstrapPhaseError("bootstrap phase changed before tool dispatch")
+        phase_keys = dict(run.phase_idempotency.get(phase) or {})
+        permitted = {
+            str(phase_keys.get(slot) or "")
+            for slot in required_slots
+            if str(phase_keys.get(slot) or "")
+        }
+        observed_key = str(args.get("idempotency_key") or "").strip()
+        if not observed_key or observed_key not in permitted:
+            raise BootstrapPhaseError(
+                f"{tool_name} requires its exact policy-issued phase idempotency key"
+            )
 
     def record_operator_update_receipt(
         self,
@@ -658,7 +723,7 @@ def phase_prompt(
         f"Explicit product workflow requested: {'yes' if workflow else 'no'}.",
         phase_execution,
         "Do not redo earlier phases. Do not install or enumerate skills. Never fake a receipt, provider result, publication, auth, subscription, record, or customer workflow.",
-        "Use every idempotency key below exactly; a retry must reattach to the same effect, never mint a replacement unless three mobile repair keys are explicitly supplied.",
+        "For any side effect you choose, use its matching idempotency key below exactly; optional unused keys stay unused, and a retry must reattach to the same effect rather than minting a replacement.",
         "The operator_update key is reserved for the runtime-owned customer milestone; never pass it to a tool.",
         "Customer milestone updates are runtime-owned and rate-limited; do not attempt to post extra updates.",
         "Phase idempotency: " + json.dumps(keys, sort_keys=True),
@@ -673,7 +738,7 @@ def phase_prompt(
         "surface": (
             "Create the product surface contract with source_path product/site, runtime_features auth/account/profile/checkout, and routes /, /app, /app/profile.",
             "Use the one human display name from research/strategy.md, never the routing slug.",
-            "If monthly paid, upsert the canonical monthly plan with included_ai_budget_microusd; do not leave checkout planless.",
+            "If monthly paid, upsert plan_key monthly with the exact plan key. Unless the operator supplied explicit economics, omit composition, price_cents, and included_ai_budget_microusd so server policy supplies the canonical starter economics; do not invent provider pricing math.",
             "Do not set bootstrap_final_product_pass in this phase.",
         ),
         "landing_build_publish": (

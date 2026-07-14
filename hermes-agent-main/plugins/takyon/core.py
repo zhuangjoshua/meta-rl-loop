@@ -23966,6 +23966,10 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+_CANONICAL_STARTER_PLAN_PRICE_CENTS = 2_900
+_CANONICAL_STARTER_PLAN_AI_BUDGET_MICROUSD = 5_000_000
+
+
 def handle_business_upsert_app_plan(args: dict, **_: Any) -> str:
     # The money-shape gate fires downstream at the DB-authoritative choke point (upsert_plan_policy)
     # on EVERY task kind. The wake ban here is the pre-existing, wake-only refusal for the whole
@@ -23973,15 +23977,33 @@ def handle_business_upsert_app_plan(args: dict, **_: Any) -> str:
     # this raises first — but on a chat/bootstrap turn, which the wake ban lets through, the
     # money-shape gate is the layer that closes the Roomier hole.)
     _refuse_on_autonomous_wake("subscription/plan changes")
+    # Fresh-business bootstrap should not ask a model to reverse-engineer provider pricing. When no
+    # economics were explicitly supplied, policy owns one stable starter offer. Explicit operator
+    # economics and modular composition continue through the existing authoritative money-shape
+    # validation unchanged.
+    composition = args.get("composition")
+    policy_starter = (
+        (composition is None or composition == "")
+        and args.get("price_cents") in {None, ""}
+        and args.get("included_ai_budget_microusd") in {None, ""}
+    )
     operation = {
         "action": "app.plan.upsert",
         "business": args.get("business"),
         "plan_key": args.get("plan_key"),
-        "tier": args.get("tier"),
-        "price_cents": args.get("price_cents"),
+        "tier": args.get("tier") or ("standard" if policy_starter else None),
+        "price_cents": (
+            _CANONICAL_STARTER_PLAN_PRICE_CENTS
+            if policy_starter
+            else args.get("price_cents")
+        ),
         "currency": args.get("currency") or "usd",
         "billing_interval": args.get("billing_interval") or "month",
-        "included_ai_budget_microusd": args.get("included_ai_budget_microusd"),
+        "included_ai_budget_microusd": (
+            _CANONICAL_STARTER_PLAN_AI_BUDGET_MICROUSD
+            if policy_starter
+            else args.get("included_ai_budget_microusd")
+        ),
         "included_action_quota": 0 if args.get("included_action_quota") in {None, ""} else args.get("included_action_quota"),
         "saleable": args.get("saleable"),
         "source": args.get("source") or "takyon",
@@ -23991,7 +24013,7 @@ def handle_business_upsert_app_plan(args: dict, **_: Any) -> str:
         # policy. When present, the raw price_cents/included_ai_budget_microusd inputs are ignored in
         # favor of the derived numbers (the transitional freehand path is only used when composition
         # is absent).
-        "composition": args.get("composition"),
+        "composition": composition,
     }
     return _commit_tool(args, operation)
 
@@ -36820,7 +36842,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "name": "business_upsert_app_plan",
         "description": "Create or update a business product app plan policy, including Stripe price linkage and included usage.",
         "handler": handle_business_upsert_app_plan,
-        "schema": _schema("business_upsert_app_plan", "Create/update a product app plan (a recurring SUBSCRIPTION offer; refused on a credit-packs or COGS-pass-through business). PREFER passing `composition` (priced components + margin policy) so price and AI budget are DERIVED, never typed — adding a feature is adding a component. A plan with active subscribers has its economic terms FROZEN: to change pricing, create a new plan_key and route new checkout to it — existing subscribers stay grandfathered on the old plan_key. Set saleable=false to retire this exact plan version from new checkout.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string", "description": "Stable id of the price offer. Treat it as an immutable version: never re-price a plan_key that has subscribers; mint a new one (e.g. 'pro-2') for new pricing."}, "tier": {"type": "string", "description": "Entitlement tier unlocked by this plan"}, "composition": _COMPOSITION_PROP, "price_cents": {"type": "integer", "description": "Transitional freehand path (ignored when `composition` is given). Still margin-gated: refused if the AI budget exceeds the price."}, "currency": {"type": "string"}, "billing_interval": {"type": "string", "enum": ["month", "year", "one_time"], "description": "Canonical interval. Common aliases like monthly/yearly/once are normalized. Subuser plans are monthly-only; non-month is refused for new plans."}, "included_ai_budget_microusd": {"type": "integer", "description": "Transitional freehand path (ignored when `composition` is given). For monthly plans this must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`)."}, "included_action_quota": {"type": "integer"}, "saleable": {"type": "boolean", "description": "False retires this plan from new checkout without changing existing subscriptions."}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
+        "schema": _schema("business_upsert_app_plan", "Create/update a product app plan (a recurring SUBSCRIPTION offer; refused on a credit-packs or COGS-pass-through business). Omit composition, price_cents, and included_ai_budget_microusd together to use the policy-owned canonical starter economics. Supply `composition` only when explicit modular economics are known. A plan with active subscribers has its economic terms FROZEN: to change pricing, create a new plan_key and route new checkout to it — existing subscribers stay grandfathered on the old plan_key. Set saleable=false to retire this exact plan version from new checkout.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string", "description": "Stable id of the price offer. Treat it as an immutable version: never re-price a plan_key that has subscribers; mint a new one (e.g. 'pro-2') for new pricing."}, "tier": {"type": "string", "description": "Entitlement tier unlocked by this plan"}, "composition": _COMPOSITION_PROP, "price_cents": {"type": "integer", "description": "Explicit freehand path (ignored when `composition` is given). Still margin-gated: refused if the AI budget exceeds the price."}, "currency": {"type": "string"}, "billing_interval": {"type": "string", "enum": ["month", "year", "one_time"], "description": "Canonical interval. Common aliases like monthly/yearly/once are normalized. Subuser plans are monthly-only; non-month is refused for new plans."}, "included_ai_budget_microusd": {"type": "integer", "description": "Explicit freehand path (ignored when `composition` is given). For monthly plans this must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`)."}, "included_action_quota": {"type": "integer"}, "saleable": {"type": "boolean", "description": "False retires this plan from new checkout without changing existing subscriptions."}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
     },
     {
         "name": "business_upsert_app_customer",

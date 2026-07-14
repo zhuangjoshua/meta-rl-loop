@@ -33,8 +33,11 @@ command -v deno >/dev/null 2>&1
 command -v systemd-run >/dev/null 2>&1
 command -v node >/dev/null 2>&1
 command -v npm >/dev/null 2>&1
-command -v chromium >/dev/null 2>&1
-chromium --version >/dev/null
+command -v google-chrome-stable >/dev/null 2>&1
+google-chrome-stable --version >/dev/null
+timeout 20 runuser -u takyon -- env HOME=/opt/takyon \
+  google-chrome-stable --headless=new --no-sandbox --disable-dev-shm-usage \
+  --dump-dom about:blank >/dev/null
 node -e 'const major=Number(process.versions.node.split(".")[0]); if (major < 20) process.exit(1)'
 
 if ! id -u takyon >/dev/null 2>&1; then

@@ -13,6 +13,7 @@ from plugins.takyon.bootstrap_phases import (
     BOOTSTRAP_PHASES,
     BootstrapPhaseError,
     PHASE_ALLOWED_TOOLS,
+    PHASE_MAX_TURNS,
     PostgresBootstrapPhaseStore,
     phase_prompt,
 )
@@ -177,7 +178,7 @@ def test_phase_store_rejects_changed_immutable_retry_and_model_text_evidence() -
         )
 
 
-def test_phase_tool_receipts_are_bound_to_current_phase_and_stable_key() -> None:
+def test_phase_tool_receipts_do_not_reject_after_dispatch_and_side_effects_validate_before() -> None:
     store, conn, ids = _new_store()
     run = store.initialize_or_load(**ids)
     store.complete_phase(
@@ -210,13 +211,40 @@ def test_phase_tool_receipts_are_bound_to_current_phase_and_stable_key() -> None
     assert conn.row["phase_receipts"]["brief"][-1]["tool"] == (
         "business_post_operator_update"
     )
-    with pytest.raises(BootstrapPhaseError, match="unbound idempotency"):
-        store.record_tool_receipt(
+    store.record_tool_receipt(
+        ids["job_id"],
+        "brief",
+        tool_name="business_write_file",
+        args={"idempotency_key": "normal-workspace-write"},
+        result=json.dumps({"success": True}),
+    )
+    assert conn.row["phase_receipts"]["brief"][-1]["success"] is True
+
+    store.complete_phase(
+        ids["job_id"], "brief", AuthoritativePhaseEvidence("runtime", {})
+    )
+    store.complete_phase(
+        ids["job_id"], "surface", AuthoritativePhaseEvidence("runtime", {})
+    )
+    landing = store.load(ids["job_id"])
+    store.validate_tool_call(
+        ids["job_id"],
+        "landing_build_publish",
+        tool_name="business_write_file",
+        args={"idempotency_key": "normal-workspace-write"},
+    )
+    store.validate_tool_call(
+        ids["job_id"],
+        "landing_build_publish",
+        tool_name="business_generate_site_image",
+        args={"idempotency_key": landing.phase_idempotency["landing_build_publish"]["image_1"]},
+    )
+    with pytest.raises(BootstrapPhaseError, match="policy-issued"):
+        store.validate_tool_call(
             ids["job_id"],
-            "brief",
-            tool_name="business_write_file",
+            "landing_build_publish",
+            tool_name="business_refresh_product_surface",
             args={"idempotency_key": "fresh-unsafe-key"},
-            result=json.dumps({"success": True}),
         )
 
 
@@ -250,6 +278,8 @@ def test_phase_prompts_and_toolsets_are_bounded() -> None:
         "final_workflow_build_publish"
     ]
     assert tuple(PHASE_ALLOWED_TOOLS) == BOOTSTRAP_PHASES
+    assert PHASE_MAX_TURNS["surface"] == 24
+    assert PHASE_MAX_TURNS["landing_build_publish"] == 60
     assert PHASE_ALLOWED_TOOLS["preflight"] == frozenset()
     for phase in (
         "brief",
@@ -275,6 +305,45 @@ def test_phase_prompts_and_toolsets_are_bounded() -> None:
             public_site_url="https://acme.coscale.app/",
             animations=False,
         )
+
+
+def test_app_plan_uses_policy_starter_when_model_omits_economics(monkeypatch) -> None:
+    captured = {}
+
+    monkeypatch.setattr(core, "_refuse_on_autonomous_wake", lambda _surface: None)
+
+    def fake_commit(args, operation):
+        captured.update(operation)
+        return json.dumps({"success": True})
+
+    monkeypatch.setattr(core, "_commit_tool", fake_commit)
+    core.handle_business_upsert_app_plan(
+        {
+            "business": "acme",
+            "plan_key": "monthly",
+            "idempotency_key": "plan-key",
+        }
+    )
+
+    assert captured["tier"] == "standard"
+    assert captured["price_cents"] == 2_900
+    assert captured["included_ai_budget_microusd"] == 5_000_000
+    assert captured["composition"] is None
+
+
+def test_visual_audit_is_advisory_and_explicit() -> None:
+    assert worker._bootstrap_visual_audit_status([])["status"] == "not_run"
+    failed = worker._bootstrap_visual_audit_status(
+        [{"tool": "browser_vision", "success": False, "error": "chrome unavailable"}]
+    )
+    assert failed == {"status": "unavailable", "detail": "chrome unavailable"}
+    completed = worker._bootstrap_visual_audit_status(
+        [
+            {"tool": "browser_snapshot", "success": False, "error": "first attempt"},
+            {"tool": "browser_vision", "success": True, "error": ""},
+        ]
+    )
+    assert completed["status"] == "completed"
 
 
 def test_long_seeded_goal_does_not_skip_taste_brief_phase(tmp_path) -> None:
@@ -445,6 +514,10 @@ def test_landing_publication_prefers_authoritative_columns_over_stale_attempt() 
         "build_id": "landing-build",
         "public_url": "https://acme.coscale.app/",
         "status": "published",
+        "visual_audit": {
+            "status": "not_run",
+            "detail": "rendered-page audit was not run",
+        },
     }
 
 
