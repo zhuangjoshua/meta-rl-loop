@@ -205,11 +205,12 @@ function normalizeManifestSkill(raw, pluginRoot) {
     fail("skill_manifest_schema", `approved skill ${name} has no routing description`);
   }
   if (
-    allowedModes.length === 0
+    allowedModes.length !== INVOCATION_MODES.size
     || new Set(allowedModes).size !== allowedModes.length
     || allowedModes.some((mode) => !INVOCATION_MODES.has(mode))
+    || [...INVOCATION_MODES].some((mode) => !allowedModes.includes(mode))
   ) {
-    fail("skill_manifest_schema", `approved skill ${name} has invalid allowed_modes`);
+    fail("skill_manifest_schema", `approved skill ${name} must be available in every runtime mode`);
   }
   const runtimeDirectory = path.resolve(pluginRoot, pluginPath);
   const absoluteSkillFile = path.resolve(pluginRoot, runtimeSkillFile);

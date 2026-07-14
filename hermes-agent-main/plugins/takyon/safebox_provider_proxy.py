@@ -2,7 +2,7 @@
 
 This is the operator/platform counterpart to the business-scoped capability broker at ``/v1/providers/*``
 (see ``safebox_app.py``). Where that broker meters PRODUCT (sub-user) spend, THIS proxy meters the
-operator/platform plane — the CEO agent + coding worker + platform ``web_tools`` calling Anthropic /
+operator/platform plane — the primary Agent SDK CEO + platform ``web_tools`` calling Anthropic /
 Tavily with the stock SDK against a STATIC key. Its purpose is twofold:
 
   1. Keyless egress: the safebox resolves the real provider key LOCALLY and forwards, so operator code
@@ -365,7 +365,7 @@ def _authorize_operator_proxy(
 
     # (b) The shared internal token is NOT spend authority (authority principle / G2). It is held by
     # every runtime plane, so accepting it for spend gave anyone who compromised a plane an uncapped
-    # per-call channel against the platform operator budget. Operator clients (CEO loop, coding worker)
+    # per-call channel against the platform operator budget. Operator clients (primary Agent SDK CEO)
     # present a minted, ceiling-bound operator.session capability via branch (a); a bare token — or
     # anything unsigned — is refused. No ungated, no token-authorized spend path remains.
     raise HTTPException(status_code=401, detail="operator_capability_required")

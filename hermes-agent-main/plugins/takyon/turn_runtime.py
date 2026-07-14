@@ -465,7 +465,7 @@ def _ceo_bootstrap_phase_runtime_config(
         # provisioning). They stay quarantined in their own toolset (never folded into ``takyon``) so
         # they cannot leak into generic or product-runtime contexts; the tools are
         # fail-closed money gates and worker-only operations self-guard against session-bound calls.
-        "enabled_toolsets": ["takyon", "takyon-authority", "skills"],
+        "enabled_toolsets": ["takyon", "takyon-authority", "skills", "browser"],
         "disabled_toolsets": [
             "cronjob",
             "messaging",

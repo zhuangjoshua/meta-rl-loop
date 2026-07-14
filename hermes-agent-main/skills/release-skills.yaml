@@ -3,149 +3,186 @@ plugin:
   name: takyon-approved-skills
   version: 1.0.0
 discovery_roots:
-  - creative
-  - takyon
+- creative
+- takyon
 skills:
-  - name: surface-refresh-audit
-    source_path: creative/surface-refresh-audit
-    version: 1.0.0
-    legacy_names: [claude-refresh-audit]
-    publish_files: [SKILL.md, contract.yaml, LICENSE]
-  - name: design-taste-frontend
-    source_path: creative/taste-frontend
-    version: 1.0.0
-    legacy_names: []
-    publish_files:
-      - SKILL.md
-      - contract.yaml
-      - LICENSE
-      - references/design-engineering.md
-      - references/preflight.md
-      - references/redesign-and-blocks.md
-      - references/source-systems.md
-  - name: taste-imagegen-web
-    source_path: creative/taste-imagegen-web
-    version: 1.0.0
-    legacy_names: []
-    publish_files: [SKILL.md, contract.yaml, LICENSE]
-  - name: takyon-autonomous-seo-geo-operator
-    source_path: takyon/autonomous-seo-geo-operator
-    version: 1.0.0
-    legacy_names: []
-    publish_files:
-      - SKILL.md
-      - contract.yaml
-      - references/seo-checklist.md
-      - templates/page-brief.md
-      - templates/seo-report.md
-  - name: takyon-static-ad-creative-generator
-    source_path: takyon/static-ad-creative-generator
-    version: 1.2.0
-    legacy_names: []
-    publish_files:
-      - SKILL.md
-      - contract.yaml
-      - references/angle-taxonomy.md
-      - references/hook-strategy.md
-      - references/platform-specs.md
-      - references/policy-checks.md
-      - references/prompt-compiler-rules.md
-      - references/qa-rubric.md
-      - references/visual-templates.md
-      - templates/ad-spec.schema.json
-      - templates/ad-spec.template.json
-      - templates/creative-brief.template.md
-  - name: takyon-app-runtime
-    source_path: takyon/takyon-app-runtime
-    version: 1.0.0
-    legacy_names: []
-    publish_files: [SKILL.md, contract.yaml, references/runtime-rules.md, templates/runtime.md]
-  - name: takyon-brand-logo
-    source_path: takyon/takyon-brand-logo
-    version: 1.0.0
-    legacy_names: []
-    publish_files: [SKILL.md, contract.yaml]
-  - name: takyon-business-metrics
-    source_path: takyon/takyon-business-metrics
-    version: 1.0.0
-    legacy_names: []
-    publish_files: [SKILL.md, contract.yaml, references/metrics-rules.md, templates/summary.md]
-  - name: takyon-distribution
-    source_path: takyon/takyon-distribution
-    version: 1.0.0
-    legacy_names: []
-    publish_files:
-      - SKILL.md
-      - contract.yaml
-      - references/campaign-rules.md
-      - templates/campaign.md
-      - templates/forum-reply.md
-      - templates/reply-draft.md
-  - name: takyon-lightreel-seedance-fal-ugc
-    source_path: takyon/takyon-lightreel-seedance-fal-ugc
-    version: 1.0.0
-    legacy_names: []
-    publish_files: [SKILL.md, contract.yaml, templates/runtime-input.example.json]
-  - name: takyon-market-research
-    source_path: takyon/takyon-market-research
-    version: 1.0.0
-    legacy_names: []
-    publish_files:
-      - SKILL.md
-      - contract.yaml
-      - references/research-sources.md
-      - templates/market.md
-      - templates/sources.jsonl
-  - name: takyon-meta-ads-v2
-    source_path: takyon/takyon-meta-ads-v2
-    version: 2.0.0
-    legacy_names: []
-    publish_files:
-      - SKILL.md
-      - contract.yaml
-      - references/benchmarks.md
-      - references/campaign-options.md
-      - references/pixel-attribution.md
-      - references/pixel-health.md
-  - name: takyon-mobile-app
-    source_path: takyon/takyon-mobile-app
-    version: 1.1.0
-    legacy_names: []
-    publish_files: [SKILL.md, contract.yaml]
-  - name: takyon-product
-    source_path: takyon/takyon-product
-    version: 1.0.0
-    legacy_names: []
-    publish_files: [SKILL.md, contract.yaml]
-  - name: takyon-reddit-ads
-    source_path: takyon/takyon-reddit-ads
-    version: 1.0.1
-    legacy_names: []
-    publish_files: [SKILL.md, contract.yaml, references/reddit-ads-framework.md, templates/plan.json]
-  - name: takyon-x
-    source_path: takyon/takyon-x
-    version: 2.1.0
-    legacy_names: []
-    publish_files:
-      - SKILL.md
-      - contract.yaml
-      - references/ai-tells.md
-      - references/hook-library.md
-      - references/refinement-protocol.md
-      - references/voice-and-edge.md
-      - references/x-playbook.md
-      - templates/x-post.md
-      - templates/x-reply.md
-  - name: ugc-video-ad
-    source_path: takyon/ugc-video-ad
-    version: 1.0.0
-    legacy_names: []
-    publish_files:
-      - SKILL.md
-      - contract.yaml
-      - assets/example-brief.json
-      - references/dialogue-action-framework.md
-      - references/editing-and-stitching.md
-      - references/realism-framework.md
-      - templates/brief.json
-      - templates/script.json
+- name: surface-refresh-audit
+  source_path: creative/surface-refresh-audit
+  version: 1.0.0
+  legacy_names:
+  - claude-refresh-audit
+  publish_files:
+  - LICENSE
+  - SKILL.md
+- name: design-taste-frontend
+  source_path: creative/taste-frontend
+  version: 1.0.0
+  legacy_names: []
+  publish_files:
+  - LICENSE
+  - SKILL.md
+  - UPSTREAM.md
+- name: taste-imagegen-web
+  source_path: creative/taste-imagegen-web
+  version: 1.0.0
+  legacy_names: []
+  publish_files:
+  - LICENSE
+  - SKILL.md
+- name: takyon-autonomous-seo-geo-operator
+  source_path: takyon/autonomous-seo-geo-operator
+  version: 1.0.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+  - references/seo-checklist.md
+  - scripts/check-internal-links.ts
+  - scripts/check-metadata.ts
+  - scripts/extract-routes.ts
+  - scripts/lib/fs-scan.ts
+  - scripts/validate-jsonld.ts
+  - templates/page-brief.md
+  - templates/seo-report.md
+- name: takyon-static-ad-creative-generator
+  source_path: takyon/static-ad-creative-generator
+  version: 1.2.0
+  legacy_names: []
+  publish_files:
+  - README.md
+  - SKILL.md
+  - examples/example-batch.json
+  - examples/example-input.json
+  - examples/example-spec-landscape.json
+  - examples/example-spec.json
+  - references/angle-taxonomy.md
+  - references/hook-strategy.md
+  - references/platform-specs.md
+  - references/policy-checks.md
+  - references/prompt-compiler-rules.md
+  - references/qa-rubric.md
+  - references/visual-templates.md
+  - scripts/backends.py
+  - scripts/batch_generate.py
+  - scripts/compile_prompt.py
+  - scripts/generate_image.py
+  - scripts/qa_check.py
+  - scripts/requirements.txt
+  - scripts/validate_spec.py
+  - templates/ad-spec.schema.json
+  - templates/ad-spec.template.json
+  - templates/creative-brief.template.md
+- name: takyon-app-runtime
+  source_path: takyon/takyon-app-runtime
+  version: 1.0.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+  - references/runtime-rules.md
+  - templates/runtime.md
+- name: takyon-brand-logo
+  source_path: takyon/takyon-brand-logo
+  version: 1.0.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+- name: takyon-business-metrics
+  source_path: takyon/takyon-business-metrics
+  version: 1.0.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+  - references/metrics-rules.md
+  - templates/summary.md
+- name: takyon-distribution
+  source_path: takyon/takyon-distribution
+  version: 1.0.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+  - references/campaign-rules.md
+  - templates/campaign.md
+  - templates/forum-reply.md
+  - templates/reply-draft.md
+- name: takyon-lightreel-seedance-fal-ugc
+  source_path: takyon/takyon-lightreel-seedance-fal-ugc
+  version: 1.0.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+  - scripts/build_fal_payload.js
+  - scripts/build_lightreel_prompt.js
+  - scripts/env.js
+  - scripts/lib/paths.js
+  - scripts/query_lightreel.js
+  - scripts/run_workflow.js
+  - scripts/seedancify.js
+  - templates/payloads.md
+  - templates/runtime-input.example.json
+- name: takyon-market-research
+  source_path: takyon/takyon-market-research
+  version: 1.0.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+  - references/research-sources.md
+  - templates/market.md
+  - templates/sources.jsonl
+- name: takyon-meta-ads-v2
+  source_path: takyon/takyon-meta-ads-v2
+  version: 2.0.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+  - references/benchmarks.md
+  - references/campaign-options.md
+  - references/meta-mcp-tool-map.md
+  - references/pixel-attribution.md
+  - references/pixel-health.md
+- name: takyon-mobile-app
+  source_path: takyon/takyon-mobile-app
+  version: 1.1.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+- name: takyon-product
+  source_path: takyon/takyon-product
+  version: 1.0.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+- name: takyon-reddit-ads
+  source_path: takyon/takyon-reddit-ads
+  version: 1.0.1
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+  - references/reddit-ads-framework.md
+  - templates/plan.json
+- name: takyon-x
+  source_path: takyon/takyon-x
+  version: 2.1.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+  - references/ai-tells.md
+  - references/hook-library.md
+  - references/refinement-protocol.md
+  - references/voice-and-edge.md
+  - references/x-playbook.md
+  - templates/x-post.md
+  - templates/x-reply.md
+- name: ugc-video-ad
+  source_path: takyon/ugc-video-ad
+  version: 1.0.0
+  legacy_names: []
+  publish_files:
+  - SKILL.md
+  - assets/example-brief.json
+  - references/dialogue-action-framework.md
+  - references/editing-and-stitching.md
+  - references/realism-framework.md
+  - scripts/build_ad.py
+  - scripts/pipeline.py
+  - scripts/postpass.sh
+  - templates/brief.json
+  - templates/script.json

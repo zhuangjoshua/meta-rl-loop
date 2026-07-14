@@ -68,10 +68,7 @@ if [[ "$ROLE" == "safebox" ]]; then
   [[ -n "$OPERATOR_VPC_IP" ]] || { echo "TAKYON_DEV_OPERATOR_VPC_IP is required for safebox parity" >&2; exit 1; }
 fi
 # For the operator role VPC_IP is the DEV SAFEBOX private VPC IP (the dashboard/worker resolve
-# provider secrets from http://$VPC_IP:8000). The claude-agent build image is overridable.
-TRACKED_WORKER_IMAGE="takyon/claude-worker:node20-chromium-v1"
-DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-$TRACKED_WORKER_IMAGE}"
-WORKER_DOCKERFILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-claude-worker.Dockerfile"
+# provider secrets from http://$VPC_IP:8000).
 PREPARE_PRIMARY_AGENT_RUNTIME="$ROOT_DIR/scripts/prepare-claude-agent-sdk-runtime.sh"
 
 store_get() { grep -m1 "^$1=" "$STORE" | cut -d= -f2- || true; }
@@ -86,11 +83,11 @@ echo "→ [$NODE_NAME] preparing host"
 if [[ "$ROLE" == "operator" ]]; then
   [[ -n "$SUBUSER_HOSTS" ]] || { echo "TAKYON_DEV_SUBUSER_HOSTS is required for operator publish parity" >&2; exit 1; }
   [[ -x "$PREPARE_PRIMARY_AGENT_RUNTIME" ]] || { echo "Agent SDK runtime helper not found: $PREPARE_PRIMARY_AGENT_RUNTIME" >&2; exit 1; }
-  echo "→ [$NODE_NAME] operator host prep (docker + user/linger + agent image) — mirrors prod bootstrap-host.sh"
+  echo "→ [$NODE_NAME] operator host prep (Node + Chromium + docker broker + user/linger) — mirrors prod bootstrap-host.sh"
   "${SSH[@]}" "set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq ca-certificates curl gnupg rsync caddy docker.io ffmpeg
+    apt-get install -y -qq ca-certificates chromium curl gnupg rsync caddy docker.io ffmpeg
     node_major=\"\$(node -p 'process.versions.node.split(\".\")[0]' 2>/dev/null || true)\"
     if [[ ! \"\$node_major\" =~ ^[0-9]+\$ ]] || (( node_major < 20 )); then
       install -d -m 0755 /etc/apt/keyrings
@@ -136,20 +133,9 @@ if [[ "$ROLE" == "operator" ]]; then
     docker version >/dev/null
     echo \"operator host prep OK: takyon uid=\$takyon_uid docker=\$(systemctl is-active docker)\"
   "
-  if [[ "$DOCKER_IMAGE" == "$TRACKED_WORKER_IMAGE" ]]; then
-    [[ -f "$WORKER_DOCKERFILE" ]] || { echo "worker Dockerfile not found: $WORKER_DOCKERFILE" >&2; exit 1; }
-    "${SSH[@]}" "docker build --tag '$DOCKER_IMAGE' -" < "$WORKER_DOCKERFILE"
-  else
-    "${SSH[@]}" "docker image inspect '$DOCKER_IMAGE' >/dev/null 2>&1 || docker pull '$DOCKER_IMAGE'"
-  fi
   "${SSH[@]}" "set -euo pipefail
-    docker image inspect '$DOCKER_IMAGE' >/dev/null
-    docker run --rm --entrypoint node '$DOCKER_IMAGE' --version >/dev/null
-    if docker run --rm --entrypoint /bin/sh '$DOCKER_IMAGE' -lc 'test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null' >/dev/null 2>&1; then
-      echo 'optional Claude worker Chromium renderer available'
-    else
-      echo 'optional Claude worker Chromium renderer unavailable; continuing'
-    fi"
+    node -e 'const major=Number(process.versions.node.split(\".\")[0]); if (major < 20) process.exit(1)'
+    chromium --version >/dev/null"
 fi
 
 echo "→ [$NODE_NAME] rsync runtime tree"
@@ -161,13 +147,7 @@ COPYFILE_DISABLE=1 rsync -rt --no-perms --no-owner --no-group --checksum --delet
   "$TREE/" "root@$HOST:/opt/takyon/hermes-agent-main/"
 
 if [[ "$ROLE" == "operator" ]]; then
-  "${SSH[@]}" "docker run --rm \
-    --entrypoint node \
-    --mount type=bind,src=/opt/takyon/hermes-agent-main,dst=/takyon-runtime,readonly \
-    --workdir /takyon-runtime \
-    '$DOCKER_IMAGE' \
-    --input-type=module \
-    -e 'import fs from \"node:fs\"; const pkg = JSON.parse(fs.readFileSync(\"package.json\", \"utf8\")); const lock = JSON.parse(fs.readFileSync(\"package-lock.json\", \"utf8\")); const sdk = \"@anthropic-ai/claude-agent-sdk\"; if (!pkg.dependencies?.[sdk] || !lock.packages?.[\`node_modules/\${sdk}\`]) throw new Error(\"Agent SDK dependency is not pinned\"); await import(\"./scripts/takyon-claude-primary-runtime.mjs\");' >/dev/null"
+  "${SSH[@]}" "node --check /opt/takyon/hermes-agent-main/scripts/takyon-claude-primary-runtime.mjs >/dev/null"
 fi
 
 # The dashboard web dist is a BUILT artifact shipped inside the prod tree (the unit starts with

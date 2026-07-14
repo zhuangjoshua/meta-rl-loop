@@ -72,7 +72,7 @@ We want all of the following at once:
 - Business-scoped CEO turns already run inside `isolated_business_workspace(...)`.
 - In a scoped turn, `business_*` tools are bound to `TAKYON_SESSION_BUSINESS_SLUG`, so an agent in `business:alpha` cannot pass `business=beta` and escape to another business in the same session.
 - Business file writes also resolve through the canonical business-root containment checks, so output paths cannot escape the current business root.
-- The primary Agent SDK session reaches business files only through the reviewed HANDOFF tool allowlist and canonical business-root containment checks; it cannot spawn a nested model worker.
+- The primary Agent SDK session reaches business files only through the reviewed SDK runtime tool allowlist and canonical business-root containment checks; it cannot spawn a nested model worker.
 - Safebox is live as a separate service now; the remaining gap on this plane is per-turn process/container freshness, not raw shared-secret reads through in-process Safebox.
 
 ### Sub-user app path

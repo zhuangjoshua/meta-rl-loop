@@ -7,7 +7,6 @@ WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
 ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
 ENSURE_CADDY_RATELIMIT_SCRIPT="$ROOT_DIR/deploy/shared/ensure-caddy-ratelimit.sh"
-WORKER_DOCKERFILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-claude-worker.Dockerfile"
 
 TARGET_HOST="${TAKYON_VPS_HOST:-root@137.184.75.57}"
 TARGET_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -15,8 +14,6 @@ REMOTE_ROOT="${TAKYON_REMOTE_ROOT:-/opt/takyon}"
 REMOTE_HOME="${TAKYON_REMOTE_HOME:-$REMOTE_ROOT/.takyon}"
 REMOTE_SECRETS="${TAKYON_REMOTE_SECRETS:-$REMOTE_ROOT/secrets}"
 REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-$REMOTE_ROOT/hermes-agent-main}"
-TRACKED_WORKER_IMAGE="takyon/claude-worker:node20-chromium-v1"
-REMOTE_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-$TRACKED_WORKER_IMAGE}"
 TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
 
 target_ssh=(-i "$TARGET_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
@@ -51,11 +48,6 @@ if [[ ! -f "$ENSURE_CADDY_RATELIMIT_SCRIPT" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$WORKER_DOCKERFILE" ]]; then
-  echo "Claude worker Dockerfile not found: $WORKER_DOCKERFILE" >&2
-  exit 1
-fi
-
 ssh "${target_ssh[@]}" "$TARGET_HOST" \
   "env TAKYON_DENO_VERSION='$TAKYON_DENO_VERSION' TAKYON_REQUIRE_SYSTEMD_RUN=1 bash -s" \
   < "$ENSURE_DENO_SCRIPT"
@@ -63,7 +55,7 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" \
 ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y ca-certificates curl gnupg rsync caddy docker.io ffmpeg
+  apt-get install -y ca-certificates chromium curl gnupg rsync caddy docker.io ffmpeg
   node_major=\"\$(node -p 'process.versions.node.split(\".\")[0]' 2>/dev/null || true)\"
   if [[ ! \"\$node_major\" =~ ^[0-9]+$ ]] || (( node_major < 20 )); then
     install -d -m 0755 /etc/apt/keyrings
@@ -78,6 +70,7 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   fi
   node -e 'const major=Number(process.versions.node.split(\".\")[0]); if (major < 20) process.exit(1)'
   npm --version >/dev/null
+  chromium --version >/dev/null
   if ! command -v xurl >/dev/null 2>&1; then
     curl -fsSL https://raw.githubusercontent.com/xdevplatform/xurl/main/install.sh | bash
   fi
@@ -125,24 +118,6 @@ EOF
   docker version >/dev/null
   install -d '$REMOTE_RUNTIME'
 "
-
-if [[ "$REMOTE_DOCKER_IMAGE" == "$TRACKED_WORKER_IMAGE" ]]; then
-  echo "Building the tracked Claude worker image"
-  ssh "${target_ssh[@]}" "$TARGET_HOST" \
-    "docker build --tag '$REMOTE_DOCKER_IMAGE' -" < "$WORKER_DOCKERFILE"
-else
-  ssh "${target_ssh[@]}" "$TARGET_HOST" \
-    "docker image inspect '$REMOTE_DOCKER_IMAGE' >/dev/null 2>&1 || docker pull '$REMOTE_DOCKER_IMAGE'"
-fi
-ssh "${target_ssh[@]}" "$TARGET_HOST" \
-  "set -euo pipefail
-  docker image inspect '$REMOTE_DOCKER_IMAGE' >/dev/null
-  docker run --rm --entrypoint node '$REMOTE_DOCKER_IMAGE' --version >/dev/null
-  if docker run --rm --entrypoint /bin/sh '$REMOTE_DOCKER_IMAGE' -lc 'test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null' >/dev/null 2>&1; then
-    echo 'optional Claude worker Chromium renderer available'
-  else
-    echo 'optional Claude worker Chromium renderer unavailable; continuing'
-  fi"
 
 # Provision the rate_limit module into the Caddy binary so the tracked Caddyfile
 # (edge DDoS controls) validates and reloads. Idempotent; runs on every host.

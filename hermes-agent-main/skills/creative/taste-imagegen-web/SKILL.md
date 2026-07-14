@@ -7,34 +7,49 @@ description: >-
   surface.
 ---
 
-# Taste Imagegen for Web
+# Taste Imagegen for Takyon Web
 
-Use this method to define original imagery that advances a specific page role. Generation authority,
-storage, spend, and completion evidence are supplied by the bound capability, not by this skill.
+Use this to formulate prompts for `business_generate_site_image`. The tool owns generation, Safebox
+authorization, credits, receipts, and publication. Never request or handle an API key.
 
-## Method
+## Brief Read
 
-1. Read the business truth, audience, offer, approved design contract, and target component.
-2. Decide whether imagery improves comprehension, trust, or emotional direction; omit it if the
-   answer is unclear.
-3. Assign each image one role: hero narrative, product context, proof, editorial transition, texture,
-   or supporting illustration.
-4. Write a prompt that specifies subject, setting, composition, crop, focal point, lighting, palette,
-   material language, negative constraints, and the space needed for adjacent interface content.
-5. Request the bound generation capability and inspect the actual result.
-6. Reject artifacts, illegible embedded text, fake interface chrome, accidental logos, weak crops,
-   and imagery that conflicts with the design thesis.
+Identify the business, audience, offer, page role, visual thesis, palette, crop, focal subject, and
+implementation constraints. Existing brand assets and the selected `taste-frontend` direction win.
 
-## Prompt Shape
+## Prompt Contract
 
-Describe what the image should communicate before describing style. Include the target aspect ratio
-and intended placement. Prefer concrete art direction over adjective piles. Ask for no embedded text
-unless text is itself the subject.
+Every prompt must specify:
 
-## Verification
+- the asset's exact job, such as hero background, product detail, editorial evidence, or texture;
+- subject and environment grounded in the real business;
+- composition and safe regions for adjacent HTML text;
+- palette, lighting, material, and photographic or illustrative treatment;
+- requested aspect ratio and intended responsive crop;
+- `no baked-in text, UI labels, logos, watermarks, browser chrome, or fake product controls`.
 
-- The image has one clear page role and supports the approved visual thesis.
-- Its crop and focal point survive the intended responsive placements.
-- It contains no invented brand evidence, accidental marks, or unusable generated lettering.
-- The implementation uses an optimized asset and meaningful alternative text when the image conveys
-  content.
+Generate one asset for one real role. Do not generate a whole page screenshot unless the operator
+explicitly requests a visual reference comp. UI text belongs in accessible HTML/CSS.
+
+## Art Direction
+
+- Vary composition by page role; do not reflexively put the subject on the right of every image.
+- Prefer a decisive visual concept over generic mood art.
+- Keep implementation clarity high: clean silhouette, controllable crop, coherent palette, and enough
+  negative space for the layout.
+- Match the business, not its category stereotype. AI is not automatically purple glow; premium is
+  not automatically beige serif; developer tooling is not automatically terminal cosplay.
+- Avoid generic stock teams, floating abstract blobs, fake dashboards, meaningless data, and repeated
+  assets masquerading as different evidence.
+
+## Output
+
+Call `business_generate_site_image` with a stable slug, the composed prompt, the correct size, a short
+purpose, and a fresh idempotency key. Use its returned `public_path` in the current primary SDK
+session. Reuse the asset on later iterations unless the visual role or direction actually changed.
+
+## Provenance
+
+Adapted from Taste Skill's `imagegen-frontend-web` at commit
+`b17742737e796305d829b3ad39eda3add0d79060`:
+https://github.com/Leonxlnx/taste-skill/blob/b17742737e796305d829b3ad39eda3add0d79060/skills/imagegen-frontend-web/SKILL.md

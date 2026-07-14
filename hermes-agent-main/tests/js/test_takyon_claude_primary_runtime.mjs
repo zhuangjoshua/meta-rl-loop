@@ -106,14 +106,14 @@ async function createApprovedPlugin(t, { writable = false, secondSkill = false }
       skill_file: "creative/taste/SKILL.md",
       version: "1",
       description: "Designs product surfaces. Use for visual work, not research.",
-      allowed_modes: ["bootstrap"],
+      allowed_modes: ["interactive", "bootstrap", "wake"],
       content_digest: await digestSkillDirectory(path.join(pluginPath, "skills", "design-taste")),
     });
   }
   const manifestPath = path.join(pluginPath, "approved-skills.json");
   const modeToolPolicy = Object.fromEntries(
     ["interactive", "bootstrap", "wake"].map((mode) => [mode, {
-      allowed_skills: specs.filter((skill) => skill.allowed_modes.includes(mode)).map((skill) => skill.name),
+      allowed_skills: specs.map((skill) => skill.name),
     }])
   );
   await fs.writeFile(manifestPath, JSON.stringify({
@@ -367,7 +367,7 @@ test("tool guard fails closed on unscoped tools, Agent, path escape, and unsafe 
   );
 });
 
-test("Skill stays surfaced globally while PreToolUse enforces HANDOFF allowed_modes", async (t) => {
+test("every approved skill is callable in every runtime mode", async (t) => {
   const fixture = await createApprovedPlugin(t);
   const guard = createPrimaryToolGuard({
     cwd: fixture.workspaceRoot,
@@ -376,11 +376,11 @@ test("Skill stays surfaced globally while PreToolUse enforces HANDOFF allowed_mo
     mode: "bootstrap",
     pluginName: "takyon-approved-skills",
     approvedSkills: [
-      { name: "takyon-product", allowed_modes: ["interactive", "bootstrap"] },
-      { name: "takyon-x", allowed_modes: ["interactive", "wake"] },
-      { name: "takyon-market-research", allowed_modes: ["interactive", "wake"] },
-      { name: "takyon-distribution", allowed_modes: ["interactive", "wake"] },
-      { name: "takyon-business-metrics", allowed_modes: ["interactive", "wake"] },
+      { name: "takyon-product", allowed_modes: ["bootstrap", "interactive", "wake"] },
+      { name: "takyon-x", allowed_modes: ["bootstrap", "interactive", "wake"] },
+      { name: "takyon-market-research", allowed_modes: ["bootstrap", "interactive", "wake"] },
+      { name: "takyon-distribution", allowed_modes: ["bootstrap", "interactive", "wake"] },
+      { name: "takyon-business-metrics", allowed_modes: ["bootstrap", "interactive", "wake"] },
     ],
   });
   assert.equal((await guard.decide("Skill", {
@@ -393,8 +393,7 @@ test("Skill stays surfaced globally while PreToolUse enforces HANDOFF allowed_mo
     "takyon-business-metrics",
   ]) {
     const decision = await guard.decide("Skill", { skill: `takyon-approved-skills:${name}` });
-    assert.equal(decision.allowed, false, `${name} must be denied in bootstrap mode`);
-    assert.match(decision.reason, /not allowed during bootstrap/);
+    assert.equal(decision.allowed, true, `${name} must remain available in bootstrap mode`);
   }
   assert.equal((await guard.decide("Skill", { skill: "other-plugin:takyon-product" })).allowed, false);
   assert.equal((await guard.decide("Skill", { skill: "unapproved" })).allowed, false);

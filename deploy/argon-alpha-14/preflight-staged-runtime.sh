@@ -12,7 +12,6 @@ set -euo pipefail
 : "${TAKYON_DEPLOY_SOURCE_REVISION:?}"
 : "${TAKYON_REMOTE_SAFEBOX_URL:?}"
 : "${TAKYON_DENO_VERSION:?}"
-: "${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:?}"
 
 runtime="$TAKYON_STAGED_RUNTIME"
 python="$TAKYON_LIVE_RUNTIME/.venv/bin/python"
@@ -34,6 +33,8 @@ command -v deno >/dev/null 2>&1
 command -v systemd-run >/dev/null 2>&1
 command -v node >/dev/null 2>&1
 command -v npm >/dev/null 2>&1
+command -v chromium >/dev/null 2>&1
+chromium --version >/dev/null
 node -e 'const major=Number(process.versions.node.split(".")[0]); if (major < 20) process.exit(1)'
 
 if ! id -u takyon >/dev/null 2>&1; then
@@ -64,23 +65,7 @@ if [[ -L /usr/local/bin/xurl && -x /root/.local/bin/xurl ]]; then
   install -m 0755 /root/.local/bin/xurl /usr/local/bin/xurl
 fi
 
-if ! docker image inspect "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" >/dev/null 2>&1; then
-  docker pull "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE"
-fi
-docker run --rm --entrypoint node "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" --version >/dev/null
-if docker run --rm --entrypoint /bin/sh "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" -lc \
-  'test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null' >/dev/null 2>&1; then
-  echo "optional Claude worker Chromium renderer available"
-else
-  echo "optional Claude worker Chromium renderer unavailable; continuing"
-fi
-docker run --rm \
-  --entrypoint node \
-  --mount "type=bind,src=$runtime,dst=/takyon-runtime,readonly" \
-  --workdir /takyon-runtime \
-  "$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" \
-  --check scripts/takyon-claude-primary-runtime.mjs \
-  >/dev/null
+node --check "$runtime/scripts/takyon-claude-primary-runtime.mjs" >/dev/null
 
 # Build one content-addressed SDK runtime owned by this exact release.  The
 # service never imports mutable checkout dependencies or a mutable skills tree.

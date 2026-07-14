@@ -488,135 +488,14 @@ def test_shared_tunnel_survives_last_console_lease_release(tmp_path):
     assert result.stdout.strip() == "1 0 owner-alive"
 
 
-def test_prod_worker_preflight_proves_runtime_checkout_is_docker_bindable():
+def test_prod_worker_uses_host_native_primary_sdk_without_a_model_worker_image():
     script = _script_source()
-    preflight = script.split("require_docker_for_worker() {", 1)[1].split("ensure_deno_toolchain() {", 1)[0]
-
-    assert "docker version" in preflight
-    assert "docker run --rm" in preflight
-    assert 'src=$RUNTIME_DIR,dst=/takyon-runtime,readonly' in preflight
-    assert "test -d /takyon-runtime/agent" in preflight
-    assert "move or create the checkout under a Docker Desktop shared path" in preflight
-    assert 'export TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="$worker_image"' in preflight
-    assert 'export TERMINAL_DOCKER_IMAGE="$worker_image"' in preflight
-    assert "docker image inspect --format '{{.Id}}'" in preflight
-    assert "--entrypoint node" in preflight
-    assert "@anthropic-ai/claude-agent-sdk" in preflight
-    assert "takyon-claude-primary-runtime.mjs" in preflight
-    assert "Optional Chromium renderer unavailable" in preflight
-    assert "agent-browser" not in preflight
-
-
-def test_prod_worker_preflight_propagates_one_validated_image_to_every_launcher(tmp_path):
-    script = _script_source()
-    require_docker = script[
-        script.index("require_docker_for_worker() {") : script.index("\nworker_preflight_wait_seconds() {")
-    ]
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_docker = fake_bin / "docker"
-    fake_docker.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" >>\"$DOCKER_LOG\"\n"
-        "if [ \"${1:-}\" = image ] && [ \"${2:-}\" = inspect ]; then printf 'sha256:test-worker-image\\n'; fi\n"
-        "case \"$*\" in */usr/bin/chromium*) exit 127 ;; esac\n"
-        "exit 0\n",
-        encoding="utf-8",
-    )
-    fake_docker.chmod(0o755)
-    harness = tmp_path / "docker-image-propagation.sh"
-    harness.write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\n"
-        + "die() { echo \"$*\" >&2; exit 1; }\n"
-        + require_docker
-        + "\nrequire_docker_for_worker\n"
-        + "printf '%s\\n' \"$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE\" \"$TERMINAL_DOCKER_IMAGE\"\n",
-        encoding="utf-8",
-    )
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key != "TAKYON_CLAUDE_AGENT_DOCKER_IMAGE"
-    }
-    env.update(
-        {
-            "PATH": f"{fake_bin}:{env['PATH']}",
-            "ROOT": str(ROOT),
-            "RUNTIME_DIR": str(ROOT / "hermes-agent-main"),
-            # Product/site remains Docker-isolated in auto mode even when generic terminal work is local.
-            "TERMINAL_ENV": "local",
-            "TERMINAL_DOCKER_IMAGE": "nikolaik/python-nodejs:python3.11-nodejs20",
-            "DOCKER_LOG": str(tmp_path / "docker.log"),
-        }
-    )
-
-    result = subprocess.run(
-        ["bash", str(harness)],
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=5,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert "Optional Chromium renderer unavailable" in result.stderr
-    tracked = "takyon/claude-worker:node20-chromium-v1"
-    assert result.stdout.splitlines() == [tracked, tracked]
-    docker_log = (tmp_path / "docker.log").read_text(encoding="utf-8")
-    assert tracked in docker_log
-    assert "nikolaik/python-nodejs:python3.11-nodejs20" not in docker_log
-
-
-def test_docker_unshared_checkout_fails_before_worker_start(tmp_path):
-    script = _script_source()
-    require_docker = script[
-        script.index("require_docker_for_worker() {") : script.index("\nworker_preflight_wait_seconds() {")
-    ]
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_docker = fake_bin / "docker"
-    fake_docker.write_text(
-        "#!/bin/sh\n"
-        "if [ \"${1:-}\" = version ]; then exit 0; fi\n"
-        "if [ \"${1:-}\" = image ] && [ \"${2:-}\" = inspect ]; then printf 'sha256:test-worker-image\\n'; exit 0; fi\n"
-        "if [ \"${1:-}\" = run ]; then\n"
-        "  case \"$*\" in *takyon-runtime*) exit 125 ;; *) exit 0 ;; esac\n"
-        "fi\n"
-        "exit 2\n",
-        encoding="utf-8",
-    )
-    fake_docker.chmod(0o755)
-    harness = tmp_path / "docker-preflight.sh"
-    harness.write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\n"
-        + "die() { echo \"$*\" >&2; exit 1; }\n"
-        + require_docker
-        + "\nrequire_docker_for_worker\n"
-        + "touch \"$WORKER_STARTED\"\n",
-        encoding="utf-8",
-    )
-    started = tmp_path / "worker-started"
-    result = subprocess.run(
-        ["bash", str(harness)],
-        text=True,
-        capture_output=True,
-        env={
-            **os.environ,
-            "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "RUNTIME_DIR": "/private/tmp/docker-unshared/hermes-agent-main",
-            "TERMINAL_ENV": "docker",
-            "TAKYON_CLAUDE_AGENT_DOCKER_IMAGE": "test/image",
-            "WORKER_STARTED": str(started),
-        },
-        timeout=5,
-        check=False,
-    )
-
-    assert result.returncode == 1
-    assert "Docker cannot bind-mount the runtime checkout" in result.stderr
-    assert "Docker Desktop shared path" in result.stderr
-    assert not started.exists()
+    assert "require_docker_for_worker" not in script
+    assert "TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" not in script
+    assert "takyon/claude-worker" not in script
+    assert "TERMINAL_DOCKER_IMAGE" not in script
+    assert "  worker)" in script
+    assert "  worker-once)" in script
 
 
 def test_console_waits_for_explicit_worker_preflight_failure_and_surfaces_log(tmp_path):

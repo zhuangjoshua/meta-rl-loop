@@ -22,7 +22,7 @@
     "display_url": "https://example.com/clipbook",
     "call_to_action": "Learn More",
     "supplementary_text": "Optional short extra text for supported Reddit creative surfaces.",
-    "image_path": "<real-business-image-path>",
+    "image_path": "product/static-ads/demo-reddit/banner.png",
     "allow_comments": false
   },
   "ad": {
@@ -31,6 +31,6 @@
   },
   "_notes": {
     "activate": "Launch activates by default when the operator asked to launch. Set activate=false or status='PAUSED' only when you intentionally want a staged paused campaign.",
-    "budget": "Leave ad_group.daily_budget_usd null to let the bound policy derive a bounded daily pace and end time. Explicit values must meet provider minimums and cannot exceed authorized channel budget."
+    "budget": "Leave ad_group.daily_budget_usd null to let the backend derive a bounded daily pace and end time from the remaining Reddit channel credits after setup. Explicit values are still capped by TAKYON_REDDIT_MAX_DAILY_BUDGET_USD (default 50), must meet the live minimum (default 5 USD/day), and cannot exceed the reserved total cap."
   }
 }

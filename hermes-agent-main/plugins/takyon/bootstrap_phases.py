@@ -46,6 +46,11 @@ PHASE_ALLOWED_TOOLS: dict[str, frozenset[str]] = {
     ),
     "landing_build_publish": frozenset(
         {
+            "browser_console",
+            "browser_get_images",
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_vision",
             "business_generate_site_image",
             "business_list_files",
             "business_patch_file",
@@ -76,6 +81,16 @@ PHASE_ALLOWED_TOOLS: dict[str, frozenset[str]] = {
     ),
     "final_workflow_build_publish": frozenset(
         {
+            "browser_back",
+            "browser_click",
+            "browser_console",
+            "browser_get_images",
+            "browser_navigate",
+            "browser_press",
+            "browser_scroll",
+            "browser_snapshot",
+            "browser_type",
+            "browser_vision",
             "business_check_runtime_capabilities",
             "business_list_files",
             "business_patch_file",

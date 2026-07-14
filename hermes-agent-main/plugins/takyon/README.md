@@ -87,7 +87,10 @@ skills/takyon/takyon-x/
 skills/takyon/takyon-business-metrics/
 ```
 
-Each release skill is published into the single read-only Agent SDK plugin declared by `skills/release-skills.yaml`; its native `SKILL.md` description supplies autonomous "when to use" routing, while tools, paths, authority, and publication bindings live separately under `skills/HANDOFF/`.
+Each release skill is published in full into the single read-only Agent SDK plugin declared by
+`skills/release-skills.yaml`; its native `SKILL.md` description supplies autonomous "when to use"
+routing and its body/resources retain the complete executable method. Mode-level tool/write policy
+lives in `skills/sdk-runtime-policy.yaml`; authority and publication remain guarded runtime code.
 
 Takyon skill frontmatter is strict YAML. Invalid or malformed frontmatter fails release-manifest compilation and runtime discovery; it never degrades into ad hoc parsing.
 
@@ -95,7 +98,7 @@ Skills are compiled and published at release time, not installed or synchronized
 
 ## Canonical Skill Shape
 
-Takyon skills keep portable routing and method guidance in `SKILL.md`; runtime bindings belong in HANDOFF:
+Takyon skills use the standard native Agent Skills shape:
 
 ```md
 ---
@@ -121,8 +124,8 @@ Not every skill needs all of them.
 
 For new Takyon skills, start from:
 
-- `skills/takyon/SKILL-TEMPLATE.md`
-- `skills/takyon/BUILDING-SKILLS-AND-TOOLS.md`
+- `skills/SKILL-TEMPLATE.md`
+- `skills/HANDOFF/POLICY.md`
 
 Each Takyon skill lives in its own folder:
 
@@ -137,7 +140,12 @@ skills/takyon/<skill-name>/
 
 Only `SKILL.md` is required. Add the optional subdirectories only when the skill really needs them.
 
-Tool availability, scoped paths, publication targets, authority, and receipts belong in `skills/HANDOFF/`; portable skill bodies describe domain method and verification without embedding deployment bindings. If a skill needs a durable action and no canonical `business_*` tool exists, add or modify the owning backend tool and bind its capability in HANDOFF.
+The native skill bundle keeps its complete routing, method, real tool usage, verification, references,
+templates, scripts, and assets. `skills/release-skills.yaml` owns the immutable published bundle;
+`skills/sdk-runtime-policy.yaml` owns mode-level tool/write restrictions; runtime code owns tenant
+scope, authority, publication, receipts, and validators. If a skill needs a durable action and no
+canonical `business_*` tool exists, add or modify the owning guarded tool. HANDOFF is documentation
+for future authors and is not read by runtime.
 
 ## Tools
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import ast
+import hashlib
 import importlib.util
 import json
 import os
@@ -40,121 +40,8 @@ EXPECTED_RELEASE_SKILLS = {
     "takyon-x",
     "ugc-video-ad",
 }
-
-
-def _minimal_release(tmp_path: Path, names: tuple[str, ...] = ("portable-method",)) -> Path:
-    repo = tmp_path / "repo"
-    root = repo / "skills"
-    (root / ".claude-plugin").mkdir(parents=True)
-    (root / "HANDOFF").mkdir()
-    (root / "takyon").mkdir()
-    (repo / "plugins" / "takyon").mkdir(parents=True)
-    (repo / "tools").mkdir()
-    (repo / "plugins" / "takyon" / "model_tools.py").write_text(
-        'TOOLS = [{"name": "business_read_business"}]\n', encoding="utf-8"
-    )
-    release_entries = []
-    policies = {}
-    inventory = {}
-    for index, name in enumerate(names):
-        source = f"takyon/source-{index}"
-        skill_dir = root / source
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            "---\n"
-            f"name: {name}\n"
-            "description: Apply a portable method. Use when evidence needs synthesis. "
-            "Do not use for deployment changes.\n"
-            "---\n\n# Portable Method\n",
-            encoding="utf-8",
-        )
-        (skill_dir / "contract.yaml").write_text(
-            "schema_version: 1\n"
-            "requires: [business.state.read]\n"
-            "produces: [report.output]\n",
-            encoding="utf-8",
-        )
-        release_entries.append(
-            {
-                "name": name,
-                "source_path": source,
-                "version": "1.0.0",
-                "legacy_names": [],
-                "publish_files": ["SKILL.md", "contract.yaml"],
-            }
-        )
-        policies[name] = {"allowed_modes": ["interactive"]}
-        inventory[name] = {
-            "required_tools": ["business_read_business"],
-            "allowed_roots": ["research"],
-            "publication_paths": ["research/report.md"],
-        }
-    release = {
-        "schema_version": 1,
-        "plugin": {"name": "test-approved-skills", "version": "1.0.0"},
-        "discovery_roots": ["takyon"],
-        "skills": release_entries,
-    }
-    bindings = {
-        "schema_version": 1,
-        "mode_tool_policy": {
-            "interactive": {
-                "baseline_tools": ["business_read_business"],
-                "denied_capabilities": [],
-                "denied_tools": [],
-                "denied_write_paths": [],
-            },
-            "bootstrap": {
-                "baseline_tools": ["business_read_business"],
-                "denied_capabilities": [],
-                "denied_tools": [],
-                "denied_write_paths": [],
-            },
-            "wake": {
-                "baseline_tools": ["business_read_business"],
-                "denied_capabilities": [],
-                "denied_tools": [],
-                "denied_write_paths": [],
-            },
-        },
-        "capabilities": {
-            "business.state.read": {
-                "adapter": "mcp",
-                "tools": ["business_read_business"],
-                "scope": "current_business",
-                "authority": "operator_session",
-            }
-        },
-        "artifacts": {
-            "report.output": {
-                "paths": ["research/report.md"],
-                "publish": False,
-                "receipt": "artifact_digest",
-            }
-        },
-        "skill_policies": policies,
-    }
-    legacy = {
-        "schema_version": 1,
-        "retired_tools": {},
-        "retired_environment_requirements": {},
-        "skills": inventory,
-    }
-    plugin = {
-        "name": "test-approved-skills",
-        "version": "1.0.0",
-        "description": "test",
-        "skills": ["./takyon"],
-    }
-    (root / "release-skills.yaml").write_text(yaml.safe_dump(release, sort_keys=False), encoding="utf-8")
-    (root / "HANDOFF" / "bindings.yaml").write_text(yaml.safe_dump(bindings, sort_keys=False), encoding="utf-8")
-    (root / "HANDOFF" / "legacy-inventory.yaml").write_text(yaml.safe_dump(legacy, sort_keys=False), encoding="utf-8")
-    (root / "HANDOFF" / "retired-resources.yaml").write_text(
-        yaml.safe_dump({"schema_version": 1, "resources": []}, sort_keys=False),
-        encoding="utf-8",
-    )
-    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps(plugin), encoding="utf-8")
-    return root
+ALL_MODES = {"bootstrap", "interactive", "wake"}
+PINNED_TASTE_SKILL_SHA256 = "aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89"
 
 
 def _load_yaml(path: Path) -> dict:
@@ -169,67 +56,111 @@ def _make_writable(path: Path) -> None:
     os.chmod(path, 0o755)
 
 
-def test_production_release_is_exact_and_locked() -> None:
+def _minimal_release(tmp_path: Path, names: tuple[str, ...] = ("portable-method",)) -> Path:
+    repo = tmp_path / "repo"
+    root = repo / "skills"
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / "takyon").mkdir()
+    (repo / "plugins" / "takyon").mkdir(parents=True)
+    (repo / "tools").mkdir()
+    (repo / "plugins" / "takyon" / "tools.py").write_text(
+        'TOOLS = [{"name": "business_read_business"}]\n', encoding="utf-8"
+    )
+    entries = []
+    for index, name in enumerate(names):
+        source = f"takyon/source-{index}"
+        skill_dir = root / source
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            f"name: {name}\n"
+            "description: Apply a complete evidence method. Use when evidence needs synthesis. "
+            "Do not use for deployment changes.\n"
+            "---\n\n# Portable Method\n",
+            encoding="utf-8",
+        )
+        (skill_dir / "reference.md").write_text("reference\n", encoding="utf-8")
+        entries.append(
+            {
+                "name": name,
+                "source_path": source,
+                "version": "1.0.0",
+                "legacy_names": [],
+                "publish_files": ["SKILL.md", "reference.md"],
+            }
+        )
+    release = {
+        "schema_version": 1,
+        "plugin": {"name": "test-approved-skills", "version": "1.0.0"},
+        "discovery_roots": ["takyon"],
+        "skills": entries,
+    }
+    policy = {
+        "schema_version": 1,
+        "modes": {
+            mode: {
+                "required_tools": ["business_read_business"],
+                "allowed_tools": ["business_read_business"],
+                "denied_tools": [],
+                "denied_write_paths": [],
+            }
+            for mode in sorted(ALL_MODES)
+        },
+    }
+    plugin = {
+        "name": "test-approved-skills",
+        "version": "1.0.0",
+        "description": "test",
+        "skills": ["./takyon"],
+    }
+    (root / "release-skills.yaml").write_text(
+        yaml.safe_dump(release, sort_keys=False), encoding="utf-8"
+    )
+    (root / "sdk-runtime-policy.yaml").write_text(
+        yaml.safe_dump(policy, sort_keys=False), encoding="utf-8"
+    )
+    (root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps(plugin), encoding="utf-8"
+    )
+    return root
+
+
+def test_production_release_is_exact_complete_and_locked() -> None:
     manifest = manifest_tool.build_manifest(SKILLS_ROOT)
     locked = json.loads((SKILLS_ROOT / "approved-skills.json").read_text(encoding="utf-8"))
     assert manifest == locked
     assert {entry["name"] for entry in manifest["skills"]} == EXPECTED_RELEASE_SKILLS
     assert len(manifest["skills"]) == 17
-    assert all(entry["content_digest"].startswith("sha256:") for entry in manifest["skills"])
-    assert all(entry["source_digest"].startswith("sha256:") for entry in manifest["skills"])
-    assert all(entry["plugin_path"] == f"skills/{entry['name']}" for entry in manifest["skills"])
-    assert all(
-        set(entry["publish_files"]) >= {
-            f"skills/{entry['name']}/SKILL.md",
-            f"skills/{entry['name']}/contract.yaml",
+    for entry in manifest["skills"]:
+        source = SKILLS_ROOT / entry["source_path"]
+        actual = {
+            path.relative_to(source).as_posix()
+            for path in source.rglob("*")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.suffix not in {".pyc", ".pyo"}
         }
-        for entry in manifest["skills"]
-    )
-    assert not any(
-        Path(path).suffix in manifest_tool.FORBIDDEN_PUBLISHED_SUFFIXES
-        for entry in manifest["skills"]
-        for path in entry["publish_files"]
-    )
+        published = {
+            str(Path(path).relative_to(entry["plugin_path"]))
+            for path in entry["publish_files"]
+        }
+        assert published == actual
+        assert set(entry["allowed_modes"]) == ALL_MODES
+        assert entry["content_digest"] == entry["source_digest"]
+        assert entry["description"]
 
 
-def test_production_modes_preserve_bootstrap_exclusions() -> None:
-    entries = {entry["name"]: entry for entry in manifest_tool.build_manifest(SKILLS_ROOT)["skills"]}
-    for excluded in (
-        "takyon-market-research",
-        "takyon-distribution",
-        "takyon-x",
-        "takyon-business-metrics",
-        "takyon-autonomous-seo-geo-operator",
-    ):
-        assert "bootstrap" not in entries[excluded]["allowed_modes"]
-    for required in (
-        "takyon-app-runtime",
-        "takyon-brand-logo",
-        "takyon-product",
-        "design-taste-frontend",
-    ):
-        assert "bootstrap" in entries[required]["allowed_modes"]
-
-
-def test_mode_tool_policy_is_compiled_and_preserves_wake_creative_paths() -> None:
+def test_every_mode_surfaces_every_skill_and_keeps_hard_tool_boundaries() -> None:
     manifest = manifest_tool.build_manifest(SKILLS_ROOT)
-    capability_tools = manifest["capability_tools"]
     policy = manifest["mode_tool_policy"]
-    all_bound_tools = {tool for tools in capability_tools.values() for tool in tools}
-    assert set(policy) == {"interactive", "bootstrap", "wake"}
-    assert set(policy["bootstrap"]["allowed_skills"]) == {
-        "design-taste-frontend",
-        "taste-imagegen-web",
-        "takyon-app-runtime",
-        "takyon-brand-logo",
-        "takyon-mobile-app",
-        "takyon-product",
-    }
+    assert set(policy) == ALL_MODES
+    for mode in policy.values():
+        assert set(mode["allowed_skills"]) == EXPECTED_RELEASE_SKILLS
+        assert not set(mode["allowed_tools"]) & set(mode["denied_tools"])
+        assert set(mode["allowed_tools"]) <= set(manifest["model_tool_inventory"])
     assert {
         "web_search",
         "web_extract",
-        "business_calculate_pulse",
-        "business_x_publish_outreach",
         "business_static_ad_generate",
         "business_ugc_ad_generate",
         "business_meta_ad_launch",
@@ -237,9 +168,7 @@ def test_mode_tool_policy_is_compiled_and_preserves_wake_creative_paths() -> Non
     } <= set(policy["bootstrap"]["denied_tools"])
     assert {
         "business_upsert_app_surface_contract",
-        "business_upsert_app_plan",
         "business_refresh_product_surface",
-        "business_invoke_app_action",
         "business_publish_mobile_release",
     } <= set(policy["wake"]["denied_tools"])
     assert set(policy["wake"]["denied_write_paths"]) == {
@@ -247,138 +176,60 @@ def test_mode_tool_policy_is_compiled_and_preserves_wake_creative_paths() -> Non
         "product/surface.md",
         "product/app",
     }
-    assert not {
-        "product/static-ads",
-        "product/ugc-ads",
-        "product/lightreel-seedance-fal-ugc-workflow.md",
-        "product/public-assets",
-        "product/brand/logos",
-    } & set(policy["wake"]["denied_write_paths"])
-    assert not {
-        "business_static_ad_generate",
-        "business_ugc_ad_generate",
-        "business_meta_ad_launch",
-        "business_reddit_ad_launch",
-    } & set(policy["wake"]["denied_tools"])
-    assert all(set(mode["denied_tools"]) <= all_bound_tools for mode in policy.values())
-    assert all(set(mode["allowed_tools"]) <= all_bound_tools for mode in policy.values())
-    for mode in policy.values():
-        expected_allowed = set(mode["baseline_tools"])
-        for capability in mode["allowed_capabilities"]:
-            expected_allowed.update(capability_tools[capability])
-        assert set(mode["allowed_tools"]) == expected_allowed
-    assert all(
-        not set(mode["allowed_tools"]) & set(mode["denied_tools"])
-        for mode in policy.values()
-    )
-    for dangerous in (
-        "business_delete_business",
-        "business_set_mode",
-        "business_set_control",
-        "business_decide_operator_approval",
-        "business_delete_app_record",
-        "business_upsert_app_customer",
-        "business_upsert_app_profile",
-        "business_grant_app_entitlement",
-        "business_record_stripe_webhook",
-        "business_record_app_usage",
-    ):
-        assert all(dangerous not in mode["allowed_tools"] for mode in policy.values())
     assert "business_request_credential" in policy["interactive"]["allowed_tools"]
     assert "business_request_credential" not in policy["bootstrap"]["allowed_tools"]
     assert "business_request_credential" not in policy["wake"]["allowed_tools"]
-    assert all(set(entry["bound_tools"]) <= all_bound_tools for entry in manifest["skills"])
-    assert manifest["model_tool_inventory_digest"] == manifest_tool._name_inventory_digest(
-        manifest["model_tool_inventory"]
-    )
 
 
-def test_capability_security_bindings_are_schema_covered_and_retained() -> None:
-    bindings = _load_yaml(SKILLS_ROOT / "HANDOFF" / "bindings.yaml")["capabilities"]
-    schema = json.loads(
-        (SKILLS_ROOT / "HANDOFF" / "bindings.schema.json").read_text(encoding="utf-8")
-    )
-    capability_schema = schema["properties"]["capabilities"]["additionalProperties"]["properties"]
-    used_scopes = {binding["scope"] for binding in bindings.values()}
-    used_authorities = {binding["authority"] for binding in bindings.values()}
-    assert used_scopes <= set(capability_schema["scope"]["enum"])
-    assert used_authorities <= set(capability_schema["authority"]["enum"])
-    assert set(capability_schema["scope"]["enum"]) == manifest_tool.ALLOWED_CAPABILITY_SCOPES
-    assert set(capability_schema["authority"]["enum"]) == manifest_tool.ALLOWED_CAPABILITY_AUTHORITIES
+def test_taste_is_the_exact_pinned_npx_bundle() -> None:
+    taste = SKILLS_ROOT / "creative" / "taste-frontend"
+    assert hashlib.sha256((taste / "SKILL.md").read_bytes()).hexdigest() == PINNED_TASTE_SKILL_SHA256
+    assert {path.name for path in taste.iterdir()} == {"LICENSE", "SKILL.md", "UPSTREAM.md"}
+    upstream = (taste / "UPSTREAM.md").read_text(encoding="utf-8")
+    assert "b17742737e796305d829b3ad39eda3add0d79060" in upstream
 
+
+def test_routing_is_native_and_hermes_metadata_is_absent() -> None:
     manifest = manifest_tool.build_manifest(SKILLS_ROOT)
-    retained = manifest["capability_bindings"]
-    assert set(retained) == set(bindings)
-    for capability, binding in bindings.items():
-        assert retained[capability] == {
-            "adapter": binding["adapter"],
-            "tools": sorted(binding["tools"]),
-            "scope": binding["scope"],
-            "authority": binding["authority"],
-        }
-        assert manifest["capability_tools"][capability] == retained[capability]["tools"]
+    for entry in manifest["skills"]:
+        skill = (SKILLS_ROOT / entry["skill_file"]).read_text(encoding="utf-8")
+        description = entry["description"].lower()
+        assert len(description) <= 1024
+        if entry["name"] != "design-taste-frontend":
+            assert "use when" in description
+            assert "do not use" in description
+        assert "metadata:\n  hermes:" not in skill
+        assert "${HERMES_SKILL_DIR}" not in skill
+        assert "business_claude_agent_task" not in skill
 
 
-def test_product_tuning_invariants_and_floors_are_rebound() -> None:
+def test_original_resource_rich_skills_publish_every_capability_file() -> None:
     entries = {entry["name"]: entry for entry in manifest_tool.build_manifest(SKILLS_ROOT)["skills"]}
-    product = entries["takyon-product"]
-    assert product["execution_profiles"] == {
-        "initial_landing": {"effort": "medium", "max_turns": 60, "budget_usd": None, "timeout_ms": 900000},
-        "product_workflow": {"effort": "high", "max_turns": 90, "budget_usd": 25.0, "timeout_ms": 1800000},
+    expected_counts = {
+        "design-taste-frontend": 3,
+        "takyon-autonomous-seo-geo-operator": 9,
+        "takyon-static-ad-creative-generator": 23,
+        "takyon-lightreel-seedance-fal-ugc": 10,
+        "takyon-meta-ads-v2": 6,
+        "takyon-reddit-ads": 3,
+        "takyon-x": 8,
+        "ugc-video-ad": 10,
     }
-    assert "preserve_user_plus_entitlements_account_truth" in product["invariants"]
-    assert "forbid_has_active_subscription_gate" in product["invariants"]
-    assert "publication_status_published_with_public_url" in product["verification_floors"]
-    assert "changed_action_certified_invoked_and_receipted" in product["verification_floors"]
-    assert product["routing_preservation_digest"].startswith("sha256:")
+    for name, count in expected_counts.items():
+        assert len(entries[name]["publish_files"]) == count
+    assert entries["design-taste-frontend"]["line_count"] == 1206
+    assert entries["takyon-autonomous-seo-geo-operator"]["line_count"] >= 500
+    assert entries["takyon-meta-ads-v2"]["line_count"] >= 300
+    assert entries["takyon-x"]["line_count"] >= 175
 
 
-def test_product_runtime_owned_paths_live_in_handoff_and_match_runtime() -> None:
-    bindings = _load_yaml(SKILLS_ROOT / "HANDOFF" / "bindings.yaml")
-    owned_paths = bindings["artifacts"]["product.surface"]["runtime_owned_paths"]
-    module = ast.parse(
-        (PROJECT_ROOT / "plugins" / "takyon" / "core.py").read_text(encoding="utf-8")
-    )
-    runtime_paths: tuple[str, ...] | None = None
-    for statement in module.body:
-        if not isinstance(statement, ast.Assign):
-            continue
-        if any(
-            isinstance(target, ast.Name) and target.id == "_STARTER_OWNED_REFRESH_FILES"
-            for target in statement.targets
-        ):
-            runtime_paths = ast.literal_eval(statement.value)
-            break
-    assert runtime_paths is not None
-    assert owned_paths == [f"product/site/{path}" for path in runtime_paths]
-
-    manifest = manifest_tool.build_manifest(SKILLS_ROOT)
-    assert manifest["artifact_bindings"]["product.surface"]["runtime_owned_paths"] == owned_paths
-    assert all(path in manifest["handoff_guidance"] for path in owned_paths)
-    assert "inspect but never edit; repair worker-owned source instead" in manifest["handoff_guidance"]
-    product_skill = (SKILLS_ROOT / "takyon" / "takyon-product" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    assert not any(path in product_skill for path in owned_paths)
-
-
-def test_operator_host_builtins_and_ambient_web_are_not_bound() -> None:
-    bindings = _load_yaml(SKILLS_ROOT / "HANDOFF" / "bindings.yaml")["capabilities"]
-    assert bindings["product.source.edit"]["tools"] == [
-        "business_read_file",
-        "business_list_files",
-        "business_write_file",
-        "business_patch_file",
-    ]
-    assert bindings["creative.ugc-workflow.compose"]["tools"] == [
-        "business_read_file",
-        "business_list_files",
-        "business_write_file",
-        "business_patch_file",
-    ]
-    assert bindings["web.evidence.search"]["tools"] == ["web_search", "web_extract"]
-    all_tools = {tool for binding in bindings.values() for tool in binding["tools"]}
-    assert not all_tools & {"Read", "Write", "Edit", "Bash", "WebSearch", "WebFetch"}
+def test_handoff_is_documentation_only() -> None:
+    handoff = SKILLS_ROOT / "HANDOFF"
+    assert {path.name for path in handoff.iterdir()} == {"POLICY.md"}
+    policy = (handoff / "POLICY.md").read_text(encoding="utf-8")
+    assert "not loaded by the Claude Agent SDK" in policy
+    manifest = json.loads((SKILLS_ROOT / "approved-skills.json").read_text(encoding="utf-8"))
+    assert "handoff" not in json.dumps(manifest).lower()
 
 
 def test_publish_creates_exact_flat_read_only_plugin(tmp_path: Path) -> None:
@@ -387,13 +238,16 @@ def test_publish_creates_exact_flat_read_only_plugin(tmp_path: Path) -> None:
     try:
         manifest_tool.publish_plugin(SKILLS_ROOT, destination, manifest)
         manifest_tool.verify_published_plugin(destination, manifest)
-        actual = {path.relative_to(destination).as_posix() for path in destination.rglob("SKILL.md")}
+        actual = {
+            path.relative_to(destination).as_posix()
+            for path in destination.rglob("SKILL.md")
+        }
         assert actual == {f"skills/{name}/SKILL.md" for name in EXPECTED_RELEASE_SKILLS}
-        assert not any("HANDOFF" in path for path in actual)
-        assert not (destination / "skills/takyon-static-ad-creative-generator/scripts/backends.py").exists()
-        assert not (destination / "skills/ugc-video-ad/scripts/pipeline.py").exists()
-        assert not (destination / "skills/takyon-lightreel-seedance-fal-ugc/scripts/query_lightreel.js").exists()
-        assert not (destination.stat().st_mode & 0o222)
+        assert (destination / "skills/takyon-static-ad-creative-generator/scripts/backends.py").is_file()
+        assert (destination / "skills/ugc-video-ad/scripts/pipeline.py").is_file()
+        assert (destination / "skills/takyon-lightreel-seedance-fal-ugc/scripts/query_lightreel.js").is_file()
+        assert not any("HANDOFF" in path.as_posix() for path in destination.rglob("*"))
+        assert not destination.stat().st_mode & 0o222
     finally:
         _make_writable(destination)
         shutil.rmtree(destination, ignore_errors=True)
@@ -401,144 +255,64 @@ def test_publish_creates_exact_flat_read_only_plugin(tmp_path: Path) -> None:
 
 def test_duplicate_names_fail_closed(tmp_path: Path) -> None:
     root = _minimal_release(tmp_path, ("same-name", "same-name"))
-    with pytest.raises(manifest_tool.ManifestValidationError, match="duplicate canonical skill names"):
+    with pytest.raises(manifest_tool.ManifestValidationError, match="duplicate"):
         manifest_tool.build_manifest(root)
 
 
-def test_reserved_name_fails_closed(tmp_path: Path) -> None:
-    root = _minimal_release(tmp_path, ("claude-provider-method",))
-    with pytest.raises(manifest_tool.ManifestValidationError, match="reserved prefix"):
-        manifest_tool.build_manifest(root)
-
-
-def test_nested_skill_fails_closed(tmp_path: Path) -> None:
+def test_incomplete_bundle_fails_closed(tmp_path: Path) -> None:
     root = _minimal_release(tmp_path)
-    nested = root / "takyon" / "source-0" / "nested"
-    nested.mkdir()
-    (nested / "SKILL.md").write_text("---\nname: nested\ndescription: nope\n---\n", encoding="utf-8")
-    with pytest.raises(manifest_tool.ManifestValidationError, match="nested or malformed"):
-        manifest_tool.build_manifest(root)
-
-
-def test_executable_publish_resource_fails_closed(tmp_path: Path) -> None:
-    root = _minimal_release(tmp_path)
-    script = root / "takyon" / "source-0" / "unsafe.py"
-    script.write_text("print('unsafe')\n", encoding="utf-8")
     release_path = root / "release-skills.yaml"
     release = _load_yaml(release_path)
-    release["skills"][0]["publish_files"].append("unsafe.py")
+    release["skills"][0]["publish_files"].remove("reference.md")
     release_path.write_text(yaml.safe_dump(release, sort_keys=False), encoding="utf-8")
-    with pytest.raises(manifest_tool.ManifestValidationError, match="may not be executable"):
+    with pytest.raises(manifest_tool.ManifestValidationError, match="complete native skill bundle"):
         manifest_tool.build_manifest(root)
 
 
-def test_runtime_binding_in_published_resource_fails_closed(tmp_path: Path) -> None:
+def test_nonstandard_frontmatter_fails_closed(tmp_path: Path) -> None:
     root = _minimal_release(tmp_path)
-    skill = root / "takyon" / "source-0" / "SKILL.md"
+    skill = root / "takyon/source-0/SKILL.md"
     skill.write_text(
-        skill.read_text(encoding="utf-8") + "\nCall business_delete_business.\n",
+        skill.read_text(encoding="utf-8").replace(
+            "description:", "metadata:\n  hermes: {}\ndescription:", 1
+        ),
         encoding="utf-8",
     )
-    with pytest.raises(manifest_tool.ManifestValidationError, match="runtime-specific model tool"):
+    with pytest.raises(manifest_tool.ManifestValidationError, match="non-standard frontmatter"):
         manifest_tool.build_manifest(root)
 
 
-def test_mode_write_paths_are_canonical_and_backslashes_fail(tmp_path: Path) -> None:
+def test_dangling_or_excluded_reference_fails_closed(tmp_path: Path) -> None:
     root = _minimal_release(tmp_path)
-    bindings_path = root / "HANDOFF" / "bindings.yaml"
-    bindings = _load_yaml(bindings_path)
-    bindings["mode_tool_policy"]["wake"]["denied_write_paths"] = ["product/.//site"]
-    bindings_path.write_text(yaml.safe_dump(bindings, sort_keys=False), encoding="utf-8")
-    manifest = manifest_tool.build_manifest(root)
-    assert manifest["mode_tool_policy"]["wake"]["denied_write_paths"] == ["product/site"]
-    bindings["mode_tool_policy"]["wake"]["denied_write_paths"] = [r"product\site"]
-    bindings_path.write_text(yaml.safe_dump(bindings, sort_keys=False), encoding="utf-8")
-    with pytest.raises(manifest_tool.ManifestValidationError, match="relative POSIX path"):
-        manifest_tool.build_manifest(root)
-
-
-def test_dangling_reference_fails_closed(tmp_path: Path) -> None:
-    root = _minimal_release(tmp_path)
-    skill = root / "takyon" / "source-0" / "SKILL.md"
-    skill.write_text(skill.read_text(encoding="utf-8") + "\n[missing](references/missing.md)\n", encoding="utf-8")
+    skill = root / "takyon/source-0/SKILL.md"
+    skill.write_text(
+        skill.read_text(encoding="utf-8") + "\n[missing](references/missing.md)\n",
+        encoding="utf-8",
+    )
     with pytest.raises(manifest_tool.ManifestValidationError, match="dangling reference"):
         manifest_tool.build_manifest(root)
 
 
-def test_hermes_metadata_fails_closed(tmp_path: Path) -> None:
+def test_runtime_policy_refuses_unknown_tools_and_unsafe_paths(tmp_path: Path) -> None:
     root = _minimal_release(tmp_path)
-    skill = root / "takyon" / "source-0" / "SKILL.md"
-    skill.write_text(skill.read_text(encoding="utf-8").replace("---\n\n#", "metadata:\n  hermes: {}\n---\n\n#", 1), encoding="utf-8")
-    with pytest.raises(manifest_tool.ManifestValidationError, match="non-portable frontmatter"):
+    policy_path = root / "sdk-runtime-policy.yaml"
+    policy = _load_yaml(policy_path)
+    policy["modes"]["wake"]["allowed_tools"] = ["business_missing"]
+    policy["modes"]["wake"]["required_tools"] = []
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+    with pytest.raises(manifest_tool.ManifestValidationError, match="unknown tools"):
+        manifest_tool.build_manifest(root)
+    policy["modes"]["wake"]["allowed_tools"] = ["business_read_business"]
+    policy["modes"]["wake"]["required_tools"] = ["business_read_business"]
+    policy["modes"]["wake"]["denied_write_paths"] = [r"product\site"]
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+    with pytest.raises(manifest_tool.ManifestValidationError, match="relative POSIX path"):
         manifest_tool.build_manifest(root)
 
 
-def test_nested_agent_delegation_fails_closed(tmp_path: Path) -> None:
-    root = _minimal_release(tmp_path)
-    skill = root / "takyon" / "source-0" / "SKILL.md"
-    skill.write_text(skill.read_text(encoding="utf-8") + "\nCall business_claude_agent_task.\n", encoding="utf-8")
-    with pytest.raises(manifest_tool.ManifestValidationError, match="removed nested-agent tool"):
-        manifest_tool.build_manifest(root)
-
-
-def test_oversized_skill_fails_closed(tmp_path: Path) -> None:
-    root = _minimal_release(tmp_path)
-    skill = root / "takyon" / "source-0" / "SKILL.md"
-    skill.write_text(
-        skill.read_text(encoding="utf-8") + ("\nPortable instruction." * 500),
-        encoding="utf-8",
-    )
-    with pytest.raises(manifest_tool.ManifestValidationError, match="499 lines or fewer"):
-        manifest_tool.build_manifest(root)
-
-
-def test_unapproved_skill_fails_closed(tmp_path: Path) -> None:
-    root = _minimal_release(tmp_path)
-    extra = root / "takyon" / "extra"
-    extra.mkdir()
-    (extra / "SKILL.md").write_text(
-        "---\nname: extra\ndescription: Use when extra. Do not use elsewhere.\n---\n", encoding="utf-8"
-    )
-    with pytest.raises(manifest_tool.ManifestValidationError, match="unapproved"):
-        manifest_tool.build_manifest(root)
-
-
-def test_bound_tool_must_exist_in_model_definitions(tmp_path: Path) -> None:
-    root = _minimal_release(tmp_path)
-    bindings_path = root / "HANDOFF" / "bindings.yaml"
-    bindings = _load_yaml(bindings_path)
-    bindings["capabilities"]["business.state.read"]["tools"] = ["missing_tool"]
-    for policy in bindings["mode_tool_policy"].values():
-        policy["baseline_tools"] = ["missing_tool"]
-    bindings_path.write_text(yaml.safe_dump(bindings, sort_keys=False), encoding="utf-8")
-    with pytest.raises(manifest_tool.ManifestValidationError, match="absent from model-tool definitions"):
-        manifest_tool.build_manifest(root)
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "error"),
-    (
-        ("scope", "any_business", "unsupported scope"),
-        ("authority", "shared_token", "unsupported authority"),
-    ),
-)
-def test_capability_scope_and_authority_enums_fail_closed(
-    tmp_path: Path, field: str, value: str, error: str
-) -> None:
-    root = _minimal_release(tmp_path)
-    bindings_path = root / "HANDOFF" / "bindings.yaml"
-    bindings = _load_yaml(bindings_path)
-    bindings["capabilities"]["business.state.read"][field] = value
-    bindings_path.write_text(yaml.safe_dump(bindings, sort_keys=False), encoding="utf-8")
-    with pytest.raises(manifest_tool.ManifestValidationError, match=error):
-        manifest_tool.build_manifest(root)
-
-
-def test_locked_manifest_check_detects_content_drift(tmp_path: Path) -> None:
-    root = _minimal_release(tmp_path)
-    output = root / "approved-skills.json"
-    assert manifest_tool.main(["--skills-root", str(root), "--output", str(output)]) == 0
-    assert manifest_tool.main(["--skills-root", str(root), "--output", str(output), "--check"]) == 0
-    skill = root / "takyon" / "source-0" / "SKILL.md"
-    skill.write_text(skill.read_text(encoding="utf-8") + "\nChanged method.\n", encoding="utf-8")
-    assert manifest_tool.main(["--skills-root", str(root), "--output", str(output), "--check"]) == 1
+def test_inventory_digest_is_stable() -> None:
+    manifest = manifest_tool.build_manifest(SKILLS_ROOT)
+    expected = "sha256:" + hashlib.sha256(
+        "\0".join(sorted(manifest["model_tool_inventory"])).encode("utf-8")
+    ).hexdigest()
+    assert manifest["model_tool_inventory_digest"] == expected

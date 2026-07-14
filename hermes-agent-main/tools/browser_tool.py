@@ -3043,7 +3043,13 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
-def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> str:
+def browser_vision(
+    question: str,
+    annotate: bool = False,
+    task_id: Optional[str] = None,
+    *,
+    return_native_image: bool = False,
+) -> str:
     """
     Take a screenshot of the current page and analyze it with vision AI.
 
@@ -3059,6 +3065,9 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         question: What you want to know about the page visually
         annotate: If True, overlay numbered [N] labels on interactive elements
         task_id: Task identifier for session isolation
+        return_native_image: Return the captured PNG as an MCP image block for
+            the already-running multimodal agent instead of making a second
+            auxiliary-model call. This is an internal Agent SDK bridge option.
 
     Returns:
         JSON string with vision analysis results and screenshot_path
@@ -3185,6 +3194,38 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         _screenshot_bytes = screenshot_path.read_bytes()
         _screenshot_b64 = base64.b64encode(_screenshot_bytes).decode("ascii")
         data_url = f"data:image/png;base64,{_screenshot_b64}"
+
+        if return_native_image:
+            from tools.vision_tools import _RESIZE_TARGET_BYTES, _resize_image_for_vision
+
+            if len(data_url) > _RESIZE_TARGET_BYTES:
+                data_url = _resize_image_for_vision(
+                    screenshot_path,
+                    mime_type="image/png",
+                )
+                _screenshot_b64 = data_url.split(",", 1)[1]
+            response_data = {
+                "success": True,
+                "native_mcp_content": [
+                    {
+                        "type": "image",
+                        "data": _screenshot_b64,
+                        "mimeType": "image/png",
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Rendered page screenshot captured for the current Agent SDK session. "
+                            f"Inspect it directly and answer: {question}"
+                        ),
+                    },
+                ],
+                "screenshot_path": str(screenshot_path),
+            }
+            return json.dumps(
+                _copy_fallback_warning(response_data, result),
+                ensure_ascii=False,
+            )
 
         vision_prompt = (
             f"You are analyzing a screenshot of a web browser.\n\n"

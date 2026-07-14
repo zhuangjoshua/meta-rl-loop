@@ -55,11 +55,11 @@ For the operator/dashboard path, the canonical spend gate is the top-level Takyo
 
 ## Agent-SDK Takyon Work
 
-Implement Takyon behavior through portable native skills, reviewed HANDOFF bindings, scoped tools, and durable business state. `scripts/takyon-claude-primary-runtime.mjs` is the only model-agent runtime; the queue worker, Docker sandboxes, and build processes are execution infrastructure, not model agents.
+Implement Takyon behavior through complete native skills, reviewed SDK runtime policy, scoped tools, and durable business state. `scripts/takyon-claude-primary-runtime.mjs` is the only model-agent runtime; the queue worker, Docker sandboxes, and build processes are execution infrastructure, not model agents.
 
 When Takyon creates or updates business artifacts, the operator should be able to see where they landed. Surface the business filesystem root and paths for outreach, website/app, product, campaign, receipt, conversation, job, and wakeup deliverables through tool results, shell progress, or concise CEO reports.
 
-Default rule: everything business-facing should be an approved skill discoverable in the immutable SDK plugin or a business-scoped tool visible through HANDOFF-approved schemas/results. Skills own provider-agnostic methods; `skills/HANDOFF/` owns exact tools, paths, modes, authority, publication, receipts, and validators; runtime code owns checkpoints and hard gates.
+Default rule: everything business-facing should be an approved skill discoverable in the immutable SDK plugin or a business-scoped tool exposed by `skills/sdk-runtime-policy.yaml`. Skills retain their full routing, methods, tool usage, and resources; release paths live in `skills/release-skills.yaml`; runtime code owns scope, authority, publication, receipts, validators, checkpoints, and hard gates. `skills/HANDOFF/POLICY.md` is documentation only.
 
 Slash-command UI must be source-of-truth driven. Shell palettes/help derive from harness metadata and the approved SDK skill manifest; do not duplicate names/descriptions in UI code.
 

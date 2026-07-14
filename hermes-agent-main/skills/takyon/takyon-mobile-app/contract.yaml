@@ -1,3 +1,0 @@
-schema_version: 1
-requires: [business.state.read, business.files.read, product.source.edit, mobile.store.read, mobile.store.release]
-produces: [product.mobile-app]

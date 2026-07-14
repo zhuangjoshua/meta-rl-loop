@@ -210,6 +210,38 @@ test("dynamic MCP tools invoke only the private bridge with converted schemas", 
   });
 });
 
+test("browser vision bridge returns a native image block to the primary model", async () => {
+  const sdk = {
+    tool(name, _description, _shape, handler) {
+      return { name, handler };
+    },
+    createSdkMcpServer(options) {
+      return options;
+    },
+  };
+  const server = createBridgeMcpServer({
+    sdk,
+    z: { fromJSONSchema: () => ({ shape: {} }) },
+    toolDefinitions: [{
+      name: "browser_vision",
+      description: "Inspect the rendered page.",
+      inputSchema: { type: "object", properties: {} },
+    }],
+    request: async () => ({
+      nativeMcpContent: [
+        { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+        { type: "text", text: "Inspect this rendered page." },
+      ],
+    }),
+  });
+  assert.deepEqual(await server.tools[0].handler({}, {}), {
+    content: [
+      { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+      { type: "text", text: "Inspect this rendered page." },
+    ],
+  });
+});
+
 test("entrypoint always wires eager durable sessions and Skill-only exact MCP tools", async () => {
   const sessionId = randomUUID();
   const toolBridgeCalls = [];
@@ -300,7 +332,7 @@ for (const [wireMode, sdkMode] of [
   });
 }
 
-test("entrypoint refuses normalized HANDOFF modes on its task-kind wire boundary", () => {
+test("entrypoint refuses normalized policy modes on its task-kind wire boundary", () => {
   for (const mode of ["bootstrap", "wake"]) {
     assert.throws(
       () => validatePrimaryEntrypointRequest(request({ mode })),

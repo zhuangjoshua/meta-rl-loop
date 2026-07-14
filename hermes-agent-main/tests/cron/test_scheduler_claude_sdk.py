@@ -410,19 +410,15 @@ def test_cron_explicit_skill_uses_native_approved_wake_skill():
     assert "full skill content is loaded below" not in prompt
 
 
-def test_cron_rejects_skill_not_approved_for_wake():
-    try:
-        scheduler._build_job_prompt(
-            {
-                "id": "skill-job",
-                "skills": ["design-taste-frontend"],
-                "prompt": "Redesign the site.",
-            }
-        )
-    except scheduler.CronSkillPolicyBlocked as exc:
-        assert "not approved for wake mode" in str(exc)
-    else:
-        raise AssertionError("non-wake skill was accepted")
+def test_cron_accepts_every_release_skill_in_wake_mode():
+    prompt = scheduler._build_job_prompt(
+        {
+            "id": "skill-job",
+            "skills": ["design-taste-frontend"],
+            "prompt": "Redesign the site.",
+        }
+    )
+    assert "`takyon-approved-skills:design-taste-frontend`" in prompt
 
 
 def test_scheduler_has_no_legacy_agent_or_mutable_skill_loader_reachability():

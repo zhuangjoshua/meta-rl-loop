@@ -107,21 +107,21 @@ Practice parsimony and no slop. Use the smallest native SDK skill, scoped tool, 
 
 Skill-based does not mean every fix belongs in skill prose. If the real missing piece is tool registration, provider config, harness metadata, a guarded runtime rail, or a UI renderer, fix that canonical surface and let the existing skills use it; edit or add a skill only when the business-facing method, judgment, or routing behavior genuinely changes.
 
-When behavior is wrong, identify the missing source of truth, skill contract, HANDOFF binding, tool schema, receipt, guardrail, or runtime rail, then fix that canonical surface.
+When behavior is wrong, identify the missing source of truth, complete native skill, SDK runtime policy, tool schema, receipt, guardrail, or runtime rail, then fix that canonical surface.
 
 Do not add deterministic business-action routers or forced artifact shortcuts to make the CEO pick a business move. Let it select from approved native skill descriptions and scoped tool schemas; deterministic code owns invocation modes, bootstrap/wake checkpoints, scope, idempotency, authority, spend, receipts, and done gates.
 
-Use canonical sources: runtime config in `$TAKYON_HOME/config.yaml`; base policy in `plugins/takyon/prompts/ceo.md`; portable methods in `skills/*/SKILL.md` plus `contract.yaml`; exact tools, paths, modes, authority, publication, receipts, and validators in `skills/HANDOFF/`; approved inventory in `skills/release-skills.yaml`; and business facts in the control plane plus canonical workspace.
+Use canonical sources: runtime config in `$TAKYON_HOME/config.yaml`; base policy in `plugins/takyon/prompts/ceo.md`; complete routing, methods, tools, and resources in each native skill folder; exact release files in `skills/release-skills.yaml`; mode tool/write policy in `skills/sdk-runtime-policy.yaml`; authority, publication, receipts, and validators in runtime code; and business facts in the control plane plus canonical workspace.
 
 Before adding a new store, command, prompt rule, metric file, or workflow, check whether the active Takyon trunk already has a canonical source that does the job.
 
-Do not answer diagnosis with artifact edits; a systemic fix belongs in the relevant skill, HANDOFF binding, tool, harness metadata, or AGENTS instruction.
+Do not answer diagnosis with artifact edits; a systemic fix belongs in the relevant skill, SDK runtime policy, tool, harness metadata, or AGENTS instruction.
 
 `AGENTS.md` is not a CEO runtime prompt. Do not put business strategy, wake-loop policy, product judgment, outreach policy, or per-business operating instructions here. Runtime behavior belongs in the CEO prompt, Takyon skills, guarded business tools, harness command metadata, cron prompts, and per-business `research/`, `product/`, `distribution/`, and `metrics/` state.
 
 Hardcode only durable rails and safety primitives: invocation modes/checkpoints, business isolation, path containment, idempotency, credential gates, budget caps, audit events, pause/resume/kill controls, conservative cleanup, and shared product-runtime APIs.
 
-When changing CEO/runtime behavior, edit stable policy, approved skills, HANDOFF bindings, and the relevant tool/cron/harness source. In particular:
+When changing CEO/runtime behavior, edit stable policy, approved skills, SDK runtime policy, and the relevant tool/cron/harness source. In particular:
 
 - `plugins/takyon/prompts/ceo.md` is stable base policy; bootstrap, wake, and interactive differences are code-owned mode policy plus fresh context.
 - `scripts/takyon-claude-primary-runtime.mjs` is the only model-agent runtime; `takyon-worker.service` is a durable queue consumer.
@@ -133,19 +133,19 @@ When changing CEO/runtime behavior, edit stable policy, approved skills, HANDOFF
 When the operator asks to add a normal new Takyon feature or skill, always use the parsimonious addition path:
 
 1. Add `hermes-agent-main/skills/takyon/<new-feature>/SKILL.md` from `hermes-agent-main/skills/SKILL-TEMPLATE.md`.
-2. Put `Use when` and `Do not use` routing in the native description; keep Inputs, Method, Verification, and Failure Conditions provider- and deployment-agnostic.
-3. Add `contract.yaml` with semantic capabilities and outputs, then bind exact tools, roots, paths, modes, authority, publication, receipts, and validators in `skills/HANDOFF/bindings.yaml`.
-4. Add only necessary resources, and add the reviewed exact `publish_files` allowlist to `skills/release-skills.yaml`.
-5. Add a guarded `business_*` tool only when a new canonical side effect/state rail is required, then bind it through HANDOFF.
+2. Put `Use when` and `Do not use` routing in the native description; keep the complete original inputs, method, real tool usage, verification, resources, and failure conditions in the skill folder.
+3. Add every required reference, template, script, asset, and example to that same skill folder.
+4. Add the complete exact file inventory to `skills/release-skills.yaml`; partial publication is forbidden.
+5. Add a guarded `business_*` tool only when a new canonical side effect/state rail is required, then grant it through `skills/sdk-runtime-policy.yaml` in the appropriate modes.
 6. Run `python3 scripts/build_approved_skills_manifest.py` and then `--check`.
 7. Deployment publishes the exact inventory into a content-addressed read-only plugin; prove native discovery there and never sync to mutable `$TAKYON_HOME/skills`.
-8. Keep bootstrap/wake phase order, retries, spend settlement, and done gates in runtime code, not skills.
+8. Keep tenant authority, bootstrap/wake phase order, retries, spend settlement, publication truth, and hard gates in runtime code, not skill prose.
 
-For every new feature, skill, or tool, verify the native description, `contract.yaml`, HANDOFF mode/capability bindings, generated approved manifest, invocation-mode policy, and canonical tools/runtime rails.
+For every new feature, skill, or tool, verify the native description, complete bundle, generated approved manifest, invocation-mode policy, and canonical tools/runtime rails.
 
-Takyon skills must keep rich portable operational detail without embedding Takyon tool names, paths, providers, authority, spend, or publication targets; those exact bindings belong in HANDOFF.
+Takyon skills must keep their complete operational detail, including real tool usage and relative resources. Release paths and mode permissions belong in higher-level policy; tenant authority, spend, and authoritative publication remain code-owned.
 
-Before adding a feature, skill, tool, store, command, metric, or prompt rule, check redundancy and conflicts across bootstrap, wake, interactive, business isolation, app-runtime rails, cron, and shell policy; if valid, describe native discovery and exact HANDOFF/mode grants.
+Before adding a feature, skill, tool, store, command, metric, or prompt rule, check redundancy and conflicts across bootstrap, wake, interactive, business isolation, app-runtime rails, cron, and shell policy; if valid, describe native discovery and exact mode grants.
 
 Before implementing a new feature, prove or ask whether it needs new provider access, API keys, OAuth apps, paid services, network scraping, external posting/sending, deploy credentials, model/video/image generation access, billing rails, or budget authority. Report the exact required environment variables, provider accounts, expected side effects, test-mode behavior, and live-mode gates. If the feature can work locally without new credentials, say that explicitly. If live functionality would be degraded or blocked without credentials, implement the local/guarded path only and record the missing provider gate instead of pretending it works.
 
@@ -159,11 +159,11 @@ Test-mode semantics belong in the Takyon tools, skills, and harness metadata, no
 
 ## Agent-SDK Takyon Work
 
-Implement Takyon behavior through portable skills, reviewed HANDOFF bindings, scoped tools, and durable business state; do not add one-off model-worker stages.
+Implement Takyon behavior through complete native skills, reviewed SDK runtime policy, scoped tools, and durable business state; do not add one-off model-worker stages.
 
 When modifying artifact/reporting surfaces, keep business deliverables visible through tool results, shell progress, or concise reports. Paths should come from canonical tool results and filesystem roots, not invented shell text.
 
-Default rule: everything business-facing should be an approved native skill discoverable in the immutable production plugin or a business-scoped tool visible through HANDOFF-approved schemas/results; safety and control rails remain enforced in code.
+Default rule: everything business-facing should be an approved native skill discoverable in the immutable production plugin or a business-scoped tool granted by the SDK runtime policy; safety and control rails remain enforced in code.
 
 Slash-command UI must be source-of-truth driven. Shell palettes/help should derive from `hermes-agent-main/plugins/takyon/harness/settings.json` for controls, `hermes-agent-main/plugins/takyon/harness/commands/*.md` for harness skill commands, and Hermes skill discovery for Takyon skills. If a future command or skill is added, updating that canonical source must be enough for shell discovery; do not duplicate slash command names/descriptions in the UI.
 

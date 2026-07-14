@@ -1453,7 +1453,6 @@ def _run_claude_sdk_ceo_turn(
         "session_search",
         "terminal",
         "file",
-        "browser",
         "code_execution",
     ]
     registered_tool_context_binding = nullcontext()
@@ -1473,7 +1472,7 @@ def _run_claude_sdk_ceo_turn(
                 operator_user_id=owner_user_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                # HANDOFF's reviewed runtime baseline includes the bounded
+                # The reviewed SDK runtime baseline includes the bounded
                 # todo tool in every mode. The prior bootstrap runtime did
                 # not list that toolset, so add it before the exact policy
                 # filter; the compiled allowlist still prevents any widening.
@@ -3109,8 +3108,8 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     except (TypeError, ValueError):
         max_turns = _DEFAULT_MAX_TURNS
     inactivity_limit = _env_float("TAKYON_WORKER_TURN_TIMEOUT", _DEFAULT_TURN_TIMEOUT)
-    # Mobile bootstrap is a marathon turn — landing + logo + an iOS app build (a
-    # 10-20min docker worker) + a store-signed publish. Its long model sub-steps and build waits
+    # Mobile bootstrap is a marathon turn — landing + logo + an iOS app build in the primary
+    # Agent SDK session + a store-signed publish. Its long model sub-steps and build waits
     # exceed the 600s default and were FALSE-killing the turn mid-build (sipstreak, 2026-07-09,
     # both attempts). Give it 30min of idle headroom: streaming tokens and the app-build heartbeat
     # reset the clock continuously, so only a genuine ~30min stall (a real hang) still trips it.

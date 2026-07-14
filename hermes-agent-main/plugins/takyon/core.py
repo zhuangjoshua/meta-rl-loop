@@ -3814,9 +3814,9 @@ def _materialize_subuser_app_scaffold(
     # (hardlinked from the arch+lockhash-keyed prebake) so the very next build skips the cold install.
     # Best-effort + gated on an exact lock match; node_modules is excluded from canonical storage and
     # the durability read-back hash set, so this seed stays local and never ships to the mirror. This
-    # materialized workspace can be consumed by the Linux docker worker (it bind-mounts this dir), so
-    # require host/container arch compatibility before seeding a host-built tree the worker would run.
-    _seed_warm_node_modules(workspace_root, for_docker_consumer=True)
+    # The primary Agent SDK runs on this host, so the host-built dependency tree is the compatible
+    # warm start for the next deterministic build.
+    _seed_warm_node_modules(workspace_root)
 
 
 # The starter-owned metadata floor + AppKit-owned rail wrappers. Unlike the worker-owned screens
@@ -9351,32 +9351,17 @@ def _repair_node_modules_bin_links(root: Path) -> list[str]:
     return repairs
 
 
-def _warm_node_modules_safe_for_docker_consumer() -> bool:
-    """True only when a host-built node_modules is binary-compatible with the docker worker container.
-
-    The prebake is built with the HOST's npm, so node_modules carries host-arch native binaries
-    (esbuild, etc.). The docker worker runs a Linux container; seeding a foreign-arch tree into the
-    bind-mounted workspace would hard-fail the container's vite build. On a Linux host (the production
-    VPS) host==container arch, so the seed is safe and the worker reuses it directly. On non-Linux
-    hosts (dev), skip the workspace seed and let the container do its own warm `npm ci` against the
-    shared (arch-neutral) npm tarball cache instead."""
-    return platform.system().lower() == "linux"
-
-
-def _seed_warm_node_modules(workspace_root: Path, *, for_docker_consumer: bool = False) -> bool:
+def _seed_warm_node_modules(workspace_root: Path) -> bool:
     """Drop a prebaked node_modules into a fresh workspace when its lock is the pinned scaffold lock.
 
     Gated on an EXACT scaffold-lockfile-hash match so we never seed a mismatched dependency set; on
-    any drift the caller's normal install runs instead. When ``for_docker_consumer`` is set, also
-    require host/container arch compatibility so we never hand the Linux worker a foreign-arch tree.
-    node_modules is excluded from canonical storage + the durability read-back hash set
+    any drift the caller's normal install runs instead. node_modules is excluded from canonical
+    storage + the durability read-back hash set
     (storage._SYNC_EXCLUDED_SEGMENTS, _WORKSPACE_DURABILITY_EXCLUDED_PARTS), so this seed stays purely
     local and never ships to the remote mirror. Returns True when node_modules is present afterwards."""
     try:
         if _node_modules_present(workspace_root):
             return True
-        if for_docker_consumer and not _warm_node_modules_safe_for_docker_consumer():
-            return False
         if not _workspace_lockfile_matches_scaffold(workspace_root):
             return False
         prebake = _ensure_warm_node_modules_prebake()

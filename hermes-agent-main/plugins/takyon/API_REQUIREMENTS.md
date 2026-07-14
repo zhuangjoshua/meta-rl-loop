@@ -35,12 +35,13 @@ Observed key names are present locally as of 2026-05-25; values are intentionall
 - `takyon-meta-ads-v2`
 - `takyon-reddit-ads`
 
-These skills declare portable routing in native frontmatter and bind runtime readiness in `skills/HANDOFF/bindings.yaml`:
+These skills declare native frontmatter routing and complete tool usage in their skill bundles;
+runtime readiness is enforced by `skills/sdk-runtime-policy.yaml` and the guarded tools:
 
-- capabilities and guarded tools
-- authority and business scope
-- output and publication paths
-- receipt requirements
+- mode-level tool exposure and guarded tools
+- authority and business scope in runtime code
+- output and publication paths in the skill plus release/runtime policy
+- receipt requirements in the owning tools
 
 Raw environment-variable and credential-file requirements do not belong in skill bodies.
 

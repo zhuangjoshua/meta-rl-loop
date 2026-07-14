@@ -54,7 +54,7 @@ class CronPromptInjectionBlocked(Exception):
     Assembled-prompt scanning covers the user prompt plus script and prior-job
     context before either reaches the unattended SDK turn. Approved skill
     bodies are no longer copied into this prompt; the immutable published
-    plugin and compiled HANDOFF policy own their loading and enforcement.
+    plugin and compiled SDK runtime policy own their loading and enforcement.
     """
 
 
@@ -115,10 +115,10 @@ def _load_approved_cron_manifest() -> dict:
         or not isinstance(wake, dict)
         or not isinstance(wake.get("allowed_skills"), list)
         or not isinstance(wake.get("allowed_tools"), list)
-        or not isinstance(wake.get("baseline_tools"), list)
+        or not isinstance(wake.get("required_tools"), list)
     ):
         raise CronSkillPolicyBlocked(
-            "approved cron skill manifest omits the compiled wake HANDOFF policy"
+            "approved cron skill manifest omits the compiled wake SDK runtime policy"
         )
     return manifest
 
@@ -190,7 +190,7 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
     2. Per-platform ``takyon tools`` config for the ``cron`` platform.
        Mirrors gateway behavior (``_get_platform_tools(cfg, platform_key)``)
        so users can gate cron toolsets globally without recreating every job.
-    3. ``None`` on any lookup failure — the compiled wake HANDOFF policy is
+    3. ``None`` on any lookup failure — the compiled wake SDK runtime policy is
        used without an additional legacy toolset restriction.
 
     _DEFAULT_OFF_TOOLSETS ({moa, homeassistant, rl}) are removed by
@@ -213,7 +213,7 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
 
 
 def _cron_sdk_invocation_allowed_tools(job: dict, cfg: dict) -> list[str] | None:
-    """Translate a legacy cron toolset restriction under the wake HANDOFF ceiling."""
+    """Translate a legacy cron toolset restriction under the wake SDK ceiling."""
 
     requested_toolsets = _resolve_cron_enabled_toolsets(job, cfg)
     if requested_toolsets is None:
@@ -235,15 +235,15 @@ def _cron_sdk_invocation_allowed_tools(job: dict, cfg: dict) -> list[str] | None
         for value in wake.get("allowed_tools", [])
         if str(value or "").strip()
     }
-    baseline = {
+    required = {
         str(value or "").strip()
-        for value in wake.get("baseline_tools", [])
+        for value in wake.get("required_tools", [])
         if str(value or "").strip()
     }
-    # Baseline tools come from the higher-level HANDOFF policy and cannot be
+    # Required tools come from the higher-level SDK runtime policy and cannot be
     # removed by a legacy job record. The per-job list may only narrow the
     # optional portion of that policy.
-    return sorted(baseline | (requested_names & allowed) | {"skill_read_resource"})
+    return sorted(required | (requested_names & allowed))
 
 
 def _cron_sdk_budget_usd() -> float:

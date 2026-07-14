@@ -1,6 +1,6 @@
 # Campaign options (selectable values + defaults)
 
-Values the agent passes through the bound launch capability. Defaults are pinned; for any fuller enum,
+Values the agent passes through `business_meta_ad_launch`. Defaults are pinned; for any fuller enum,
 query the live MCP schema (`ads_get_field_context`) — server-side compatibility is enforced. Copy keys:
 primary text = `message`; CTA = `call_to_action_type`.
 

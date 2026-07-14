@@ -282,40 +282,75 @@ def test_scoped_tool_bridge_refuses_unlisted_tool() -> None:
     assert "not allowed" in response["error"]
 
 
+def test_browser_vision_returns_native_image_to_primary_sdk(monkeypatch) -> None:
+    completed: list[str] = []
+    monkeypatch.setattr(
+        "tools.browser_tool.browser_vision",
+        lambda **kwargs: json.dumps(
+            {
+                "success": True,
+                "native_mcp_content": [
+                    {"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"},
+                    {"type": "text", "text": "inspect rendered page"},
+                ],
+            }
+        ),
+    )
+    bridge = ScopedToolBridge(
+        tool_definitions=[
+            {
+                "name": "browser_vision",
+                "description": "inspect",
+                "inputSchema": {"type": "object", "properties": {}},
+            }
+        ],
+        scope=ToolBridgeScope(operator_user_id="user-1", task_id="task-1"),
+        on_tool_complete=lambda _id, _name, _args, result: completed.append(result),
+    ).start()
+    client, reader, writer = _bridge_client(bridge)
+    try:
+        writer.write(
+            json.dumps(
+                {
+                    "id": "vision-1",
+                    "type": "tool",
+                    "name": "browser_vision",
+                    "args": {"question": "Does this match the design?"},
+                }
+            )
+            + "\n"
+        )
+        writer.flush()
+        response = json.loads(reader.readline())
+    finally:
+        writer.close()
+        reader.close()
+        client.close()
+        bridge.close()
+
+    assert response["ok"] is True
+    assert response["result"]["nativeMcpContent"][0]["type"] == "image"
+    assert json.loads(completed[0]) == {
+        "success": True,
+        "native_image": True,
+        "fallback_warning": None,
+    }
+
+
 def _policy_manifest(tmp_path, *, allowed_tools=None):
-    inventory = ["dangerous_tool", "safe_tool"]
+    inventory = ["dangerous_tool", "safe_tool", "skill_read_resource"]
     digest = "sha256:" + hashlib.sha256(
         "\0".join(inventory).encode("utf-8")
     ).hexdigest()
     manifest = {
         "plugin": {"name": "test-approved-skills", "version": "1.0.0"},
-        "capability_bindings": {
-            "business.safe.read": {
-                "adapter": "mcp",
-                "tools": ["safe_tool"],
-                "scope": "current_business",
-                "authority": "operator_session",
-            },
-            "business.danger.control": {
-                "adapter": "mcp",
-                "tools": ["dangerous_tool"],
-                "scope": "current_business",
-                "authority": "operator_session",
-            },
-        },
-        "capability_tools": {
-            "business.safe.read": ["safe_tool"],
-            "business.danger.control": ["dangerous_tool"],
-        },
         "model_tool_inventory": inventory,
         "model_tool_inventory_digest": digest,
-        "handoff_guidance": "Use the compiled capability bindings.",
         "mode_tool_policy": {
             "bootstrap": {
-                "allowed_skills": ["safe-skill"],
-                "baseline_tools": ["safe_tool"],
-                "allowed_tools": list(allowed_tools or ["safe_tool"]),
-                "denied_capabilities": ["business.danger.control"],
+                "allowed_skills": ["safe-skill", "wake-only-skill"],
+                "required_tools": ["skill_read_resource"],
+                "allowed_tools": list(allowed_tools or ["safe_tool", "skill_read_resource"]),
                 "denied_tools": ["dangerous_tool"],
                 "denied_write_paths": ["product/site"],
             }
@@ -323,7 +358,7 @@ def _policy_manifest(tmp_path, *, allowed_tools=None):
         "skills": [
             {
                 "name": "safe-skill",
-                "allowed_modes": ["bootstrap"],
+                "allowed_modes": ["bootstrap", "interactive", "wake"],
                 "plugin_path": "skills/safe-skill",
                 "publish_files": [
                     "skills/safe-skill/SKILL.md",
@@ -332,7 +367,7 @@ def _policy_manifest(tmp_path, *, allowed_tools=None):
             },
             {
                 "name": "wake-only-skill",
-                "allowed_modes": ["wake"],
+                "allowed_modes": ["bootstrap", "interactive", "wake"],
                 "plugin_path": "skills/wake-only-skill",
                 "publish_files": ["skills/wake-only-skill/SKILL.md"],
             },
@@ -359,12 +394,13 @@ def test_mode_policy_is_exact_allowlist_plus_parent_resource_tool(tmp_path) -> N
         "safe_tool",
         "skill_read_resource",
     ]
-    assert policy.allowed_tools == ("safe_tool",)
+    assert policy.allowed_tools == ("safe_tool", "skill_read_resource")
+    assert policy.required_tools == ("skill_read_resource",)
 
 
 def test_mode_policy_refuses_unknown_allowed_tool(tmp_path) -> None:
     manifest = _policy_manifest(tmp_path, allowed_tools=["unknown_tool"])
-    with pytest.raises(ClaudeSdkRuntimeError, match="allowed_tools"):
+    with pytest.raises(ClaudeSdkRuntimeError, match="unavailable or forbidden"):
         enforce_sdk_mode_tool_policy(
             manifest_path=manifest,
             mode="bootstrap",
@@ -378,7 +414,7 @@ def test_mode_policy_refuses_allowed_skill_mode_drift(tmp_path) -> None:
     manifest["skills"][0]["allowed_modes"] = ["interactive"]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ClaudeSdkRuntimeError, match="allowed_skills drifted"):
+    with pytest.raises(ClaudeSdkRuntimeError, match="every approved native skill"):
         enforce_sdk_mode_tool_policy(
             manifest_path=manifest_path,
             mode="bootstrap",
@@ -389,13 +425,13 @@ def test_mode_policy_refuses_allowed_skill_mode_drift(tmp_path) -> None:
         )
 
 
-def test_mode_policy_refuses_capability_binding_policy_drift(tmp_path) -> None:
+def test_mode_policy_refuses_hidden_approved_skill(tmp_path) -> None:
     manifest_path = _policy_manifest(tmp_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["capability_bindings"]["business.safe.read"]["scope"] = "any_business"
+    manifest["mode_tool_policy"]["bootstrap"]["allowed_skills"] = ["safe-skill"]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ClaudeSdkRuntimeError, match="invalid or drifted binding"):
+    with pytest.raises(ClaudeSdkRuntimeError, match="must surface every approved native skill"):
         enforce_sdk_mode_tool_policy(
             manifest_path=manifest_path,
             mode="bootstrap",
@@ -732,12 +768,10 @@ def test_second_bridge_constructor_failure_closes_first_bridge(
     policy = runtime.SdkModeToolPolicy(
         mode="interactive",
         allowed_skills=("safe-skill",),
-        baseline_tools=("safe_tool",),
+        required_tools=(),
         allowed_tools=("safe_tool",),
-        denied_capabilities=(),
         denied_tools=(),
         denied_write_paths=(),
-        handoff_guidance="Use the scoped tool bridge.",
     )
     definitions = [{"name": "safe_tool", "inputSchema": {"type": "object"}}]
     monkeypatch.setattr(
@@ -875,12 +909,10 @@ def test_primary_sdk_subprocess_serializes_task_kind_wire_mode(
     policy = runtime.SdkModeToolPolicy(
         mode=handoff_mode,
         allowed_skills=("safe-skill",),
-        baseline_tools=("safe_tool",),
+        required_tools=(),
         allowed_tools=("safe_tool",),
-        denied_capabilities=(),
         denied_tools=(),
         denied_write_paths=(),
-        handoff_guidance="Use the scoped tool bridge.",
     )
     definitions = [{"name": "safe_tool", "inputSchema": {"type": "object"}}]
 
@@ -991,12 +1023,10 @@ def test_keyboard_interrupt_terminates_sdk_process_before_bridge_cleanup(
     policy = runtime.SdkModeToolPolicy(
         mode="interactive",
         allowed_skills=("safe-skill",),
-        baseline_tools=("safe_tool",),
+        required_tools=(),
         allowed_tools=("safe_tool",),
-        denied_capabilities=(),
         denied_tools=(),
         denied_write_paths=(),
-        handoff_guidance="Use the scoped tool bridge.",
     )
     definitions = [{"name": "safe_tool", "inputSchema": {"type": "object"}}]
 

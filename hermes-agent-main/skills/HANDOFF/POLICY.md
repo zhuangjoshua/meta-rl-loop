@@ -1,47 +1,65 @@
-# Skill HANDOFF Policy
+# Skill HANDOFF Guide
 
-Skills own reusable domain methods: routing, inputs, procedure, quality criteria, verification, and
-failure conditions. A skill may declare semantic capabilities and outputs in `contract.yaml`.
+HANDOFF is an authoring guide for future skills. It is not loaded by the Claude Agent SDK, is not
+an authority boundary, and does not bind tools, paths, modes, receipts, or completion predicates.
 
-HANDOFF owns every Takyon-specific binding: exact tools, workspace roots, artifact paths, invocation
-modes, authority, publication, idempotency-key classes, required receipt kinds, and validator IDs.
-Runtime code owns phase order, key derivation, atomic effects, validator implementations, and
-completion transitions; prompt compliance and editable HANDOFF data are not authority boundaries.
+## Native skill shape
 
-All approved skills are installed and discoverable in every session. `allowed_modes` controls native
-selection, while `mode_tool_policy` controls authority independently: the generated manifest contains
-an exact `allowed_tools` allowlist for each mode, compiled from a reviewed baseline plus the semantic
-capabilities required by skills allowed in that mode. Runtime must fail closed if a listed tool is
-missing, the model-tool inventory digest drifts, or a schema outside the allowlist would be exposed.
-Generic file adapters must also enforce canonical `denied_write_paths`; normalize `.` and repeated
-slashes and reject absolute paths, `..`, and backslashes before checking prefixes.
-
-To add or change a production skill:
-
-1. Start from `../SKILL-TEMPLATE.md` and keep the skill provider- and deployment-agnostic.
-2. Add `contract.yaml` with semantic `requires` and `produces` identifiers.
-3. Add exact capability, artifact, and mode bindings to `bindings.yaml`.
-4. Add the reviewed source and an exact non-executable `publish_files` allowlist to
-   `../release-skills.yaml`.
-5. Run `python3 scripts/build_approved_skills_manifest.py`, then run it again with `--check`.
-
-The SDK never loads the writable source tree as its production plugin. Activation publishes an
-immutable flat copy outside the repository:
+Create one directory under `skills/creative/<name>/` or `skills/takyon/<name>/`:
 
 ```text
-python3 scripts/build_approved_skills_manifest.py --check \
-  --publish-root "$TAKYON_HOME/runtime/claude-agent-sdk/releases/<release-id>/skills"
+<name>/
+├── SKILL.md
+├── scripts/       # optional
+├── references/    # optional
+├── templates/     # optional
+└── assets/        # optional
 ```
 
-The destination is the plugin root passed to the SDK. It contains
-`.claude-plugin/plugin.json`, `approved-skills.json`, and exactly
-the per-skill files listed in each manifest entry's plugin-relative `publish_files`. The publisher
-rejects executable resources, provider-key/runtime bindings in published text, extra files or skills,
-and digest drift; it atomically activates a new destination and sets files to `0444` and directories
-to `0555`. Legacy helper scripts that can read keys or call providers directly are not copied into the
-SDK plugin; live work remains behind bound guarded capabilities. A caller must use a versioned new
-destination; an existing destination is accepted only when its manifest, files, digests, and
-permissions already match exactly.
+`SKILL.md` uses standard Agent Skills frontmatter:
 
-Changing a tool, path, provider, authority rail, or publication target changes HANDOFF, not the
-skill's method.
+```yaml
+---
+name: lowercase-hyphenated-name
+description: What the skill does. State when Claude should use it and when it should not.
+---
+```
+
+Claude receives every approved skill's `name` and `description` at session start. The description
+is the autonomous routing surface. When a request matches, Claude's native `Skill` tool loads the
+complete `SKILL.md`; relative supporting files load only when the skill calls for them.
+
+Keep the complete reusable method in the skill: inputs, procedure, tool usage, quality criteria,
+verification, failure behavior, references, scripts, templates, and assets. Do not replace detailed
+instructions with summaries during a runtime migration.
+
+## Higher-level release and runtime policy
+
+The skill does not choose where it is installed or which invocation mode can expose side effects:
+
+- `skills/release-skills.yaml` owns the approved skill inventory, source directory, version, and
+  complete bundle copied into the immutable production plugin.
+- `skills/sdk-runtime-policy.yaml` owns exact mode-level tool allowlists and denied write paths.
+- Runtime code owns tenant scope, authority, idempotency, money gates, publication, deterministic
+  validators, phase order, and completion state.
+- `scripts/build_approved_skills_manifest.py` validates and publishes the flat read-only plugin.
+- The Agent SDK loads that plugin with `plugins: [{type: "local", path: ...}]` and `skills: "all"`.
+
+Those layers may limit side effects, but they must not rewrite, summarize, or hide approved skills.
+
+## Adding or changing a skill
+
+1. Start from `../SKILL-TEMPLATE.md`.
+2. Put all reusable behavior and explicit routing in the native skill bundle.
+3. Add the directory and every bundled file to `../release-skills.yaml`.
+4. Add or change a runtime tool only when the skill needs a real capability that does not exist.
+5. Change `../sdk-runtime-policy.yaml` only when mode-level authority must change.
+6. Regenerate and verify the immutable plugin:
+
+```bash
+python3 scripts/build_approved_skills_manifest.py
+python3 scripts/build_approved_skills_manifest.py --check
+```
+
+Never add a second agent, nested worker, per-business skill installation, direct provider-key path,
+stub, mock side effect, or prompt-only substitute for a required tool.

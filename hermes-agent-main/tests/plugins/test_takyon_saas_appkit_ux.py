@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from plugins.takyon import core as takyon_core
+from plugins.takyon import bootstrap_phases
 from plugins.takyon import turn_runtime
 
 
@@ -180,18 +181,17 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
         "saas-appkit-test", "Build a SaaS workflow", "live", archetype="web_saas"
     )
     assert "Preserve and render the canonical `PublicSiteHeader`" in prompt
-    landing_pass = prompt.split("#### 2a. Build and publish the landing page", 1)[1].split(
+    landing_pass = prompt.rsplit("#### 2a. Build and publish the landing page", 1)[1].split(
         "#### 2a.1. Register Search Console", 1
     )[0]
     assert "guidance_skills" not in landing_pass
-    assert "native `design-taste-frontend` skill" in landing_pass
-    assert "Safebox-gated image generation" in landing_pass
+    assert "`design-taste-frontend`" in landing_pass
+    assert "Safebox-gated site-image generation" in landing_pass
     assert "images, DESIGN.md, screenshots, and visual audits are optional" in landing_pass
     assert "never publication conditions" in landing_pass
-    assert "max_turns: 60" in landing_pass
-    assert "effort: medium" in landing_pass
-    assert "timeout_ms: 900000" in landing_pass
-    assert "first API retry or any unchanged deterministic failure" in landing_pass
+    assert "max_turns" not in landing_pass
+    assert "budget_usd" not in landing_pass
+    assert "never start a second overlapping build" in landing_pass
     assert "Persist every created/generated customer artifact" in prompt
     assert "bootstrap_final_product_pass: true" in prompt
     assert "Upgrade landing proof from the verified research" not in prompt
@@ -227,18 +227,18 @@ def test_bootstrap_uses_native_taste_without_prompt_body_guidance_injection():
         "live",
         archetype="web_saas",
     )
-    product_pass = prompt.split("Then finish the access shell and account page", 1)[1].split(
+    product_pass = prompt.rsplit("Then finish the access shell and account page", 1)[1].split(
         "#### 2c. Workflow verification gate", 1
     )[0]
     assert "guidance_skills" not in prompt
-    assert "native `design-taste-frontend` skill" in product_pass
-    assert "inspect the existing product before editing" in product_pass
-    assert "Honor the skill's own scope boundary" in product_pass
-    assert "do not apply marketing-page layout rules to the multi-step `/app` product UI" in product_pass
+    assert "Invoke native takyon-product and takyon-app-runtime" in product_pass
+    assert "Re-inspect the existing `product/site` files before editing" in product_pass
+    assert "honor its scope boundary" in product_pass
+    assert "without applying marketing-page layouts to the multi-step `/app` product UI" in product_pass
     assert "preserve useful landing-page direction" in product_pass
-    assert "available image tool is optional" in product_pass
-    assert "`effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`" in product_pass
-    assert "intentionally separate from the Taste landing's medium/60/900 bounds" in product_pass
+    assert "deployment-owned model" in product_pass
+    assert "max_turns" not in product_pass
+    assert "budget_usd" not in product_pass
     assert "#### 3a. Upgrade landing proof" not in prompt
 
 
@@ -251,13 +251,13 @@ def test_new_landing_offers_optional_assets_and_keeps_logo_after_publish():
     )
     landing_heading = "#### 2a. Build and publish the landing page"
     logo_heading = "#### 2b. Add the real logo, then finish the /app access shell + profile"
-    landing_pass = prompt.split(landing_heading, 1)[1].split(
+    landing_pass = prompt.rsplit(landing_heading, 1)[1].split(
         "#### 2a.1. Register Search Console", 1
     )[0]
     landing_lower = landing_pass.lower()
 
     assert "available when original imagery improves the product" in landing_lower
-    assert "safebox-gated image generation" in landing_lower
+    assert "safebox-gated site-image generation" in landing_lower
     assert "images" in landing_lower and "never publication conditions" in landing_lower
 
     # Optional site imagery stays inside the Taste-owned 2a call. The distinct logo workflow
@@ -278,7 +278,7 @@ def test_opted_in_animation_remains_guidance_without_requiring_generated_imagery
         animations=True,
         archetype="web_saas",
     )
-    landing_pass = prompt.split("#### 2a. Build and publish the landing page", 1)[1].split(
+    landing_pass = prompt.rsplit("#### 2a. Build and publish the landing page", 1)[1].split(
         "#### 2a.1. Register Search Console", 1
     )[0]
     assert "explicitly requested continuous landing animation" in landing_pass
@@ -315,21 +315,24 @@ def test_taste_skill_is_byte_exact_pinned_upstream_implementation():
     assert "byte-identical" in provenance
 
 
-def test_taste_landing_worker_has_optional_images_without_browser_precondition():
+def test_taste_landing_agent_has_native_visual_tools_without_a_hard_acceptance_gate():
     source = Path(takyon_core.__file__).read_text(encoding="utf-8")
     prompt = turn_runtime._business_bootstrap_instruction(
         "native-taste-preflight", "Build a polished SaaS", "live", archetype="web_saas"
     )
     assert "TASTE_LANDING_RENDER_PREFLIGHT_CONTRACT" not in source
-    assert "native `design-taste-frontend` skill" in prompt
-    assert "Safebox-gated image generation is available" in prompt
+    assert "`design-taste-frontend`" in prompt.rsplit(
+        "#### 2a. Build and publish the landing page", 1
+    )[1]
+    assert "Safebox-gated site-image generation is available" in prompt
     assert "images, DESIGN.md, screenshots, and visual audits are optional" in prompt
     assert "bounded rendered-viewport preflight" not in prompt
-    dockerfile = (
+    assert "browser_vision" in bootstrap_phases.PHASE_ALLOWED_TOOLS[
+        "landing_build_publish"
+    ]
+    assert not (
         HERMES_ROOT.parent / "deploy" / "argon-alpha-14" / "takyon-claude-worker.Dockerfile"
-    ).read_text(encoding="utf-8")
-    assert "apt-get install" not in dockerfile
-    assert "agent-browser@0.26.0" not in dockerfile
+    ).exists()
 
 
 def test_taste_render_scratch_cleanup_never_follows_symlinks(tmp_path):
@@ -347,23 +350,25 @@ def test_taste_render_scratch_cleanup_never_follows_symlinks(tmp_path):
     assert marker.read_text(encoding="utf-8") == "keep"
 
 
-def test_product_owner_and_design_command_use_native_taste_for_every_worker():
+def test_product_owner_and_design_command_use_native_taste_in_primary_session():
     product = PRODUCT_SKILL.read_text(encoding="utf-8")
     command = DESIGN_COMMAND.read_text(encoding="utf-8")
 
     for text in (product, command):
         assert "design-taste-frontend" in text
-        assert "native Claude Code skill" in text
-        assert "every Agent SDK session" in text
-        assert "guidance_skills" in text
-        assert "DESIGN.md" in text
-        assert "not publication conditions" in text
+        assert "native" in text
         assert "1440x900" not in text
         assert "390x844" not in text
 
-    assert 'guidance_skills: ["taste-frontend"]' not in product
-    assert "guidance_skills: []" not in product
-    assert "`effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`" in product
+    assert "primary SDK session" in product
+    assert "primary Agent SDK session" in command
+    assert "not a publication gate" in product
+    assert "not publication conditions" in command
+    assert "DESIGN.md" in command
+
+    assert "guidance_skills" not in product
+    assert "max_turns" not in product
+    assert "budget_usd" not in product
     assert "For every `product/site` design pass" not in command
 
     upstream = TASTE_UPSTREAM.read_text(encoding="utf-8")
@@ -381,7 +386,8 @@ def test_open_design_templates_and_dependencies_are_removed():
             path.is_file() for path in (creative / f"claude-design-{name}").rglob("*")
         )
     source = Path(takyon_core.__file__).read_text(encoding="utf-8")
-    assert '"/tmp:rw,exec,size=384m"' in source
+    assert '"/tmp:rw,exec,size=384m"' not in source
+    assert "takyon/claude-worker" not in source
     assert '"claude-design-openai"' not in source
     assert '"claude-design-stripe"' not in source
     assert '"claude-design-superhuman"' not in source
@@ -809,7 +815,7 @@ def test_surface_contract_display_name_outranks_slug_and_strategy(tmp_path):
     assert metadata["title"] == "Draftwell"
     assert "qa-proposal-0711" not in payload["businessName"].lower()
     assert "surfaceContext.business" not in read("src/lib/branding.ts")
-    worker_contract = takyon_core._subuser_app_worker_contract_block(
+    agent_contract = takyon_core._subuser_app_agent_contract_block(
         {
             "metadata": {
                 "product_display_name": "Draftwell",
@@ -818,8 +824,8 @@ def test_surface_contract_display_name_outranks_slug_and_strategy(tmp_path):
         },
         plans_configured=True,
     )
-    assert "Canonical customer-visible product name: Draftwell" in worker_contract
-    assert "FINAL WORKFLOW GATE IS ACTIVE" in worker_contract
+    assert "Canonical customer-visible product name: Draftwell" in agent_contract
+    assert "FINAL WORKFLOW GATE IS ACTIVE" in agent_contract
 
     prompt = turn_runtime._business_bootstrap_instruction(
         "qa-proposal-0711",

@@ -2862,39 +2862,16 @@ class EnvironmentProvisioner:
                     return False, f"unit sync failed: {(copied.stderr or '').strip()[:160]}"
             return True, f"{len(unit_specs)} unit(s) synced"
 
-        def _build_operator_worker_image(ip: str) -> "tuple[bool, str]":
-            """Build and verify the revision-pinned coding image without browser requirements."""
-            dockerfile = tree_root / "deploy" / "argon-alpha-14" / "takyon-claude-worker.Dockerfile"
-            if not dockerfile.is_file():
-                return False, "staged revision is missing takyon-claude-worker.Dockerfile"
-            built = subprocess.run(
-                [
-                    "ssh", *ssh_base, f"root@{ip}",
-                    "docker build --tag takyon/claude-worker:node20-chromium-v1 -",
-                ],
-                input=dockerfile.read_bytes(),
-                capture_output=True,
-                timeout=900,
-            )
-            if built.returncode != 0:
-                detail = (built.stderr or built.stdout or b"").decode("utf-8", "replace")
-                return False, f"worker image build failed: {detail.strip()[-240:]}"
+        def _verify_operator_agent_runtime(ip: str) -> "tuple[bool, str]":
+            """Verify the host-native primary SDK and rendered-browser prerequisites."""
             verified = subprocess.run(
                 [
                     "ssh", *ssh_base, f"root@{ip}",
-                    "docker image inspect takyon/claude-worker:node20-chromium-v1 >/dev/null && "
-                    "docker run --rm --entrypoint node "
-                    "takyon/claude-worker:node20-chromium-v1 --version >/dev/null && "
-                    "docker run --rm --entrypoint node "
-                    "--mount type=bind,src=/opt/takyon/hermes-agent-main,dst=/takyon-runtime,readonly "
-                    "--workdir /takyon-runtime takyon/claude-worker:node20-chromium-v1 "
-                    "--input-type=module -e 'import fs from \"node:fs\"; "
-                    "const pkg = JSON.parse(fs.readFileSync(\"package.json\", \"utf8\")); "
-                    "const lock = JSON.parse(fs.readFileSync(\"package-lock.json\", \"utf8\")); "
-                    "const sdk = \"@anthropic-ai/claude-agent-sdk\"; "
-                    "if (!pkg.dependencies?.[sdk] || !lock.packages?.[`node_modules/${sdk}`]) "
-                    "throw new Error(\"Agent SDK dependency is not pinned\"); "
-                    "await import(\"./scripts/takyon-claude-primary-runtime.mjs\");' >/dev/null",
+                    "command -v node >/dev/null && command -v chromium >/dev/null && "
+                    "node -e 'const major=Number(process.versions.node.split(\".\")[0]); "
+                    "if (major < 20) process.exit(1)' && chromium --version >/dev/null && "
+                    "node --check /opt/takyon/hermes-agent-main/scripts/"
+                    "takyon-claude-primary-runtime.mjs >/dev/null",
                 ],
                 capture_output=True,
                 text=True,
@@ -2902,22 +2879,10 @@ class EnvironmentProvisioner:
             )
             if verified.returncode != 0:
                 return False, (
-                    "worker image verification failed: "
+                    "primary Agent SDK host prerequisite verification failed: "
                     f"{(verified.stderr or verified.stdout or '').strip()[-240:]}"
                 )
-            chromium = subprocess.run(
-                [
-                    "ssh", *ssh_base, f"root@{ip}",
-                    "docker run --rm --entrypoint /bin/sh "
-                    "takyon/claude-worker:node20-chromium-v1 -lc "
-                    "'test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null'",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            renderer = "available" if chromium.returncode == 0 else "unavailable (optional)"
-            return True, f"worker image, Node, Agent SDK, and native skill verified; Chromium {renderer}"
+            return True, "host Node, primary Agent SDK runtime, and Chromium verified"
 
         def _prepare_remote_runtime(ip: str, role: str) -> "tuple[bool, str]":
             """Converge the role's locked dependencies before activation."""
@@ -3155,7 +3120,7 @@ class EnvironmentProvisioner:
             if ok:
                 ok, why = _prepare_remote_runtime(ip, role)
             if ok and role == "operator":
-                ok, why = _build_operator_worker_image(ip)
+                ok, why = _verify_operator_agent_runtime(ip)
             if not ok:
                 receipts.append(StepReceipt(role, STATUS_ERROR, "deploy", f"{ip}: {why}"))
                 staging_failed = True

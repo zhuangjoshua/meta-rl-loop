@@ -26,7 +26,6 @@ REMOTE_DASHBOARD_HOST="${TAKYON_REMOTE_DASHBOARD_HOST:-127.0.0.1}"
 REMOTE_DASHBOARD_PORT="${TAKYON_REMOTE_DASHBOARD_PORT:-9119}"
 LOCAL_DASHBOARD_PORT="${TAKYON_LOCAL_DASHBOARD_PORT:-9129}"
 LOCAL_DASHBOARD_URL="${TAKYON_LOCAL_DASHBOARD_URL:-http://127.0.0.1:${LOCAL_DASHBOARD_PORT}}"
-CONTAINER_SAFEBOX_URL="${TAKYON_CONTAINER_SAFEBOX_URL:-http://host.docker.internal:${LOCAL_SAFEBOX_PORT}}"
 LOCAL_PROD_ROOT="${TAKYON_OPERATOR_PROD_ROOT:-$HOME/.takyon-fourmanifold-operator-prod}"
 ACTIVE_LOCAL_WORKER_PREFIX_FILE="${TAKYON_OPERATOR_ACTIVE_WORKER_PREFIX_FILE:-$LOCAL_PROD_ROOT/active-local-worker-prefix}"
 OPERATOR_HOME="${TAKYON_OPERATOR_PROD_HOME:-$LOCAL_PROD_ROOT/operator}"
@@ -317,11 +316,7 @@ load_dev_operator_env() {
     export TAKYON_PROVIDER_BROKER=1
     export TERMINAL_ENV="${TERMINAL_ENV:-docker}"
     export TAKYON_OPERATOR_GATEWAY_BROKER_URL="$LOCAL_SAFEBOX_URL"
-    if [[ "$TERMINAL_ENV" == "docker" ]]; then
-      export TAKYON_CLAUDE_AGENT_BROKER_URL="$CONTAINER_SAFEBOX_URL"
-    else
-      export TAKYON_CLAUDE_AGENT_BROKER_URL="$LOCAL_SAFEBOX_URL"
-    fi
+    export TAKYON_CLAUDE_AGENT_BROKER_URL="$LOCAL_SAFEBOX_URL"
     export TAKYON_STORAGE_BACKEND="${TAKYON_STORAGE_BACKEND:-local}"
     export TAKYON_PG_POOL_SIZE="${TAKYON_DEV_PG_POOL_SIZE:-3}"
     export TAKYON_OPERATOR_USAGE_GATE_DISABLED=1
@@ -349,14 +344,9 @@ load_dev_operator_env() {
   export TAKYON_SAFEBOX_OPERATOR_TOKEN="$(_dev_store_get TAKYON_SAFEBOX_OPERATOR_TOKEN)"
   export TAKYON_PROVIDER_BROKER=1
   export TERMINAL_ENV="${TERMINAL_ENV:-docker}"
-  # Mirror the prod split: the host-side operator shell talks to the local dev Safebox loopback,
-  # while Dockerized Claude product workers need the container-reachable host alias.
+  # The primary Agent SDK talks to the local dev Safebox loopback.
   export TAKYON_OPERATOR_GATEWAY_BROKER_URL="$TAKYON_SAFEBOX_URL"
-  if [[ "$TERMINAL_ENV" == "docker" ]]; then
-    export TAKYON_CLAUDE_AGENT_BROKER_URL="$CONTAINER_SAFEBOX_URL"
-  else
-    export TAKYON_CLAUDE_AGENT_BROKER_URL="$TAKYON_SAFEBOX_URL"
-  fi
+  export TAKYON_CLAUDE_AGENT_BROKER_URL="$TAKYON_SAFEBOX_URL"
   export TAKYON_STORAGE_BACKEND=local
   # Dev twin runs on the Supabase SESSION pooler (15-client cap — role GUCs need session mode). The
   # default 8-conn pool per process (safebox + runtime + worker) exhausts it and starves the job
@@ -681,8 +671,6 @@ keys = {
     'R2_S3_ENDPOINT',
     'R2_S3_REGION',
     'R2_BUCKET',
-    'TERMINAL_DOCKER_IMAGE',
-    'TAKYON_CLAUDE_AGENT_DOCKER_IMAGE',
     'TAKYON_STRICT_MODEL_ROLES',
     'TAKYON_MODEL',
     'TAKYON_CLAUDE_AGENT_MODEL',
@@ -837,15 +825,9 @@ load_operator_env() {
   export TAKYON_DASHBOARD_URL="$LOCAL_DASHBOARD_URL"
   export TAKYON_PROVIDER_BROKER="${TAKYON_PROVIDER_BROKER:-1}"
   export TERMINAL_ENV="${TERMINAL_ENV:-docker}"
-  # The host-side operator shell talks to the localhost tunnel. Dockerized business workers need the
-  # container-reachable host alias. Keep both explicit so CEO chat and Docker compute do not fight over
-  # one Safebox broker URL.
+  # The host-side primary Agent SDK talks to the explicit localhost Safebox tunnel.
   export TAKYON_OPERATOR_GATEWAY_BROKER_URL="$LOCAL_SAFEBOX_URL"
-  if [[ "$TERMINAL_ENV" == "docker" ]]; then
-    export TAKYON_CLAUDE_AGENT_BROKER_URL="$CONTAINER_SAFEBOX_URL"
-  else
-    export TAKYON_CLAUDE_AGENT_BROKER_URL="$LOCAL_SAFEBOX_URL"
-  fi
+  export TAKYON_CLAUDE_AGENT_BROKER_URL="$LOCAL_SAFEBOX_URL"
   export TAKYON_STORAGE_BACKEND="${TAKYON_STORAGE_BACKEND:-supabase_s3}"
   prepare_primary_agent_runtime
   export TAKYON_SESSION_USER_ID="$(resolved_operator_user_id)"
@@ -1514,68 +1496,6 @@ start_worker_tunnel_guard() {
 
   monitor_console_tunnels "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" "$dashboard_tunnel_log" "$WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE" >>"$tunnel_log" 2>&1 &
   WORKER_TUNNEL_GUARD_MONITOR_PID="$!"
-}
-
-require_docker_for_worker() {
-  # Product/site isolation is a dedicated rail: in auto/forced mode it uses Docker even when the
-  # generic terminal backend is local. Skip Docker only when both rails explicitly avoid it.
-  if [[ "${TERMINAL_ENV:-docker}" != "docker" ]]; then
-    case "${TAKYON_CLAUDE_AGENT_DOCKER:-auto}" in
-      0|false|no|off) return 0 ;;
-    esac
-  fi
-  if ! command -v docker >/dev/null 2>&1; then
-    die "Docker CLI is not installed or not on PATH; local worker compute needs Docker Desktop running"
-  fi
-  if ! docker version >/dev/null 2>&1; then
-    die "Docker is not reachable; start Docker Desktop before running the local worker pool"
-  fi
-  local tracked_worker_image="takyon/claude-worker:node20-chromium-v1"
-  local worker_image="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-$tracked_worker_image}"
-  if [[ "$worker_image" == "$tracked_worker_image" ]]; then
-    local worker_dockerfile="$ROOT/deploy/argon-alpha-14/takyon-claude-worker.Dockerfile"
-    [[ -f "$worker_dockerfile" ]] || die "tracked Claude worker Dockerfile is missing: $worker_dockerfile"
-    docker build --tag "$worker_image" - < "$worker_dockerfile" \
-      || die "failed to build tracked Claude worker image: $worker_image"
-  fi
-  # Prove the exact image selected for product work, including operator overrides. Node is a hard
-  # worker dependency; Chromium is an optional visual aid and must never block worker startup.
-  local worker_image_id
-  worker_image_id="$(docker image inspect --format '{{.Id}}' "$worker_image" 2>/dev/null)" \
-    || die "Claude worker image is unavailable: $worker_image"
-  [[ -n "$worker_image_id" ]] || die "Claude worker image has no Docker identity: $worker_image"
-  if ! docker run --rm --entrypoint node "$worker_image" --version >/dev/null; then
-    die "Claude worker image cannot run Node: $worker_image ($worker_image_id)"
-  fi
-  if docker run --rm --entrypoint /bin/sh "$worker_image" -lc \
-    'test -x /usr/bin/chromium && /usr/bin/chromium --version >/dev/null' >/dev/null 2>&1; then
-    echo "Optional Chromium renderer available in Claude worker image: $worker_image" >&2
-  else
-    echo "Optional Chromium renderer unavailable; Claude worker will continue without rendered inspection." >&2
-  fi
-  # One validated image owns both the dedicated product-worker variable and the legacy terminal
-  # fallback inherited by older/nested launch paths. This prevents preflighting one image and
-  # launching another.
-  export TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="$worker_image"
-  export TERMINAL_DOCKER_IMAGE="$worker_image"
-  if ! docker run --rm \
-    --entrypoint /bin/sh \
-    --mount "type=bind,src=$RUNTIME_DIR,dst=/takyon-runtime,readonly" \
-    "$worker_image" \
-    -c 'test -d /takyon-runtime/agent && test -d /takyon-runtime/plugins/takyon' \
-    >/dev/null 2>&1; then
-    die "Docker cannot bind-mount the runtime checkout at $RUNTIME_DIR; move or create the checkout under a Docker Desktop shared path (normally /Users/...) before starting the production worker"
-  fi
-  if ! docker run --rm \
-    --entrypoint node \
-    --mount "type=bind,src=$RUNTIME_DIR,dst=/takyon-runtime,readonly" \
-    --workdir /takyon-runtime \
-    "$worker_image" \
-    --input-type=module \
-    -e 'await import("@anthropic-ai/claude-agent-sdk"); await import("./scripts/takyon-claude-primary-runtime.mjs");' \
-    >/dev/null 2>&1; then
-    die "Claude worker runtime is missing the Agent SDK or cannot start its preflight: $RUNTIME_DIR"
-  fi
 }
 
 worker_preflight_wait_seconds() {
@@ -2362,7 +2282,6 @@ cmd_worker() {
   load_operator_env
   require_tunnel
   cmd_preflight
-  require_docker_for_worker
   # A worker wrapper owns only the pool it starts.  Never stop every local pool here: another
   # operator shell may be building a DIFFERENT business, and cross-business parallelism is a
   # supported production posture.  Durable release fencing rejects incompatible pools, while the
@@ -2433,7 +2352,6 @@ cmd_worker_once() {
   load_operator_env
   require_tunnel
   cmd_preflight
-  require_docker_for_worker
   cd "$RUNTIME_DIR"
   if [[ "${TAKYON_OPERATOR_TUNNELS_MANAGED:-0}" == "1" ]]; then
     exec_takyon_cli worker \
@@ -2710,7 +2628,6 @@ cmd_status() {
   echo "Operator home:     $OPERATOR_HOME"
   echo "Safebox URL:       $LOCAL_SAFEBOX_URL"
   echo "Dashboard URL:     $LOCAL_DASHBOARD_URL"
-  echo "Docker broker URL: $CONTAINER_SAFEBOX_URL"
   echo "Safebox tunnel:    $(if safebox_tunnel_healthy; then echo ok; else echo missing; fi)"
   echo "Dashboard tunnel:  $(if dashboard_tunnel_healthy; then echo ok; else echo missing; fi)"
   local pids

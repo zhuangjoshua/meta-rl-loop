@@ -319,6 +319,31 @@ export function createBridgeMcpServer({ sdk, z, request, toolDefinitions }) {
           args: jsonClone(args || {}),
           toolUseId: cleanString(extra?.toolUseId || extra?.requestId),
         });
+        if (
+          result
+          && typeof result === "object"
+          && !Array.isArray(result)
+          && Array.isArray(result.nativeMcpContent)
+          && result.nativeMcpContent.length > 0
+        ) {
+          const content = result.nativeMcpContent.map((block, index) => {
+            const value = assertJsonObject(block, `native MCP content ${index}`);
+            if (value.type === "text" && typeof value.text === "string" && value.text.length <= 32_768) {
+              return { type: "text", text: value.text };
+            }
+            if (
+              value.type === "image"
+              && value.mimeType === "image/png"
+              && typeof value.data === "string"
+              && value.data.length <= 6 * 1024 * 1024
+              && /^[A-Za-z0-9+/]+={0,2}$/.test(value.data)
+            ) {
+              return { type: "image", data: value.data, mimeType: "image/png" };
+            }
+            fail("bridge_protocol", `invalid native MCP content block ${index}`);
+          });
+          return { content };
+        }
         return { content: [{ type: "text", text: typeof result === "string" ? result : JSON.stringify(result) }] };
       },
       { alwaysLoad: true }

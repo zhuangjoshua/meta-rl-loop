@@ -25,7 +25,7 @@ Return exactly one send-ready post (no variants unless the operator explicitly a
 - One hard thing (real number, tradeoff, product contrast, or direct observation)
 - No links in the tweet body (any link goes in a reply)
 - No hashtags unless explicitly requested; no emojis; no borrowed internet slang
-- Match the durable business X voice artifact
+- Match the business voice in `distribution/voice/x.md`
 
 ## Reject If
 

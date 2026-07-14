@@ -60,7 +60,7 @@ _EGRESS_AUDIENCE = "connection.egress"
 _POSTMARK_SEND_AUDIENCE = "postmark.send"
 
 # ── Operator/platform SESSION capability audience ────────────────────────────────────────────────
-# The operator/platform plane (CEO agent + coding worker + platform web_tools) calls Anthropic /
+# The operator/platform plane (primary Agent SDK CEO + platform web_tools) calls Anthropic /
 # Tavily through the safebox proxy with the stock SDK and a STATIC key, making MANY streaming calls.
 # A single-use-nonce capability cannot cover that. This audience binds a SESSION-scoped operator
 # capability: signed, operator+business-bound, with a per-CALL cost CEILING (``max_cost_microusd``)
@@ -1109,7 +1109,7 @@ def _microusd_to_cents_ceiling(microusd: int) -> int:
 class _OperatorBudgetAdapter:
     """Operator control-plane money rail the OPERATOR proxy routes reserve/settle/release against.
 
-    The operator/platform plane (CEO agent, coding worker, platform web_tools) calls Anthropic / Tavily
+    The operator/platform plane (primary Agent SDK CEO, platform web_tools) calls Anthropic / Tavily
     through the safebox proxy. That spend is OPERATOR spend — it carries NO product ``app_user_id`` and
     no product subscription, so it must be bounded by the OPERATOR's own control-plane billing authority
     (``billing.py``, the Takyon-user -> platform rail), NOT the per-business product usage rail and NOT a

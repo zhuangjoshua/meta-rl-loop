@@ -46,19 +46,6 @@ SDK_ENTRYPOINT_MODES = {
     "bootstrap": "ceo_bootstrap",
     "wake": "ceo_wake",
 }
-SDK_HANDOFF_CAPABILITY_ADAPTERS = frozenset({"mcp", "sandbox", "web"})
-SDK_HANDOFF_CAPABILITY_SCOPES = frozenset(
-    {"current_business", "current_workspace", "current_operator", "current_session"}
-)
-SDK_HANDOFF_CAPABILITY_AUTHORITIES = frozenset(
-    {
-        "operator_session",
-        "explicit_operator_interaction",
-        "creative_credit",
-        "mobile_release",
-        "none",
-    }
-)
 SDK_GLOBAL_OPERATOR_TOOLS = frozenset(
     {
         "business_list_app_connections",
@@ -262,7 +249,7 @@ def sdk_tool_definitions(
     """
 
     # The standalone Takyon CLI does not bootstrap every ambient tool module.
-    # loader.  Register the existing web handlers explicitly when HANDOFF asks
+    # loader. Register the existing web handlers explicitly when policy asks
     # for that toolset so schema discovery and bridge dispatch see the same
     # guarded web_search/web_extract implementations as the dashboard runtime.
     normalized_enabled = {str(name or "").strip() for name in enabled_toolsets}
@@ -319,11 +306,10 @@ def enforce_sdk_mode_tool_policy(
     mode: str,
     tool_definitions: Sequence[Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], SdkModeToolPolicy]:
-    """Apply the compiled HANDOFF policy before schemas reach the SDK.
+    """Apply the code-owned mode tool policy before schemas reach the SDK.
 
-    Skills remain globally discoverable, while their mode selection and tool
-    capabilities are independently enforced. Missing or drifted policy is a
-    deployment error, never permission to expose a broader tool set.
+    Every approved native skill remains discoverable in every mode. This policy
+    limits side effects independently of Claude's description-based skill choice.
     """
 
     normalized_mode = {
@@ -334,7 +320,7 @@ def enforce_sdk_mode_tool_policy(
         "interactive": "interactive",
     }.get(str(mode or "").strip().lower(), "")
     if not normalized_mode:
-        raise ClaudeSdkRuntimeError(f"unsupported SDK HANDOFF mode: {mode!r}")
+        raise ClaudeSdkRuntimeError(f"unsupported SDK invocation mode: {mode!r}")
     try:
         manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     except Exception as exc:
@@ -343,52 +329,21 @@ def enforce_sdk_mode_tool_policy(
         ) from exc
     if not isinstance(manifest, Mapping):
         raise ClaudeSdkRuntimeError("approved skill manifest must be an object")
-    capability_bindings = manifest.get("capability_bindings")
-    capability_tools = manifest.get("capability_tools")
     mode_policies = manifest.get("mode_tool_policy")
-    if (
-        not isinstance(capability_bindings, Mapping)
-        or not isinstance(capability_tools, Mapping)
-        or not isinstance(mode_policies, Mapping)
-    ):
+    if not isinstance(mode_policies, Mapping):
         raise ClaudeSdkRuntimeError(
-            "approved skill manifest omits compiled HANDOFF tool policy"
+            "approved skill manifest omits the compiled SDK runtime policy"
         )
-    if set(capability_bindings) != set(capability_tools):
-        raise ClaudeSdkRuntimeError(
-            "approved skill manifest capability bindings drifted from capability tools"
-        )
-    for capability, raw_binding in capability_bindings.items():
-        if not str(capability or "").strip() or not isinstance(raw_binding, Mapping):
-            raise ClaudeSdkRuntimeError(
-                "SDK HANDOFF capability_bindings contains an invalid entry"
-            )
-        if set(raw_binding) != {"adapter", "tools", "scope", "authority"}:
-            raise ClaudeSdkRuntimeError(
-                f"SDK HANDOFF capability {capability!r} has invalid binding fields"
-            )
-        adapter = str(raw_binding.get("adapter") or "").strip()
-        scope = str(raw_binding.get("scope") or "").strip()
-        authority = str(raw_binding.get("authority") or "").strip()
-        raw_tools = raw_binding.get("tools")
-        compiled_tools = capability_tools.get(capability)
-        if (
-            adapter not in SDK_HANDOFF_CAPABILITY_ADAPTERS
-            or scope not in SDK_HANDOFF_CAPABILITY_SCOPES
-            or authority not in SDK_HANDOFF_CAPABILITY_AUTHORITIES
-            or not isinstance(raw_tools, list)
-            or not raw_tools
-            or any(not isinstance(tool, str) or not tool.strip() for tool in raw_tools)
-            or len(raw_tools) != len(set(raw_tools))
-            or raw_tools != compiled_tools
-        ):
-            raise ClaudeSdkRuntimeError(
-                f"SDK HANDOFF capability {capability!r} has an invalid or drifted binding"
-            )
     raw_policy = mode_policies.get(normalized_mode)
-    if not isinstance(raw_policy, Mapping):
+    if not isinstance(raw_policy, Mapping) or set(raw_policy) != {
+        "allowed_skills",
+        "required_tools",
+        "allowed_tools",
+        "denied_tools",
+        "denied_write_paths",
+    }:
         raise ClaudeSdkRuntimeError(
-            f"approved skill manifest omits {normalized_mode} tool policy"
+            f"approved skill manifest has an invalid {normalized_mode} policy"
         )
 
     def string_list(field: str) -> tuple[str, ...]:
@@ -397,22 +352,22 @@ def enforce_sdk_mode_tool_policy(
             not isinstance(item, str) or not item.strip() for item in value
         ):
             raise ClaudeSdkRuntimeError(
-                f"SDK HANDOFF {normalized_mode}.{field} must be a string list"
+                f"SDK runtime policy {normalized_mode}.{field} must be a string list"
             )
         normalized = tuple(item.strip() for item in value)
         if len(normalized) != len(set(normalized)):
             raise ClaudeSdkRuntimeError(
-                f"SDK HANDOFF {normalized_mode}.{field} must not contain duplicates"
+                f"SDK runtime policy {normalized_mode}.{field} contains duplicates"
             )
         return normalized
 
     raw_inventory = manifest.get("model_tool_inventory")
     inventory_digest = str(manifest.get("model_tool_inventory_digest") or "")
     if not isinstance(raw_inventory, list) or any(
-        not str(item or "").strip() for item in raw_inventory
+        not isinstance(item, str) or not item.strip() for item in raw_inventory
     ):
         raise ClaudeSdkRuntimeError("approved skill manifest has no model tool inventory")
-    manifest_inventory = {str(item).strip() for item in raw_inventory}
+    manifest_inventory = {item.strip() for item in raw_inventory}
     computed_digest = "sha256:" + hashlib.sha256(
         "\0".join(sorted(manifest_inventory)).encode("utf-8")
     ).hexdigest()
@@ -420,16 +375,14 @@ def enforce_sdk_mode_tool_policy(
         raise ClaudeSdkRuntimeError("approved skill model tool inventory digest drifted")
 
     allowed_skills = string_list("allowed_skills")
-    baseline_tools = string_list("baseline_tools")
+    required_tools = string_list("required_tools")
     allowed_tools = string_list("allowed_tools")
-    denied_capabilities = string_list("denied_capabilities")
     denied_tools = string_list("denied_tools")
     denied_write_paths = string_list("denied_write_paths")
     raw_skills = manifest.get("skills")
     if not isinstance(raw_skills, list) or not raw_skills:
         raise ClaudeSdkRuntimeError("approved skill manifest has no skills list")
     manifest_skills: set[str] = set()
-    expected_allowed_skills: set[str] = set()
     for raw_skill in raw_skills:
         if not isinstance(raw_skill, Mapping):
             raise ClaudeSdkRuntimeError("approved skill manifest contains an invalid skill")
@@ -439,115 +392,53 @@ def enforce_sdk_mode_tool_policy(
             not name
             or name in manifest_skills
             or not isinstance(raw_modes, list)
-            or not raw_modes
-            or any(
-                not isinstance(skill_mode, str)
-                or skill_mode not in SDK_ENTRYPOINT_MODES
-                for skill_mode in raw_modes
-            )
-            or len(raw_modes) != len(set(raw_modes))
+            or set(raw_modes) != set(SDK_ENTRYPOINT_MODES)
         ):
             raise ClaudeSdkRuntimeError(
-                "approved skill manifest contains invalid per-skill allowed_modes"
+                "every approved native skill must be available in every SDK mode"
             )
         manifest_skills.add(name)
-        if normalized_mode in raw_modes:
-            expected_allowed_skills.add(name)
-    missing_allowed = expected_allowed_skills - set(allowed_skills)
-    unexpected_allowed = set(allowed_skills) - expected_allowed_skills
-    if missing_allowed or unexpected_allowed or not allowed_skills:
+    if set(allowed_skills) != manifest_skills:
         raise ClaudeSdkRuntimeError(
-            "SDK HANDOFF allowed_skills drifted from per-skill allowed_modes: "
-            f"missing={sorted(missing_allowed)}, extra={sorted(unexpected_allowed)}"
+            "SDK runtime policy must surface every approved native skill: "
+            f"missing={sorted(manifest_skills - set(allowed_skills))}, "
+            f"extra={sorted(set(allowed_skills) - manifest_skills)}"
         )
-    unknown_capabilities = set(denied_capabilities) - {
-        str(name or "").strip() for name in capability_tools
-    }
-    if unknown_capabilities:
-        raise ClaudeSdkRuntimeError(
-            "SDK HANDOFF denied_capabilities are unresolved: "
-            + ", ".join(sorted(unknown_capabilities))
-        )
-    capability_tool_names: set[str] = set()
-    for capability, raw_tools in capability_tools.items():
-        if not str(capability or "").strip() or not isinstance(raw_tools, list):
-            raise ClaudeSdkRuntimeError(
-                "SDK HANDOFF capability_tools contains an invalid entry"
-            )
-        if any(not str(tool or "").strip() for tool in raw_tools):
-            raise ClaudeSdkRuntimeError(
-                f"SDK HANDOFF capability {capability!r} contains an invalid tool"
-            )
-        capability_tool_names.update(str(tool).strip() for tool in raw_tools)
-    inventory = {
-        str(definition.get("name") or "").strip()
+
+    available_definitions = {
+        str(definition.get("name") or "").strip(): dict(definition)
         for definition in tool_definitions
         if str(definition.get("name") or "").strip()
     }
     allowed = set(allowed_tools)
-    if not set(baseline_tools) <= allowed:
+    required = set(required_tools)
+    denied = set(denied_tools)
+    unknown = allowed - manifest_inventory
+    missing = allowed - set(available_definitions)
+    forbidden = allowed & (denied | LEGACY_OR_DELEGATING_TOOLS)
+    ungranted_required = required - allowed
+    if unknown or missing or forbidden or ungranted_required:
         raise ClaudeSdkRuntimeError(
-            f"SDK HANDOFF {normalized_mode} baseline_tools escape allowed_tools"
-        )
-    unresolved_allowed = allowed - capability_tool_names
-    absent_from_manifest_inventory = allowed - manifest_inventory
-    missing_from_inventory = allowed - inventory
-    forbidden_allowed = allowed & LEGACY_OR_DELEGATING_TOOLS
-    if (
-        unresolved_allowed
-        or absent_from_manifest_inventory
-        or missing_from_inventory
-        or forbidden_allowed
-    ):
-        raise ClaudeSdkRuntimeError(
-            "SDK HANDOFF allowed_tools are unresolved or forbidden: "
-            + ", ".join(
-                sorted(
-                    unresolved_allowed
-                    | absent_from_manifest_inventory
-                    | missing_from_inventory
-                    | forbidden_allowed
-                )
-            )
+            "SDK runtime policy allows unavailable or forbidden tools: "
+            + ", ".join(sorted(unknown | missing | forbidden | ungranted_required))
         )
     if not allowed:
         raise ClaudeSdkRuntimeError(
-            f"SDK HANDOFF {normalized_mode}.allowed_tools may not be empty"
+            f"SDK runtime policy {normalized_mode}.allowed_tools may not be empty"
         )
-    baseline_missing = SDK_RUNTIME_BASELINE_TOOLS - inventory
-    if baseline_missing:
-        raise ClaudeSdkRuntimeError(
-            "SDK runtime baseline tools are missing: "
-            + ", ".join(sorted(baseline_missing))
-        )
-    expected = allowed | set(SDK_RUNTIME_BASELINE_TOOLS)
     filtered = [
-        dict(definition)
-        for definition in tool_definitions
-        if str(definition.get("name") or "").strip() in expected
+        available_definitions[name]
+        for name in sorted(allowed)
     ]
-    filtered_names = {
-        str(definition.get("name") or "").strip() for definition in filtered
-    }
-    if filtered_names != expected:
-        raise ClaudeSdkRuntimeError(
-            f"SDK HANDOFF {normalized_mode} tool exposure does not equal its exact allowlist"
-        )
-    handoff_guidance = str(manifest.get("handoff_guidance") or "").strip()
-    if not handoff_guidance:
-        raise ClaudeSdkRuntimeError("approved skill manifest has no HANDOFF guidance")
     policy = SdkModeToolPolicy(
         mode=normalized_mode,
         allowed_skills=allowed_skills,
-        baseline_tools=baseline_tools,
+        required_tools=required_tools,
         allowed_tools=allowed_tools,
-        denied_capabilities=denied_capabilities,
         denied_tools=denied_tools,
         denied_write_paths=denied_write_paths,
-        handoff_guidance=handoff_guidance,
     )
     return filtered, policy
-
 
 def build_primary_sdk_env(
     *,
@@ -647,12 +538,10 @@ class ToolBridgeScope:
 class SdkModeToolPolicy:
     mode: str
     allowed_skills: tuple[str, ...]
-    baseline_tools: tuple[str, ...]
+    required_tools: tuple[str, ...]
     allowed_tools: tuple[str, ...]
-    denied_capabilities: tuple[str, ...]
     denied_tools: tuple[str, ...]
     denied_write_paths: tuple[str, ...]
-    handoff_guidance: str
 
 
 def _skill_resource_tool_definition() -> dict[str, Any]:
@@ -973,23 +862,59 @@ class ScopedToolBridge:
             return {"id": request_id, "ok": True, "result": text}
 
         dispatcher = self._dispatcher
-        if dispatcher is None:
-            from model_tools import handle_function_call
+        if dispatcher is None and name == "browser_vision":
+            from tools.browser_tool import browser_vision
 
-            dispatcher = handle_function_call
-        result = dispatcher(
-            name,
-            args,
-            task_id=self.scope.task_id or None,
-            tool_call_id=tool_use_id or None,
-            session_id=self.scope.session_id or None,
-            user_task=self.scope.user_task or None,
-            enabled_tools=sorted(self._allowed),
-        )
+            result = browser_vision(
+                question=str(args.get("question") or "Inspect this rendered page."),
+                annotate=bool(args.get("annotate", False)),
+                task_id=self.scope.task_id or None,
+                return_native_image=True,
+            )
+        else:
+            if dispatcher is None:
+                from model_tools import handle_function_call
+
+                dispatcher = handle_function_call
+            result = dispatcher(
+                name,
+                args,
+                task_id=self.scope.task_id or None,
+                tool_call_id=tool_use_id or None,
+                session_id=self.scope.session_id or None,
+                user_task=self.scope.user_task or None,
+                enabled_tools=sorted(self._allowed),
+            )
         text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        native_content: object | None = None
+        if name == "browser_vision":
+            try:
+                decoded = json.loads(text)
+            except (TypeError, ValueError):
+                decoded = None
+            if isinstance(decoded, Mapping) and decoded.get("success") is True:
+                candidate = decoded.get("native_mcp_content")
+                if isinstance(candidate, list) and candidate:
+                    native_content = candidate
+                    text = json.dumps(
+                        {
+                            "success": True,
+                            "native_image": True,
+                            "fallback_warning": decoded.get("fallback_warning"),
+                        },
+                        ensure_ascii=False,
+                    )
         if callable(self.on_tool_complete):
             self.on_tool_complete(tool_use_id, name, args, text)
-        return {"id": request_id, "ok": True, "result": text}
+        return {
+            "id": request_id,
+            "ok": True,
+            "result": (
+                {"nativeMcpContent": native_content}
+                if native_content is not None
+                else text
+            ),
+        }
 
     def _session_key(
         self, raw_key: object, *, allow_subpath: bool = True
@@ -1417,7 +1342,7 @@ def run_primary_sdk_subprocess(
         escaped = phase_allowed - mode_allowed
         if escaped:
             raise ClaudeSdkRuntimeError(
-                "phase tool allowlist escapes the HANDOFF mode: "
+                "phase tool allowlist escapes the SDK runtime mode: "
                 + ", ".join(sorted(escaped))
             )
         if not phase_allowed:
@@ -1455,12 +1380,14 @@ def run_primary_sdk_subprocess(
         "systemPrompt": (
             str(system_prompt or "").rstrip()
             + "\n\n"
-            + mode_policy.handoff_guidance
-            + "\n"
+            + "All approved native plugin skills are available in this session. "
+            + "Choose them autonomously from their frontmatter descriptions and load the complete "
+            + "SKILL.md with the native Skill tool. Tool authority remains code-owned and separate "
+            + "from skill selection.\n"
             + SDK_SKILL_RESOURCE_GUIDANCE
-            + "\nActive HANDOFF mode: "
+            + "\nActive SDK runtime mode: "
             + mode_policy.mode
-            + ". Skills approved for this mode: "
+            + ". Available native skills: "
             + ", ".join(mode_policy.allowed_skills)
             + "."
         ),
@@ -1469,7 +1396,7 @@ def run_primary_sdk_subprocess(
         "configDir": env["CLAUDE_CONFIG_DIR"],
         "pluginPath": str(plugin),
         "manifestPath": str(manifest),
-        # The parent policy uses the agnostic HANDOFF modes while the private
+        # The parent policy uses the stable SDK runtime modes while the private
         # subprocess boundary names the exact Takyon invocation kind.  Derive
         # the wire value from the already validated policy instead of trusting
         # a second caller-controlled spelling.
