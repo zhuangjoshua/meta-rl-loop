@@ -11,8 +11,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME_DIR="$ROOT/hermes-agent-main"
 TAKYON_ENTRY="$ROOT/takyon"
-TAKYON_CLI_BIN="$RUNTIME_DIR/.venv/bin/takyon-cli"
-TAKYON_CLI_PYTHON="$RUNTIME_DIR/.venv/bin/python"
+TAKYON_CLI_BIN="${TAKYON_CLI_BIN:-$RUNTIME_DIR/.venv/bin/takyon-cli}"
+TAKYON_CLI_PYTHON="${TAKYON_CLI_PYTHON:-$RUNTIME_DIR/.venv/bin/python}"
 
 SSH_HOST="${TAKYON_OPERATOR_VPS_HOST:-root@137.184.75.57}"
 SSH_KEY="${TAKYON_OPERATOR_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -118,16 +118,19 @@ path = Path(sys.argv[1])
 data = yaml.safe_load(path.read_text()) or {}
 dev_split = data.get("dev_split") or {}
 safebox = dev_split.get("safebox") or {}
+operator = dev_split.get("operator") or {}
 ssh_key_path = str(dev_split.get("ssh_key_path") or "").strip()
-public_ip = str(safebox.get("public_ip") or "").strip()
-private_ip = str(safebox.get("private_ip") or "").strip()
-if not ssh_key_path or not public_ip or not private_ip:
+safebox_public_ip = str(safebox.get("public_ip") or "").strip()
+safebox_private_ip = str(safebox.get("private_ip") or "").strip()
+operator_public_ip = str(operator.get("public_ip") or "").strip()
+if not ssh_key_path or not safebox_public_ip or not safebox_private_ip or not operator_public_ip:
     raise SystemExit(1)
 for key, value in (
-    ("TAKYON_DEV_REMOTE_SAFEBOX_SSH_HOST", f"root@{public_ip}"),
-    ("TAKYON_DEV_REMOTE_SAFEBOX_PUBLIC_IP", public_ip),
-    ("TAKYON_DEV_REMOTE_SAFEBOX_PRIVATE_IP", private_ip),
-    ("TAKYON_DEV_REMOTE_SAFEBOX_SSH_KEY", ssh_key_path),
+    ("TAKYON_DEV_REMOTE_OPERATOR_SSH_HOST", f"root@{operator_public_ip}"),
+    ("TAKYON_DEV_REMOTE_OPERATOR_PUBLIC_IP", operator_public_ip),
+    ("TAKYON_DEV_REMOTE_SAFEBOX_PUBLIC_IP", safebox_public_ip),
+    ("TAKYON_DEV_REMOTE_SAFEBOX_PRIVATE_IP", safebox_private_ip),
+    ("TAKYON_DEV_REMOTE_SSH_KEY", ssh_key_path),
 ):
     print(f"export {key}={shlex.quote(value)}")
 PY
@@ -145,11 +148,11 @@ load_dev_remote_topology() {
   [[ -n "$exports" ]] || return 1
   # shellcheck disable=SC1090
   eval "$exports"
-  [[ -n "${TAKYON_DEV_REMOTE_SAFEBOX_SSH_HOST:-}" ]] || return 1
+  [[ -n "${TAKYON_DEV_REMOTE_OPERATOR_SSH_HOST:-}" ]] || return 1
   [[ -n "${TAKYON_DEV_REMOTE_SAFEBOX_PRIVATE_IP:-}" ]] || return 1
-  [[ -n "${TAKYON_DEV_REMOTE_SAFEBOX_SSH_KEY:-}" ]] || return 1
-  SSH_HOST="$TAKYON_DEV_REMOTE_SAFEBOX_SSH_HOST"
-  SSH_KEY="$TAKYON_DEV_REMOTE_SAFEBOX_SSH_KEY"
+  [[ -n "${TAKYON_DEV_REMOTE_SSH_KEY:-}" ]] || return 1
+  SSH_HOST="$TAKYON_DEV_REMOTE_OPERATOR_SSH_HOST"
+  SSH_KEY="$TAKYON_DEV_REMOTE_SSH_KEY"
   SAFEBOX_PRIVATE_HOST="$TAKYON_DEV_REMOTE_SAFEBOX_PRIVATE_IP"
   SAFEBOX_PRIVATE_PORT="8000"
   return 0
@@ -157,42 +160,7 @@ load_dev_remote_topology() {
 
 fetch_dev_remote_env_exports() {
   load_dev_remote_topology || return 1
-  local -a args=(
-    -i "$SSH_KEY"
-    -o IdentitiesOnly=yes
-    -o StrictHostKeyChecking=accept-new
-  )
-  ssh "${args[@]}" "$SSH_HOST" "python3 - <<'PY'
-from __future__ import annotations
-
-import os
-import shlex
-from pathlib import Path
-
-keys = (
-    'TAKYON_DEV_OPERATOR_DATABASE_URL',
-    'TAKYON_DEV_RUNTIME_DATABASE_URL',
-    'TAKYON_DEV_SAFEBOX_DATABASE_URL',
-    'TAKYON_DEV_MIGRATION_DATABASE_URL',
-    'TAKYON_SAFEBOX_TOKEN',
-    'TAKYON_SAFEBOX_OPERATOR_TOKEN',
-)
-
-values = {}
-env_path = Path('/opt/takyon/.takyon/.env')
-if env_path.exists():
-    for raw_line in env_path.read_text(encoding='utf-8').splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        key, value = line.split('=', 1)
-        values[key.strip()] = value.strip().strip('\"').strip(\"'\")
-
-for key in keys:
-    value = str(os.environ.get(key) or values.get(key) or '').strip()
-    if value:
-        print(f'export {key}={shlex.quote(value)}')
-PY"
+  fetch_operator_env_exports
 }
 
 # Bring up the dev Safebox (its own process, dev store) if its URL is not already answering.
@@ -330,8 +298,13 @@ load_dev_operator_env() {
   fi
   if dev_remote_safebox_configured; then
     load_dev_remote_topology
+    ensure_home
+    local remote_exports
+    remote_exports="$(fetch_dev_remote_env_exports)" \
+      || die "dev operator runtime environment failed parity validation"
     # shellcheck disable=SC1090
-    eval "$(fetch_dev_remote_env_exports)"
+    eval "$remote_exports"
+    verify_local_runtime_release
     export TAKYON_ENV=dev
     export TAKYON_STRIPE_MODE=test
     export TAKYON_HOME="$OPERATOR_HOME"
@@ -340,6 +313,7 @@ load_dev_operator_env() {
     export TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS=1
     export TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS=1
     export TAKYON_SAFEBOX_URL="$LOCAL_SAFEBOX_URL"
+    export TAKYON_DASHBOARD_URL="$LOCAL_DASHBOARD_URL"
     export TAKYON_PROVIDER_BROKER=1
     export TERMINAL_ENV="${TERMINAL_ENV:-docker}"
     export TAKYON_OPERATOR_GATEWAY_BROKER_URL="$LOCAL_SAFEBOX_URL"
@@ -348,7 +322,7 @@ load_dev_operator_env() {
     else
       export TAKYON_CLAUDE_AGENT_BROKER_URL="$LOCAL_SAFEBOX_URL"
     fi
-    export TAKYON_STORAGE_BACKEND=local
+    export TAKYON_STORAGE_BACKEND="${TAKYON_STORAGE_BACKEND:-local}"
     export TAKYON_PG_POOL_SIZE="${TAKYON_DEV_PG_POOL_SIZE:-3}"
     export TAKYON_OPERATOR_USAGE_GATE_DISABLED=1
     export TAKYON_SESSION_USER_ID="$(resolved_operator_user_id)"
@@ -677,7 +651,7 @@ ensure_home() {
 }
 
 fetch_operator_env_exports() {
-  ssh_base "python3 - <<'PY'
+  ssh_base "python3 - '$TARGET' <<'PY'
 from __future__ import annotations
 
 import json
@@ -686,10 +660,15 @@ import shlex
 import subprocess
 import sys
 
+target = str(sys.argv[1] or '').strip().lower()
+if target not in {'prod', 'dev'}:
+    raise SystemExit(f'unsupported operator target: {target}')
+
 keys = {
     'TAKYON_ENV',
     'TAKYON_STRIPE_MODE',
     'TAKYON_OPERATOR_DATABASE_URL',
+    'TAKYON_DEV_OPERATOR_DATABASE_URL',
     'TAKYON_SAFEBOX_TOKEN',
     'TAKYON_SAFEBOX_OPERATOR_TOKEN',
     'TAKYON_STORAGE_BACKEND',
@@ -739,10 +718,11 @@ for part in data:
     if name in keys:
         env[name] = value.decode('utf-8', errors='replace')
 
+database_key = 'TAKYON_DEV_OPERATOR_DATABASE_URL' if target == 'dev' else 'TAKYON_OPERATOR_DATABASE_URL'
 missing = [
     key
     for key in (
-        'TAKYON_OPERATOR_DATABASE_URL',
+        database_key,
         'TAKYON_SAFEBOX_TOKEN',
         'TAKYON_SAFEBOX_OPERATOR_TOKEN',
     )
@@ -752,8 +732,8 @@ if missing:
     raise SystemExit('missing required operator env: ' + ', '.join(missing))
 
 expected_runtime = {
-    'TAKYON_ENV': 'prod',
-    'TAKYON_STRIPE_MODE': 'live',
+    'TAKYON_ENV': target,
+    'TAKYON_STRIPE_MODE': 'test' if target == 'dev' else 'live',
 }
 wrong_runtime = [
     f'{key}={env.get(key) or \"<missing>\"}'
@@ -761,7 +741,7 @@ wrong_runtime = [
     if env.get(key) != expected
 ]
 if wrong_runtime:
-    raise SystemExit('operator runtime pins do not match production contract: ' + ', '.join(wrong_runtime))
+    raise SystemExit(f'operator runtime pins do not match {target} contract: ' + ', '.join(wrong_runtime))
 
 expected_models = {
     'TAKYON_STRICT_MODEL_ROLES': '1',
@@ -786,7 +766,7 @@ wrong = [
     if env.get(key) != expected
 ]
 if wrong:
-    raise SystemExit('operator model pins do not match production contract: ' + ', '.join(wrong))
+    raise SystemExit(f'operator model pins do not match {target} contract: ' + ', '.join(wrong))
 
 manifest_path = '/opt/takyon/hermes-agent-main/.takyon-deploy-artifact.json'
 try:
@@ -804,7 +784,6 @@ PY"
 }
 
 verify_local_runtime_release() {
-  [[ "$TARGET" == "prod" ]] || return 0
   local dirty=""
   local head=""
   local published=""
@@ -815,9 +794,9 @@ verify_local_runtime_release() {
   dirty="$(git -C "$ROOT" status --porcelain --untracked-files=all -- \
     hermes-agent-main takyon scripts/takyon-operator-prod.sh scripts/operator-users.sh \
     scripts/operator-users.conf)"
-  [[ -z "$dirty" ]] || die "refusing production compute from modified runtime source"
+  [[ -z "$dirty" ]] || die "refusing $TARGET compute from modified runtime source"
   git -C "$ROOT" fetch --quiet origin main \
-    || die "could not verify the published production release"
+    || die "could not verify the published main release"
   head="$(git -C "$ROOT" rev-parse HEAD)"
   published="$(git -C "$ROOT" rev-parse refs/remotes/origin/main)"
   [[ "$head" =~ ^[0-9a-f]{40}$ ]] || die "local runtime release is invalid"
@@ -839,8 +818,11 @@ load_operator_env() {
   require_files
   ensure_operator_runtime_deps
   ensure_home
+  local remote_exports
+  remote_exports="$(fetch_operator_env_exports)" \
+    || die "production operator runtime environment failed parity validation"
   # shellcheck disable=SC1090
-  eval "$(fetch_operator_env_exports)"
+  eval "$remote_exports"
   verify_local_runtime_release
 
   export TAKYON_ENV=prod
@@ -899,15 +881,19 @@ unset_raw_runtime_authority_env() {
 require_tunnel() {
   if [[ "$TARGET" == "dev" ]]; then
     if dev_remote_safebox_configured; then
-      if safebox_tunnel_healthy; then
+      load_dev_remote_topology
+      if safebox_tunnel_healthy && dashboard_tunnel_healthy; then
         return 0
       fi
       mkdir -p "$LOCAL_PROD_ROOT/logs"
-      local timestamp tunnel_log tunnel_pid_file
+      local timestamp tunnel_log tunnel_pid_file dashboard_tunnel_log dashboard_tunnel_pid_file
       timestamp="$(date +%Y%m%d-%H%M%S)"
       tunnel_log="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.log"
       tunnel_pid_file="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.pid"
+      dashboard_tunnel_log="$LOCAL_PROD_ROOT/logs/dashboard-tunnel-$timestamp.log"
+      dashboard_tunnel_pid_file="$LOCAL_PROD_ROOT/logs/dashboard-tunnel-$timestamp.pid"
       ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT"
+      ensure_managed_tunnel "Dev operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$dashboard_tunnel_pid_file" dashboard_tunnel_healthy "$LOCAL_DASHBOARD_PORT"
       return 0
     fi
     ensure_dev_safebox_up
@@ -1453,7 +1439,7 @@ monitor_console_tunnels() {
         "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" \
         "$safebox_log" "$safebox_pid_file" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT" || true
     fi
-    if [[ "$TARGET" == "dev" ]]; then
+    if [[ "$TARGET" == "dev" ]] && ! dev_remote_safebox_configured; then
       continue
     fi
     if ! dashboard_tunnel_healthy; then
@@ -1479,7 +1465,7 @@ cleanup_worker_tunnel_guard() {
   fi
   if [[ -n "${WORKER_TUNNEL_GUARD_CONSUMER_PID:-}" ]]; then
     release_managed_tunnel_consumer "$LOCAL_SAFEBOX_PORT" "$WORKER_TUNNEL_GUARD_CONSUMER_PID" "${WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE:-}" || true
-    if [[ "$TARGET" != "dev" ]]; then
+    if [[ "$TARGET" != "dev" ]] || dev_remote_safebox_configured; then
       release_managed_tunnel_consumer "$LOCAL_DASHBOARD_PORT" "$WORKER_TUNNEL_GUARD_CONSUMER_PID" "${WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE:-}" || true
     fi
   fi
@@ -1517,6 +1503,7 @@ start_worker_tunnel_guard() {
       return 0
     fi
     ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT" "$WORKER_TUNNEL_GUARD_CONSUMER_PID"
+    ensure_managed_tunnel "Dev operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE" dashboard_tunnel_healthy "$LOCAL_DASHBOARD_PORT" "$WORKER_TUNNEL_GUARD_CONSUMER_PID"
     monitor_console_tunnels "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" "$dashboard_tunnel_log" "$WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE" >>"$tunnel_log" 2>&1 &
     WORKER_TUNNEL_GUARD_MONITOR_PID="$!"
     return 0
@@ -1913,7 +1900,7 @@ cmd_safebox_tunnel() {
 
 cmd_dashboard_tunnel() {
   if [[ "$TARGET" == "dev" ]]; then
-    die "dev remote mode does not expose a dashboard tunnel yet"
+    load_dev_remote_topology || die "dev remote operator metadata missing; run 'takyon env create dev'"
   fi
   require_files
   echo "Opening operator dashboard tunnel: $LOCAL_DASHBOARD_URL -> $REMOTE_DASHBOARD_HOST:$REMOTE_DASHBOARD_PORT via $SSH_HOST" >&2
@@ -1923,8 +1910,7 @@ cmd_dashboard_tunnel() {
 
 cmd_tunnel() {
   if [[ "$TARGET" == "dev" ]]; then
-    cmd_safebox_tunnel
-    return 0
+    load_dev_remote_topology || die "dev remote operator metadata missing; run 'takyon env create dev'"
   fi
   require_files
   echo "Opening Safebox + operator dashboard tunnels:" >&2
@@ -2626,7 +2612,7 @@ cmd_console() {
     fi
     if [[ -n "${tunnel_consumer_pid:-}" ]]; then
       release_managed_tunnel_consumer "$LOCAL_SAFEBOX_PORT" "$tunnel_consumer_pid" "$tunnel_pid_file" || true
-      if [[ "$TARGET" != "dev" ]]; then
+      if [[ "$TARGET" != "dev" ]] || dev_remote_safebox_configured; then
         release_managed_tunnel_consumer "$LOCAL_DASHBOARD_PORT" "$tunnel_consumer_pid" "$dashboard_tunnel_pid_file" || true
       fi
     fi
@@ -2634,13 +2620,12 @@ cmd_console() {
   }
   trap cleanup EXIT INT TERM
 
-  # Prod always tunnels Safebox+dashboard. Dev remote mode tunnels Safebox only; dev local mode
-  # still runs its own local safebox process.
-  if [[ "$TARGET" != "dev" ]]; then
+  # Every remote operator plane exposes the same Safebox + dashboard tunnel pair. The legacy
+  # Mac-hosted dev fallback keeps only its local Safebox process.
+  if [[ "$TARGET" != "dev" ]] || dev_remote_safebox_configured; then
+    [[ "$TARGET" != "dev" ]] || load_dev_remote_topology
     ensure_managed_tunnel "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT" "$tunnel_consumer_pid"
     ensure_managed_tunnel "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$dashboard_tunnel_pid_file" dashboard_tunnel_healthy "$LOCAL_DASHBOARD_PORT" "$tunnel_consumer_pid"
-  elif dev_remote_safebox_configured; then
-    ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT" "$tunnel_consumer_pid"
   fi
 
   load_operator_env
@@ -2698,6 +2683,9 @@ cmd_console() {
 
 cmd_vps_worker() {
   local action="${1:-status}"
+  if [[ "$TARGET" == "dev" ]]; then
+    load_dev_remote_topology || die "dev remote operator metadata missing; run 'takyon env create dev'"
+  fi
   case "$action" in
     status)
       ssh_base "systemctl is-enabled takyon-worker.service 2>/dev/null || true; systemctl is-active takyon-worker.service 2>/dev/null || true"
@@ -2715,7 +2703,10 @@ cmd_vps_worker() {
 }
 
 cmd_status() {
-  echo "Local prod root:   $LOCAL_PROD_ROOT"
+  if [[ "$TARGET" == "dev" ]] && dev_remote_safebox_configured; then
+    load_dev_remote_topology
+  fi
+  echo "Local operator root: $LOCAL_PROD_ROOT"
   echo "Operator home:     $OPERATOR_HOME"
   echo "Safebox URL:       $LOCAL_SAFEBOX_URL"
   echo "Dashboard URL:     $LOCAL_DASHBOARD_URL"
@@ -2767,6 +2758,10 @@ Common flow:
   scripts/takyon-operator-prod.sh console 1 --user-id 150e4213-4006-4dc1-9cf3-ca7ab3b4696f --shells 4
 EOF
 }
+
+if [[ "${TAKYON_OPERATOR_LIB_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 command="${1:-shell}"
 case "$command" in

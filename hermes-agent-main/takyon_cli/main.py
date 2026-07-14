@@ -10774,6 +10774,7 @@ def main():
     for _action, _help in (
         ("create", "Stand up the environment's twins (idempotent; re-run = no-op)"),
         ("status", "Report the environment's current state without side effects"),
+        ("deploy", "Deploy the exact published origin/main revision to every dev plane"),
         ("restart", "Drain-aware rolling restart of the env's replicas (zero requests lost)"),
         ("revoke-node", "Revoke ONE replica's scoped credentials (DB role + transport token)"),
         ("destroy", "Tear down the environment's twins (refuses live state unless --force)"),
@@ -10784,6 +10785,11 @@ def main():
             _sub.add_argument(
                 "node_name",
                 help="Replica node name (e.g. takyon-dev-subuser-2); re-enroll via `takyon env create`",
+            )
+        if _action == "deploy":
+            _sub.add_argument(
+                "--rev",
+                help="Explicit origin/main SHA; any non-main revision is refused",
             )
         if _action == "destroy":
             _sub.add_argument(

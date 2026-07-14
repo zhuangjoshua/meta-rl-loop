@@ -136,6 +136,26 @@ def test_prod_cli_never_executes_a_cross_worktree_console_script_shim():
     assert '"$TAKYON_CLI_BIN" "$@"' not in exec_cli
 
 
+def test_dev_thin_client_targets_operator_and_private_safebox(tmp_path):
+    config = tmp_path / "environments" / "dev" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "dev_split:\n"
+        "  ssh_key_path: /tmp/dev-key\n"
+        "  operator:\n    public_ip: 203.0.113.10\n"
+        "  safebox:\n    public_ip: 203.0.113.20\n    private_ip: 10.200.0.5\n",
+        encoding="utf-8",
+    )
+    command = (
+        "set -euo pipefail; export TAKYON_OPERATOR_TARGET=dev TAKYON_OPERATOR_LIB_ONLY=1; "
+        f"export TAKYON_DEV_STORE={tmp_path!s}; source {PROD_SCRIPT!s}; "
+        "load_dev_remote_topology; "
+        "printf '%s|%s|%s' \"$SSH_HOST\" \"$SAFEBOX_PRIVATE_HOST\" \"$SSH_KEY\""
+    )
+    result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, check=True)
+    assert result.stdout == "root@203.0.113.10|10.200.0.5|/tmp/dev-key"
+
+
 def test_shared_tunnel_monitor_and_initial_start_use_one_reconciler():
     script = _script_source()
     monitor = script[
@@ -482,7 +502,7 @@ def test_prod_worker_preflight_proves_runtime_checkout_is_docker_bindable():
     assert "docker image inspect --format '{{.Id}}'" in preflight
     assert "--entrypoint node" in preflight
     assert "@anthropic-ai/claude-agent-sdk" in preflight
-    assert "validateNativeTasteSkill" in preflight
+    assert "takyon-claude-primary-runtime.mjs" in preflight
     assert "Optional Chromium renderer unavailable" in preflight
     assert "agent-browser" not in preflight
 

@@ -90,6 +90,8 @@ def test_dev_manifest_parses_and_has_required_keys():
     assert data["droplets"]["count"] == 2
     assert data["droplets"]["role"] == "subuser"
     assert data["droplets"]["safebox_host"]["enabled"] is True
+    assert data["droplets"]["operator_host"]["enabled"] is True
+    assert data["code_revision"] == "origin/main"
     assert data["load_balancer"]["enabled"] is True
     assert data["load_balancer"]["health_check"]["path"] == "/healthz"
     # The dev VPC must not be the prod VPC range.
@@ -418,6 +420,10 @@ def test_auth0_create_is_idempotent_when_app_exists():
                   "mgmt_token_alias": "TAKYON_AUTH0_MGMT_TOKEN", "domain_alias": "AUTH0_DOMAIN"},
     }
     http = FakeHttp(responses={
+        ("GET", "/clients/cid_1"): {
+            "name": "Takyon Dev", "app_type": "regular_web",
+            "callbacks": [], "allowed_logout_urls": [], "web_origins": [],
+        },
         ("GET", "/clients"): [{"client_id": "cid_1", "name": "Takyon Dev"}],
     })
     prov = _provisioner(
@@ -429,6 +435,41 @@ def test_auth0_create_is_idempotent_when_app_exists():
     assert receipt.status == ep.STATUS_EXISTS
     assert receipt.data["client_id"] == "cid_1"
     assert all(m == "GET" for m, _ in http.calls)
+
+
+def test_auth0_create_converges_existing_callback_drift():
+    desired = ["http://localhost:9129/callback"]
+    manifest = {
+        "name": "dev",
+        "domains": {"company_base": "dev.coscale.app"},
+        "database": {"enabled": False},
+        "safebox": {"enabled": False},
+        "auth0": {
+            "enabled": True, "application_name": "Takyon Dev",
+            "mgmt_token_alias": "TAKYON_AUTH0_MGMT_TOKEN", "domain_alias": "AUTH0_DOMAIN",
+            "callback_urls": desired, "logout_urls": ["http://localhost:9129"],
+            "web_origins": ["http://localhost:9129"],
+        },
+    }
+    http = FakeHttp(responses={
+        ("GET", "/clients/cid_1"): {
+            "name": "Takyon Dev", "app_type": "regular_web", "callbacks": [],
+            "allowed_logout_urls": [], "web_origins": [],
+        },
+        ("GET", "/clients?"): [{"client_id": "cid_1", "name": "Takyon Dev"}],
+        ("PATCH", "/clients/cid_1"): {},
+    })
+    prov = _provisioner(
+        manifest=manifest,
+        safebox_values={"TAKYON_AUTH0_MGMT_TOKEN": "tok", "AUTH0_DOMAIN": "dev-x.us.auth0.com"},
+        http=http,
+    )
+
+    receipt = prov._create_auth0()
+
+    assert receipt.status == ep.STATUS_CREATED
+    patch = next(r for r in http.requests if r["method"] == "PATCH")
+    assert patch["body"]["callbacks"] == desired
 
 
 # ── status ───────────────────────────────────────────────────────────────────────────────────
@@ -750,6 +791,28 @@ def test_droplets_create_replicated_creates_only_missing(tmp_path):
     assert len(posts) == 2
     for post in posts:
         assert "takyon-env-dev" in post["body"]["tags"]
+
+
+def test_droplets_create_includes_dedicated_operator_singleton(tmp_path):
+    manifest = _do_manifest(tmp_path)
+    manifest["droplets"]["operator_host"] = {
+        "enabled": True, "name": "takyon-dev-operator", "size": "s-1vcpu-2gb",
+    }
+    http = FakeHttp(responses={
+        ("GET", "/droplets?"): {"droplets": []},
+        ("POST", "/droplets"): {"droplet": {"id": 999}},
+    })
+    prov = _provisioner(manifest=manifest, safebox_values=_DO_VALUES, http=http)
+
+    receipt = prov._create_droplets()
+
+    by_name = {d["name"]: d for d in receipt.data["droplets"]}
+    assert by_name["takyon-dev-operator"]["role"] == "operator"
+    operator_post = next(
+        r for r in http.requests
+        if r["method"] == "POST" and r["body"]["name"] == "takyon-dev-operator"
+    )
+    assert "takyon-env-dev-operator" in operator_post["body"]["tags"]
 
 
 def test_droplets_create_is_idempotent_when_all_exist(tmp_path):
@@ -1376,7 +1439,7 @@ def test_dev_deploy_stages_every_host_then_migrates_before_any_restart():
     assert "docker image inspect takyon/claude-worker:node20-chromium-v1" in source
     assert "--entrypoint node" in source
     assert "@anthropic-ai/claude-agent-sdk" in source
-    assert "validateNativeTasteSkill" in source
+    assert "prepare-claude-agent-sdk-runtime.sh" in source
     assert "unavailable (optional)" in source
     assert "agent-browser" not in source
     assert 'src_tree / ".takyon-deploy-artifact.json"' in source
@@ -1390,6 +1453,13 @@ def test_takyon_env_restart_subcommand_registered():
     assert args is not None, "takyon env restart dev did not dispatch to cmd_env"
     assert getattr(args, "env_action") == "restart"
     assert getattr(args, "env_name") == "dev"
+
+
+def test_takyon_env_deploy_subcommand_registered():
+    args = _parse_via_main(["env", "deploy", "dev", "--rev", "origin/main"])
+    assert args is not None
+    assert getattr(args, "env_action") == "deploy"
+    assert getattr(args, "rev") == "origin/main"
 
 
 # ── per-replica scoped credentials (Stage 4b hardening bullet): enroll / revoke / idempotence ──

@@ -49,16 +49,30 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TREE="$ROOT_DIR/hermes-agent-main"
 STORE="${TAKYON_DEV_STORE:-$(cd "$ROOT_DIR/.." && pwd)/takyon/.takyon-dev-safebox/.env}"
 KEY="${TAKYON_DEV_KEY:-$HOME/.ssh/takyon_dev_split}"
+SUBUSER_SYNC_KEY="${TAKYON_DEV_SUBUSER_SYNC_KEY:-$HOME/.ssh/takyon_dev_subuser_sync}"
+SUBUSER_HOSTS="${TAKYON_DEV_SUBUSER_HOSTS:-}"
+OPERATOR_NODE="${TAKYON_DEV_OPERATOR_NODE:-takyon-dev-operator}"
+OPERATOR_VPC_IP="${TAKYON_DEV_OPERATOR_VPC_IP:-}"
 SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "root@$HOST")
 
 [[ -f "$STORE" ]] || { echo "dev store not found: $STORE" >&2; exit 1; }
 [[ -f "$KEY" ]] || { echo "dev ssh key not found: $KEY" >&2; exit 1; }
+if [[ "$ROLE" == "operator" || "$ROLE" == "subuser" ]]; then
+  if [[ ! -f "$SUBUSER_SYNC_KEY" || ! -f "$SUBUSER_SYNC_KEY.pub" ]]; then
+    mkdir -p "$(dirname "$SUBUSER_SYNC_KEY")"
+    ssh-keygen -q -t ed25519 -N '' -C 'takyon-dev-operator-to-subuser' -f "$SUBUSER_SYNC_KEY"
+  fi
+fi
 case "$ROLE" in subuser|safebox|operator) ;; *) echo "role must be subuser|safebox|operator" >&2; exit 1;; esac
+if [[ "$ROLE" == "safebox" ]]; then
+  [[ -n "$OPERATOR_VPC_IP" ]] || { echo "TAKYON_DEV_OPERATOR_VPC_IP is required for safebox parity" >&2; exit 1; }
+fi
 # For the operator role VPC_IP is the DEV SAFEBOX private VPC IP (the dashboard/worker resolve
 # provider secrets from http://$VPC_IP:8000). The claude-agent build image is overridable.
 TRACKED_WORKER_IMAGE="takyon/claude-worker:node20-chromium-v1"
 DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-$TRACKED_WORKER_IMAGE}"
 WORKER_DOCKERFILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-claude-worker.Dockerfile"
+PREPARE_PRIMARY_AGENT_RUNTIME="$ROOT_DIR/scripts/prepare-claude-agent-sdk-runtime.sh"
 
 store_get() { grep -m1 "^$1=" "$STORE" | cut -d= -f2- || true; }
 
@@ -70,11 +84,27 @@ echo "→ [$NODE_NAME] preparing host"
 "
 
 if [[ "$ROLE" == "operator" ]]; then
+  [[ -n "$SUBUSER_HOSTS" ]] || { echo "TAKYON_DEV_SUBUSER_HOSTS is required for operator publish parity" >&2; exit 1; }
+  [[ -x "$PREPARE_PRIMARY_AGENT_RUNTIME" ]] || { echo "Agent SDK runtime helper not found: $PREPARE_PRIMARY_AGENT_RUNTIME" >&2; exit 1; }
   echo "→ [$NODE_NAME] operator host prep (docker + user/linger + agent image) — mirrors prod bootstrap-host.sh"
   "${SSH[@]}" "set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq docker.io ffmpeg
+    apt-get install -y -qq ca-certificates curl gnupg rsync caddy docker.io ffmpeg
+    node_major=\"\$(node -p 'process.versions.node.split(\".\")[0]' 2>/dev/null || true)\"
+    if [[ ! \"\$node_major\" =~ ^[0-9]+\$ ]] || (( node_major < 20 )); then
+      install -d -m 0755 /etc/apt/keyrings
+      curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
+      chmod 0644 /etc/apt/keyrings/nodesource.gpg
+      printf '%s\n' \
+        'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main' \
+        > /etc/apt/sources.list.d/nodesource.list
+      apt-get update -qq
+      apt-get install -y -qq nodejs
+    fi
+    node -e 'const major=Number(process.versions.node.split(\".\")[0]); if (major < 20) process.exit(1)'
+    npm --version >/dev/null
     # deno for the product-action sandbox, installed where the ProtectHome=true units can reach it.
     if ! command -v deno >/dev/null 2>&1 && [ ! -x /usr/local/bin/deno ]; then
       curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y >/dev/null 2>&1 || true
@@ -85,7 +115,9 @@ if [[ "$ROLE" == "operator" ]]; then
       useradd --system --user-group --home-dir /opt/takyon --shell /usr/sbin/nologin takyon
     fi
     getent group docker >/dev/null || groupadd docker
-    id -nG takyon | grep -qw docker || usermod -aG docker takyon
+    if id -nG takyon | grep -qw docker; then
+      gpasswd -d takyon docker >/dev/null 2>&1 || deluser takyon docker >/dev/null 2>&1 || true
+    fi
     takyon_uid=\$(id -u takyon)
     # user-manager + cgroup delegation for the product-action systemd-run --user --scope carve-out.
     loginctl enable-linger takyon
@@ -93,6 +125,11 @@ if [[ "$ROLE" == "operator" ]]; then
     printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > /etc/systemd/system/user@.service.d/delegate.conf
     systemctl daemon-reload
     systemctl restart \"user@\${takyon_uid}.service\" || true
+    runuser -u takyon -- env \
+      XDG_RUNTIME_DIR=\"/run/user/\${takyon_uid}\" \
+      DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/\${takyon_uid}/bus\" \
+      systemd-run --user --scope --quiet \
+        -p CPUQuota=20% -p MemoryMax=64M -p TasksMax=8 -- /bin/true
     systemctl enable docker >/dev/null
     systemctl start docker
     systemctl is-active --quiet docker
@@ -201,6 +238,9 @@ elif [[ "$ROLE" == "operator" ]]; then
     printf 'TAKYON_DEV_MIGRATION_DATABASE_URL=%s\n' "$(store_get TAKYON_DEV_MIGRATION_DATABASE_URL)"
     printf 'TAKYON_SAFEBOX_TOKEN=%s\n' "$(store_get TAKYON_DEV_SAFEBOX_TOKEN)"
     printf 'TAKYON_SAFEBOX_OPERATOR_TOKEN=%s\n' "$(store_get TAKYON_SAFEBOX_OPERATOR_TOKEN)"
+    printf 'TAKYON_SUBUSER_VPS_HOSTS=%s\n' "$SUBUSER_HOSTS"
+    printf 'TAKYON_SUBUSER_VPS_USER=root\n'
+    printf 'TAKYON_SUBUSER_VPS_SSH_KEY=/opt/takyon/secrets/takyon-subuser-sync.key\n'
   } > "$TMPENV"
 else
   # Dev safebox = the dev store minus infra-only aliases (DO token, ssh cidr, mac-local safebox
@@ -221,6 +261,10 @@ scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
 rm -f "$TMPENV"; trap - EXIT
 
 if [[ "$ROLE" == "operator" ]]; then
+  "${SSH[@]}" "install -d -o takyon -g takyon -m 0700 /opt/takyon/secrets"
+  scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+    "$SUBUSER_SYNC_KEY" "root@$HOST:/opt/takyon/secrets/takyon-subuser-sync.key"
+  "${SSH[@]}" "chown takyon:takyon /opt/takyon/secrets/takyon-subuser-sync.key; chmod 0600 /opt/takyon/secrets/takyon-subuser-sync.key"
   # The CEO runtime config ($TAKYON_HOME/config.yaml — model.provider/default, etc.) is NOT part of
   # the runtime tree; the Mac rail copies it at launch, so the droplet needs it installed here or the
   # worker's ceo_bootstrap fails with "model config missing model.provider, model.default".
@@ -233,6 +277,8 @@ if [[ "$ROLE" == "operator" ]]; then
   else
     echo "⚠ no config.yaml at $CONFIG_SRC — the CEO will fail on missing model config; set TAKYON_DEV_CONFIG_YAML" >&2
   fi
+  scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+    "$PREPARE_PRIMARY_AGENT_RUNTIME" "root@$HOST:/root/prepare-claude-agent-sdk-runtime.sh"
   echo "→ [$NODE_NAME] operator units (docker-broker + worker + dashboard) rendered + started"
   # The units' BindPaths=/run/user/<uid> must use the ACTUAL takyon uid on THIS host (a fresh dev
   # droplet rarely lands on prod's 995), so resolve it and render __TAKYON_UID__.
@@ -251,6 +297,14 @@ if [[ "$ROLE" == "operator" ]]; then
     chown takyon:takyon /opt/takyon
     chown -R takyon:takyon /opt/takyon/.takyon
     chmod 600 /opt/takyon/.takyon/.env
+    chmod 0755 /root/prepare-claude-agent-sdk-runtime.sh
+    cp /root/prepare-claude-agent-sdk-runtime.sh /opt/takyon/prepare-claude-agent-sdk-runtime.sh
+    chown root:root /opt/takyon/prepare-claude-agent-sdk-runtime.sh
+    chmod 0755 /opt/takyon/prepare-claude-agent-sdk-runtime.sh
+    runuser -u takyon -- env \
+      TAKYON_PYTHON=/opt/takyon/hermes-agent-main/.venv/bin/python \
+      /opt/takyon/prepare-claude-agent-sdk-runtime.sh /opt/takyon /opt/takyon/.takyon >/dev/null
+    rm -f /root/prepare-claude-agent-sdk-runtime.sh
     systemctl daemon-reload
     for SVC in takyon-docker-broker takyon-worker takyon-dashboard; do systemctl enable \$SVC.service >/dev/null; done
     # Order: docker authority first, then the drain worker, then the dashboard front.
@@ -265,6 +319,17 @@ if [[ "$ROLE" == "operator" ]]; then
 fi
 
 if [[ "$ROLE" == "subuser" ]]; then
+  echo "→ [$NODE_NAME] operator-to-subuser publish key"
+  scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+    "$SUBUSER_SYNC_KEY.pub" "root@$HOST:/root/takyon-dev-subuser-sync.pub"
+  "${SSH[@]}" "set -euo pipefail
+    install -d -m 0700 /root/.ssh
+    touch /root/.ssh/authorized_keys
+    chmod 0600 /root/.ssh/authorized_keys
+    key=\$(cat /root/takyon-dev-subuser-sync.pub)
+    grep -qxF \"\$key\" /root/.ssh/authorized_keys || printf '%s\n' \"\$key\" >> /root/.ssh/authorized_keys
+    rm -f /root/takyon-dev-subuser-sync.pub
+  "
   echo "→ [$NODE_NAME] caddy front (:80 → loopback uvicorn, prod topology; node-identity header)"
   TMPCADDY="$(mktemp)"
   sed -e "s/__NODE_NAME__/$NODE_NAME/g" "$SCRIPT_DIR/Caddyfile.dev" > "$TMPCADDY"
@@ -288,6 +353,7 @@ UNIT_TMPL="$SCRIPT_DIR/takyon-$( [[ "$ROLE" == subuser ]] && echo subuser || ech
 SERVICE_NAME="$( [[ "$ROLE" == subuser ]] && echo takyon-subuser || echo takyon-safebox ).service"
 TMPUNIT="$(mktemp)"
 sed -e "s/__NODE_NAME__/$NODE_NAME/g" -e "s/__SAFEBOX_VPC_IP__/$VPC_IP/g" -e "s/__BIND_IP__/$VPC_IP/g" \
+  -e "s/__OPERATOR_NODE__/$OPERATOR_NODE/g" -e "s/__OPERATOR_VPC_IP__/$OPERATOR_VPC_IP/g" \
   "$UNIT_TMPL" > "$TMPUNIT"
 scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$TMPUNIT" "root@$HOST:/etc/systemd/system/$SERVICE_NAME"

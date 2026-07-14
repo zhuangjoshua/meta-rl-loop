@@ -330,6 +330,7 @@ class EnvironmentProvisioner:
         receipts.append(self._append_receipt(self._create_droplets()))
         receipts.append(self._append_receipt(self._create_load_balancer()))
         receipts.append(self._append_receipt(self._create_firewall()))
+        receipts.append(self._append_receipt(self._bootstrap_missing_hosts()))
         receipts.append(self._append_receipt(self._register_replica_nodes()))
         receipts.append(self._append_receipt(self._enroll_replica_credentials()))
         receipts.append(self._append_receipt(self._write_config(receipts)))
@@ -535,7 +536,7 @@ class EnvironmentProvisioner:
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
         # === REAL Auth0 Management API call (gated behind the resolved token) ===
-        # Idempotent: look up an existing application by name before creating one.
+        # Idempotent and convergent: an existing application is patched to the manifest contract.
         try:
             existing = self.http.request(
                 "GET",
@@ -547,10 +548,35 @@ class EnvironmentProvisioner:
             return StepReceipt("auth0", STATUS_ERROR, "create", f"auth0 clients list failed: {exc}")
         for client in (existing if isinstance(existing, list) else []):
             if isinstance(client, dict) and str(client.get("name") or "") == app_name:
+                client_id = str(client.get("client_id") or "").strip()
+                body = {
+                    "name": app_name,
+                    "app_type": "regular_web",
+                    "callbacks": list(cfg.get("callback_urls") or []),
+                    "allowed_logout_urls": list(cfg.get("logout_urls") or []),
+                    "web_origins": list(cfg.get("web_origins") or []),
+                }
+                try:
+                    current = self.http.request(
+                        "GET", f"{base}/clients/{urllib.parse.quote(client_id)}", headers=headers,
+                    )
+                    if not isinstance(current, dict):
+                        raise EnvironmentProvisionError("auth0 client read returned a non-object")
+                    changed = any(current.get(key) != value for key, value in body.items())
+                    if changed:
+                        self.http.request(
+                            "PATCH", f"{base}/clients/{urllib.parse.quote(client_id)}",
+                            headers=headers, body=body,
+                        )
+                except Exception as exc:
+                    return StepReceipt(
+                        "auth0", STATUS_ERROR, "create", f"auth0 application convergence failed: {exc}",
+                    )
                 return StepReceipt(
-                    "auth0", STATUS_EXISTS, "create",
-                    f"auth0 application {app_name!r} already exists",
-                    data={"client_id": client.get("client_id")},
+                    "auth0", STATUS_CREATED if changed else STATUS_EXISTS, "create",
+                    (f"updated auth0 application {app_name!r}" if changed
+                     else f"auth0 application {app_name!r} is current"),
+                    data={"client_id": client_id},
                 )
 
         body = {
@@ -861,8 +887,9 @@ class EnvironmentProvisioner:
             data={"ssh_key_id": (key or {}).get("id"), "fingerprint": (key or {}).get("fingerprint")},
         )
 
-    # (f3) droplets — the REPLICATED subuser split (count × name_prefix-N) plus the optional
-    # singleton dev safebox host (the secret authority is deliberately NOT replicated).
+    # (f3) droplets — the replicated subuser split plus the singleton Safebox and operator hosts.
+    # This is the same three-role compute topology as production; only the isolated environment
+    # slices and replica count are manifest data.
     def _create_droplets(self) -> StepReceipt:
         cfg = self.manifest.get("droplets") or {}
         if not cfg.get("enabled", False):
@@ -879,7 +906,7 @@ class EnvironmentProvisioner:
         size = str(cfg.get("size") or "s-1vcpu-2gb").strip()
         headers = self._do_headers(token)
 
-        # Desired set: the N replicas, plus the singleton safebox host when declared.
+        # Desired set: the N subuser replicas plus the singleton authority/compute hosts.
         desired: list[dict[str, Any]] = [
             {"name": f"{prefix}-{i}", "role": role, "size": size} for i in range(1, count + 1)
         ]
@@ -889,6 +916,15 @@ class EnvironmentProvisioner:
                 "name": str(sb_host.get("name") or f"takyon-{self.name}-safebox").strip(),
                 "role": "safebox",
                 "size": str(sb_host.get("size") or size).strip(),
+            })
+        operator_host = cfg.get("operator_host") or {}
+        if operator_host.get("enabled", False):
+            desired.append({
+                "name": str(
+                    operator_host.get("name") or f"takyon-{self.name}-operator"
+                ).strip(),
+                "role": "operator",
+                "size": str(operator_host.get("size") or size).strip(),
             })
 
         # Idempotent: list the account's droplets and match the manifest-derived EXACT names.
@@ -968,8 +1004,150 @@ class EnvironmentProvisioner:
             "create",
             f"{len(replica_names)} {role} replica(s) "
             + (f"+ safebox host " if sb_host.get("enabled", False) else "")
+            + (f"+ operator host " if operator_host.get("enabled", False) else "")
             + ("provisioned" if created_any else "already present"),
             data={"droplets": results, "tag": self.env_tag},
+        )
+
+    def _bootstrap_missing_hosts(self) -> StepReceipt:
+        """Turn freshly-created droplets into the declared production-shaped systemd roles.
+
+        Existing healthy hosts are never restarted here; revision activation belongs to
+        ``takyon env deploy`` (and the subuser drain rail). This step exists so a clean
+        ``takyon env create dev`` does not stop at empty Ubuntu droplets.
+        """
+        cfg = self.manifest.get("droplets") or {}
+        if not cfg.get("enabled", False) or not cfg.get("bootstrap_hosts", False):
+            return StepReceipt(
+                "host_bootstrap", STATUS_DISABLED, "create",
+                "automatic host bootstrap disabled in manifest",
+            )
+        token, blocked = self._do_token_or_blocked("droplets")
+        if blocked is not None:
+            return StepReceipt(
+                "host_bootstrap", STATUS_BLOCKED, "create", blocked.detail,
+                deposit=blocked.deposit,
+            )
+        key_path = self._split_key_path()
+        store_path = self.home / ".env"
+        bootstrap = _REPO_ROOT / "deploy" / "takyon-dev-split" / "bootstrap-dev-droplet.sh"
+        if not key_path.is_file():
+            return StepReceipt(
+                "host_bootstrap", STATUS_BLOCKED, "create",
+                f"dev split private key not found at {key_path}",
+            )
+        if not store_path.is_file():
+            return StepReceipt(
+                "host_bootstrap", STATUS_BLOCKED, "create",
+                f"dev authority store not found at {store_path}",
+            )
+        if not bootstrap.is_file():
+            return StepReceipt(
+                "host_bootstrap", STATUS_ERROR, "create",
+                f"tracked host bootstrap not found at {bootstrap}",
+            )
+        _git("fetch", "origin", "main")
+        head = _git("rev-parse", "HEAD")
+        published = _git("rev-parse", "origin/main")
+        dirty = _git(
+            "status", "--porcelain", "--untracked-files=all", "--",
+            "hermes-agent-main", "deploy", "scripts",
+        )
+        if not head or head != published or dirty:
+            return StepReceipt(
+                "host_bootstrap", STATUS_BLOCKED, "create",
+                "host bootstrap requires a clean checkout at the published origin/main revision; "
+                "commit/push first so fresh hosts cannot receive an untracked source tree",
+            )
+
+        headers = self._do_headers(token)
+        expected_count = max(1, int(cfg.get("count") or 1))
+        safebox_host = operator_host = None
+        replicas: list[dict[str, Any]] = []
+        why = "droplet addresses unavailable"
+        for attempt in range(37):
+            safebox_host, why = self._resolve_safebox_host(headers, cfg)
+            operator_host, operator_why = self._resolve_singleton_host(headers, cfg, "operator")
+            replicas, err = self._resolve_replicas(headers, cfg)
+            if (safebox_host is not None and operator_host is not None and err is None
+                    and len(replicas) == expected_count):
+                break
+            why = operator_why if operator_host is None else (err.detail if err is not None else why)
+            if attempt < 36:
+                self.sleep(5)
+        if safebox_host is None or operator_host is None or len(replicas) != expected_count:
+            return StepReceipt(
+                "host_bootstrap", STATUS_ERROR, "create",
+                f"droplet IP assignment timed out: {why}; resolved "
+                f"{len(replicas)}/{expected_count} subuser replicas",
+            )
+
+        subuser_hosts = ",".join(str(rep["public_ip"]) for rep in replicas)
+        common_env = {
+            **os.environ,
+            "TAKYON_DEV_STORE": str(store_path),
+            "TAKYON_DEV_KEY": str(key_path),
+            "TAKYON_DEV_SUBUSER_HOSTS": subuser_hosts,
+            "TAKYON_DEV_OPERATOR_NODE": str(operator_host["name"]),
+            "TAKYON_DEV_OPERATOR_VPC_IP": str(operator_host["private_ip"]),
+        }
+        specs = [
+            (safebox_host, "safebox", str(safebox_host["private_ip"])),
+            *((rep, "subuser", str(safebox_host["private_ip"])) for rep in replicas),
+            (operator_host, "operator", str(safebox_host["private_ip"])),
+        ]
+        bootstrapped: list[str] = []
+        healthy: list[str] = []
+        for host, role, vpc_ip in specs:
+            public_ip = str(host["public_ip"])
+            role_services = {
+                "safebox": "takyon-safebox.service",
+                "subuser": "takyon-subuser.service caddy.service",
+                "operator": (
+                    "takyon-dashboard.service takyon-worker.service "
+                    "takyon-docker-broker.service"
+                ),
+            }[role]
+            probe = (
+                f"systemctl is-active --quiet {role_services}; "
+                + (
+                    f"curl -fsS http://{vpc_ip}:8000/healthz >/dev/null"
+                    if role == "safebox"
+                    else "curl -fsS http://127.0.0.1:9119/healthz >/dev/null"
+                )
+            )
+            try:
+                rc, _out = self.remote.run(
+                    public_ip, probe, key_path=str(key_path), timeout=20.0,
+                )
+            except Exception:
+                rc = 1
+            if rc == 0:
+                healthy.append(str(host["name"]))
+                continue
+            result = subprocess.run(
+                [str(bootstrap), public_ip, role, str(host["name"]), vpc_ip],
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                env=common_env,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()[-400:]
+                return StepReceipt(
+                    "host_bootstrap", STATUS_ERROR, "create",
+                    f"{host['name']} bootstrap failed: {detail}",
+                    data={"healthy": healthy, "bootstrapped": bootstrapped},
+                )
+            bootstrapped.append(str(host["name"]))
+
+        return StepReceipt(
+            "host_bootstrap",
+            STATUS_CREATED if bootstrapped else STATUS_EXISTS,
+            "create",
+            f"all {len(specs)} dev hosts are systemd-managed and healthy"
+            + (f"; bootstrapped {', '.join(bootstrapped)}" if bootstrapped else ""),
+            data={"healthy": healthy, "bootstrapped": bootstrapped},
         )
 
     # (f4) load balancer — fronts the replicas by ROLE TAG (a future replica joins by tag, no LB
@@ -994,7 +1172,7 @@ class EnvironmentProvisioner:
         # lacks tag scope and the replicas are untagged (the recorded scope fallback above).
         replicas = [
             d for d in (self._do_state.get("droplets") or [])
-            if d.get("role") != "safebox" and d.get("droplet_id")
+            if d.get("role") == role and d.get("droplet_id")
         ]
         replica_ids = [d["droplet_id"] for d in replicas]
         tagged_mode = bool(replicas) and all(d.get("tagged") for d in replicas)
@@ -1226,7 +1404,8 @@ class EnvironmentProvisioner:
         cfg = self.manifest.get("droplets") or {}
         if not cfg.get("enabled", False):
             return StepReceipt("node_registry", STATUS_SKIPPED, "create", "no droplets twin — nothing to enroll")
-        replicas = [d for d in (self._do_state.get("droplets") or []) if d.get("role") != "safebox"]
+        role = str(cfg.get("role") or "subuser").strip().lower()
+        replicas = [d for d in (self._do_state.get("droplets") or []) if d.get("role") == role]
         if not replicas:
             return StepReceipt("node_registry", STATUS_SKIPPED, "create", "no replicas provisioned this run")
 
@@ -1351,14 +1530,18 @@ class EnvironmentProvisioner:
         if not re.fullmatch(r"[A-Za-z0-9_\-]+", password):
             raise EnvironmentProvisionError("minted password contains unexpected characters")
 
-    def _resolve_safebox_host(
-        self, headers: Mapping[str, str], droplets_cfg: Mapping[str, Any]
+    def _resolve_singleton_host(
+        self,
+        headers: Mapping[str, str],
+        droplets_cfg: Mapping[str, Any],
+        role: str,
     ) -> "tuple[dict[str, Any] | None, str]":
-        """The singleton safebox droplet ({name, droplet_id, public_ip, private_ip}) or (None, why-not)."""
-        sb = droplets_cfg.get("safebox_host") or {}
-        if not sb.get("enabled", False):
-            return None, "no safebox host declared in the manifest"
-        name = str(sb.get("name") or f"takyon-{self.name}-safebox").strip()
+        """Resolve one manifest singleton to its public/private VPC addresses."""
+        role = str(role or "").strip().lower()
+        block = droplets_cfg.get(f"{role}_host") or {}
+        if not block.get("enabled", False):
+            return None, f"no {role} host declared in the manifest"
+        name = str(block.get("name") or f"takyon-{self.name}-{role}").strip()
         try:
             listed = self.http.request("GET", f"{self._DO_BASE}/droplets?per_page=200", headers=dict(headers))
         except Exception as exc:
@@ -1372,21 +1555,26 @@ class EnvironmentProvisioner:
                 "",
             )
             if not public_ip:
-                return None, f"safebox host {name!r} has no public IPv4"
+                return None, f"{role} host {name!r} has no public IPv4"
             private_ip = next(
                 (str(n.get("ip_address") or "") for n in ((d.get("networks") or {}).get("v4") or [])
                  if isinstance(n, dict) and n.get("type") == "private"),
                 "",
             )
             if not private_ip:
-                return None, f"safebox host {name!r} has no private IPv4"
+                return None, f"{role} host {name!r} has no private IPv4"
             return {
                 "name": name,
                 "droplet_id": d.get("id"),
                 "public_ip": public_ip,
                 "private_ip": private_ip,
             }, ""
-        return None, f"safebox host {name!r} not found"
+        return None, f"{role} host {name!r} not found"
+
+    def _resolve_safebox_host(
+        self, headers: Mapping[str, str], droplets_cfg: Mapping[str, Any]
+    ) -> "tuple[dict[str, Any] | None, str]":
+        return self._resolve_singleton_host(headers, droplets_cfg, "safebox")
 
     def _read_replica_cred_state(
         self, rep: Mapping[str, Any], key_path: Path, env_file: str, dsn_alias: str, role: str
@@ -1579,7 +1767,8 @@ class EnvironmentProvisioner:
             return StepReceipt("replica_credentials", STATUS_SKIPPED, "create",
                                "no database twin — scoped per-replica logins need the env's own "
                                "control plane")
-        registered = [d for d in (self._do_state.get("droplets") or []) if d.get("role") != "safebox"]
+        role = str(cfg.get("role") or "subuser").strip().lower()
+        registered = [d for d in (self._do_state.get("droplets") or []) if d.get("role") == role]
         if not registered:
             return StepReceipt("replica_credentials", STATUS_SKIPPED, "create",
                                "no replicas provisioned this run")
@@ -1948,6 +2137,7 @@ class EnvironmentProvisioner:
                 return {}
             headers = self._do_headers(token)
             safebox_host, _why = self._resolve_safebox_host(headers, cfg)
+            operator_host, _why = self._resolve_singleton_host(headers, cfg, "operator")
             replicas, _err = self._resolve_replicas(headers, cfg)
         except Exception:
             return {}
@@ -1958,6 +2148,12 @@ class EnvironmentProvisioner:
                 "public_ip": str(safebox_host.get("public_ip") or ""),
                 "private_ip": str(safebox_host.get("private_ip") or ""),
             }
+        if operator_host:
+            out["operator"] = {
+                "name": str(operator_host.get("name") or ""),
+                "public_ip": str(operator_host.get("public_ip") or ""),
+                "private_ip": str(operator_host.get("private_ip") or ""),
+            }
         key_path = self._split_key_path()
         if str(key_path):
             out["ssh_key_path"] = str(key_path)
@@ -1966,6 +2162,7 @@ class EnvironmentProvisioner:
                 {
                     "name": str(rep.get("name") or ""),
                     "public_ip": str(rep.get("public_ip") or ""),
+                    "private_ip": str(rep.get("private_ip") or ""),
                 }
                 for rep in replicas
             ]
@@ -2167,7 +2364,17 @@ class EnvironmentProvisioner:
                     "rolling_restart", STATUS_ERROR, "restart",
                     f"replica {d.get('name')!r} has no public IPv4 — cannot reach it over SSH to restart",
                 )
-            out.append({"name": str(d.get("name")), "droplet_id": d.get("id"), "public_ip": public_ip})
+            private_ip = next(
+                (str(n.get("ip_address") or "") for n in ((d.get("networks") or {}).get("v4") or [])
+                 if isinstance(n, dict) and n.get("type") == "private"),
+                "",
+            )
+            out.append({
+                "name": str(d.get("name")),
+                "droplet_id": d.get("id"),
+                "public_ip": public_ip,
+                "private_ip": private_ip,
+            })
         return sorted(out, key=lambda r: r["name"]), None
 
     def _resolve_lb(self, headers: Mapping[str, str]) -> tuple[dict[str, Any], StepReceipt | None]:
@@ -2418,12 +2625,11 @@ class EnvironmentProvisioner:
 
     # ── code revision (THE code gate) ──────────────────────────────────────────────────────
     #
-    # dev pins the `dev` branch, kept AHEAD of `main` (prod). These three rails move code across
-    # the gate. All git-only (no safebox, no network) so they are safe to call anywhere and simply
-    # report is_git=False when the runtime is not a checkout of the workspace repo.
+    # Dev and prod pin the same published main revision. Status/deploy prove that parity without
+    # reading the dirty worktree; the former dev->prod promotion rail is intentionally inactive.
 
     def _resolve_rev_info(self) -> dict[str, Any]:
-        """Compare this env's pinned code_revision against prod (main). Returns
+        """Compare this env's pinned code_revision against published prod (origin/main). Returns
         {pinned_ref, is_git, pinned_sha, prod_sha, ahead, behind, diverged}. Never raises."""
         ref = self.code_revision
         info: dict[str, Any] = {
@@ -2433,13 +2639,13 @@ class EnvironmentProvisioner:
         if not ref:
             return info
         pinned = _git("rev-parse", "--short", ref)
-        prod = _git("rev-parse", "--short", "main")
+        prod = _git("rev-parse", "--short", "origin/main")
         if pinned is None or prod is None:
             return info
         info.update({"is_git": True, "pinned_sha": pinned, "prod_sha": prod})
         # `--left-right --count main...ref` -> "<behind> <ahead>": left = commits main has that ref
         # lacks (dev behind), right = commits ref has that main lacks (dev ahead).
-        counts = _git("rev-list", "--left-right", "--count", f"main...{ref}")
+        counts = _git("rev-list", "--left-right", "--count", f"origin/main...{ref}")
         if counts:
             parts = counts.split()
             if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
@@ -2448,11 +2654,11 @@ class EnvironmentProvisioner:
         return info
 
     def deploy(self, rev: str | None = None) -> ProvisionResult:
-        """Revision-aware deploy: materialize an EXACT git SHA (never the dirty working tree) for
-        this env's hosts. Staging the pinned rev via `git archive` is the mechanism that lets dev
-        run code prod does not have. Host activation (rsync + restart) runs only when a dev operator
-        host is DECLARED in the manifest; otherwise the staged rev is proven and the host leg is a
-        fail-closed 'not declared' receipt (S4 wires the host). Records the pin into env config."""
+        """Deploy the exact published production revision to every dev role from ``git archive``.
+
+        A caller may pass ``--rev`` only to pin the current ``origin/main`` SHA explicitly; any
+        different revision is refused because dev/prod source parity is the contract.
+        """
         import tempfile
 
         receipts: list[StepReceipt] = []
@@ -2463,8 +2669,7 @@ class EnvironmentProvisioner:
                 "no --rev given and no code_revision pinned in the manifest",
                 deposit=f"environments/{self.name}.yaml: code_revision"))
             return ProvisionResult(self.name, "deploy", tuple(receipts))
-        # Prefer the PUSHED ref: a bare branch name (e.g. 'dev') means origin/dev — the canonical
-        # remote revision — not a possibly-stale LOCAL branch on this machine. Best-effort fetch first.
+        # Prefer published refs over possibly-stale local branches. Best-effort fetch first.
         if "/" not in target_ref and target_ref != "HEAD":
             _git("fetch", "origin", target_ref)
             sha = _git("rev-parse", f"origin/{target_ref}") or _git("rev-parse", target_ref)
@@ -2474,6 +2679,15 @@ class EnvironmentProvisioner:
             receipts.append(StepReceipt(
                 "code_revision", STATUS_BLOCKED, "deploy",
                 f"{target_ref!r} not resolvable — run deploy from the workspace git checkout"))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+        _git("fetch", "origin", "main")
+        published_main = _git("rev-parse", "origin/main")
+        if published_main is None or sha != published_main:
+            receipts.append(StepReceipt(
+                "code_revision", STATUS_BLOCKED, "deploy",
+                f"dev must run the published production revision origin/main; requested "
+                f"{sha[:12]}, published {str(published_main or 'unresolved')[:12]}",
+            ))
             return ProvisionResult(self.name, "deploy", tuple(receipts))
         short = sha[:12]
         tree_sha = _git("rev-parse", f"{sha}^{{tree}}") or ""
@@ -2490,19 +2704,6 @@ class EnvironmentProvisioner:
             "code_revision", STATUS_CREATED, "deploy",
             f"staged rev {short} (tree {tree_sha[:12]}) — the pinned revision, not the working tree",
             data={"sha": sha, "ref": target_ref, "tree": tree_sha, "staging": str(staged)}))
-        # Record the pin into the env's resolved config (best-effort, non-secret).
-        try:
-            import yaml
-            self.env_dir.mkdir(parents=True, exist_ok=True)
-            cfg = {}
-            if self.config_path.exists():
-                cfg = yaml.safe_load(self.config_path.read_text()) or {}
-            if not isinstance(cfg, dict):
-                cfg = {}
-            cfg["deployed_code_revision"] = {"ref": target_ref, "sha": sha, "tree": tree_sha}
-            self.config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
-        except Exception:
-            pass
         # Host activation leg — revision-aware, CODE-ONLY. It rsyncs the STAGED runtime tree and
         # restarts services; it NEVER touches a host's .env / Doppler config (re-running the full
         # bootstrap would clobber the safebox's managed-secret setup). Host topology (public IPs +
@@ -2523,6 +2724,27 @@ class EnvironmentProvisioner:
             receipts.append(StepReceipt("hosts", STATUS_ERROR, "deploy",
                                         "staged rev has no hermes-agent-main/ runtime tree"))
             return ProvisionResult(self.name, "deploy", tuple(receipts))
+
+        # Build the dashboard from the same archived revision before any host is staged. The
+        # deployed services use --skip-build, so preserving an older web_dist would be source drift.
+        web_dir = src_tree / "web"
+        try:
+            subprocess.run(
+                ["npm", "ci"], cwd=web_dir, check=True, capture_output=True, timeout=600,
+            )
+            subprocess.run(
+                ["npm", "run", "build"], cwd=web_dir, check=True, capture_output=True, timeout=600,
+            )
+        except Exception as exc:
+            receipts.append(StepReceipt(
+                "web_dist", STATUS_ERROR, "deploy",
+                f"dashboard build failed for staged rev {short}: {exc}",
+            ))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+        receipts.append(StepReceipt(
+            "web_dist", STATUS_CREATED, "deploy",
+            f"built dashboard bundle from staged rev {short}",
+        ))
 
         # Deployed hosts are archive trees, not Git checkouts. Seal the staged runtime with the
         # same release identity contract consumed by claim_scope.runtime_release_sha() before any
@@ -2570,9 +2792,10 @@ class EnvironmentProvisioner:
         ssh_base = ["-i", key_path, "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new"]
 
         def _push_code(ip: str) -> "tuple[bool, str]":
-            # No --delete: protects host-only artifacts (.venv, takyon_cli/web_dist, node_modules);
-            # files removed in the rev linger harmlessly (nothing imports them post-change).
+            # --delete gives every host the exact archived source tree. Exclusions preserve only
+            # host-owned runtime state and dependencies.
             rsync = ["rsync", "-rt", "--no-perms", "--no-owner", "--no-group", "--checksum",
+                     "--delete", "--delete-delay",
                      "--exclude=.git", "--exclude=.venv", "--exclude=venv", "--exclude=node_modules",
                      "--exclude=__pycache__", "--exclude=*.pyc", "--exclude=._*", "--exclude=.DS_Store",
                      "--exclude=.env", "--exclude=secrets", "--exclude=logs", "--exclude=tmp",
@@ -2583,56 +2806,61 @@ class EnvironmentProvisioner:
             return (r.returncode == 0), ("synced" if r.returncode == 0
                                          else f"rsync failed: {(r.stderr or '').strip()[:160]}")
 
-        def _push_public_service_unit(
+        def _push_service_units(
             ip: str, role: str, block: Mapping[str, Any]
         ) -> "tuple[bool, str]":
-            """Install only the tracked public-service unit from the staged revision.
+            """Install every tracked unit owned by a role from the staged revision.
 
             This is code/config deployment, not bootstrap: it never touches host env or managed
             secrets. Rendering uses only the already-resolved non-secret dev topology.
             """
-            template_name = {
-                "operator": "takyon-dashboard-dev.service.tmpl",
-                "safebox": "takyon-safebox-dev.service.tmpl",
-                "subuser": "takyon-subuser-dev.service.tmpl",
+            unit_specs = {
+                "operator": (
+                    ("takyon-dashboard-dev.service.tmpl", "takyon-dashboard.service"),
+                    ("takyon-worker-dev.service.tmpl", "takyon-worker.service"),
+                    ("takyon-docker-broker-dev.service.tmpl", "takyon-docker-broker.service"),
+                ),
+                "safebox": (("takyon-safebox-dev.service.tmpl", "takyon-safebox.service"),),
+                "subuser": (("takyon-subuser-dev.service.tmpl", "takyon-subuser.service"),),
             }.get(role)
-            service_name = {
-                "operator": "takyon-dashboard.service",
-                "safebox": "takyon-safebox.service",
-                "subuser": "takyon-subuser.service",
-            }.get(role)
-            if not template_name or not service_name:
+            if not unit_specs:
                 return False, f"unknown public service role {role!r}"
-            template_path = tree_root / "deploy" / "takyon-dev-split" / template_name
-            if not template_path.is_file():
-                return False, f"staged revision is missing {template_path.name}"
-            rendered = template_path.read_text(encoding="utf-8")
             safebox_ip = str((ds.get("safebox") or {}).get("private_ip") or "").strip()
-            rendered = rendered.replace("__NODE_NAME__", str(block.get("name") or role))
-            rendered = rendered.replace("__SAFEBOX_VPC_IP__", safebox_ip)
-            rendered = rendered.replace("__BIND_IP__", str(block.get("private_ip") or "").strip())
-            if "__TAKYON_UID__" in rendered:
-                uid_read = subprocess.run(
-                    ["ssh", *ssh_base, f"root@{ip}", "id -u takyon"],
-                    capture_output=True, text=True, timeout=30,
+            operator = ds.get("operator") or {}
+            operator_name = str(operator.get("name") or "takyon-dev-operator").strip()
+            operator_private_ip = str(operator.get("private_ip") or "").strip()
+            uid = ""
+            for template_name, service_name in unit_specs:
+                template_path = tree_root / "deploy" / "takyon-dev-split" / template_name
+                if not template_path.is_file():
+                    return False, f"staged revision is missing {template_path.name}"
+                rendered = template_path.read_text(encoding="utf-8")
+                rendered = rendered.replace("__NODE_NAME__", str(block.get("name") or role))
+                rendered = rendered.replace("__SAFEBOX_VPC_IP__", safebox_ip)
+                rendered = rendered.replace("__OPERATOR_NODE__", operator_name)
+                rendered = rendered.replace("__OPERATOR_VPC_IP__", operator_private_ip)
+                rendered = rendered.replace("__BIND_IP__", str(block.get("private_ip") or "").strip())
+                if "__TAKYON_UID__" in rendered:
+                    if not uid:
+                        uid_read = subprocess.run(
+                            ["ssh", *ssh_base, f"root@{ip}", "id -u takyon"],
+                            capture_output=True, text=True, timeout=30,
+                        )
+                        uid = str(uid_read.stdout or "").strip()
+                        if uid_read.returncode != 0 or not uid.isdigit():
+                            return False, "could not resolve remote takyon uid for unit rendering"
+                    rendered = rendered.replace("__TAKYON_UID__", uid)
+                if re.search(r"__[A-Z0-9_]+__", rendered):
+                    return False, "staged unit contains an unresolved deployment placeholder"
+                staged_unit = staged / f"{role}-{service_name}"
+                staged_unit.write_text(rendered, encoding="utf-8")
+                copied = subprocess.run(
+                    ["scp", *ssh_base, str(staged_unit), f"root@{ip}:/etc/systemd/system/{service_name}"],
+                    capture_output=True, text=True, timeout=60,
                 )
-                uid = str(uid_read.stdout or "").strip()
-                if uid_read.returncode != 0 or not uid.isdigit():
-                    return False, "could not resolve remote takyon uid for unit rendering"
-                rendered = rendered.replace("__TAKYON_UID__", uid)
-            if re.search(r"__[A-Z0-9_]+__", rendered):
-                return False, "staged unit contains an unresolved deployment placeholder"
-            staged_unit = staged / f"{role}-{service_name}"
-            staged_unit.write_text(rendered, encoding="utf-8")
-            copied = subprocess.run(
-                ["scp", *ssh_base, str(staged_unit), f"root@{ip}:/etc/systemd/system/{service_name}"],
-                capture_output=True, text=True, timeout=60,
-            )
-            return (
-                copied.returncode == 0,
-                "unit synced" if copied.returncode == 0
-                else f"unit sync failed: {(copied.stderr or '').strip()[:160]}",
-            )
+                if copied.returncode != 0:
+                    return False, f"unit sync failed: {(copied.stderr or '').strip()[:160]}"
+            return True, f"{len(unit_specs)} unit(s) synced"
 
         def _build_operator_worker_image(ip: str) -> "tuple[bool, str]":
             """Build and verify the revision-pinned coding image without browser requirements."""
@@ -2691,13 +2919,198 @@ class EnvironmentProvisioner:
             renderer = "available" if chromium.returncode == 0 else "unavailable (optional)"
             return True, f"worker image, Node, Agent SDK, and native skill verified; Chromium {renderer}"
 
+        def _prepare_remote_runtime(ip: str, role: str) -> "tuple[bool, str]":
+            """Converge the role's locked dependencies before activation."""
+            if role == "safebox":
+                builder = tree_root / "deploy" / "takyon-safebox" / "rebuild-venv.sh"
+                if not builder.is_file():
+                    return False, "staged revision is missing the Safebox venv builder"
+                result = subprocess.run(
+                    [str(builder)],
+                    capture_output=True,
+                    text=True,
+                    timeout=1200,
+                    env={
+                        **os.environ,
+                        "TAKYON_VPS_HOST": f"root@{ip}",
+                        "TAKYON_VPS_KEY": key_path,
+                        "TAKYON_REMOTE_RUNTIME": "/opt/takyon/hermes-agent-main",
+                        "TAKYON_SAFEBOX_VENV_ACTIVATE": "1",
+                        "TAKYON_SAFEBOX_VENV_REPAIR_ID": short,
+                    },
+                )
+                if result.returncode != 0:
+                    return False, f"Safebox dependencies failed: {(result.stderr or result.stdout or '').strip()[-240:]}"
+                return True, "Safebox locked dependencies ready"
+
+            remote = (
+                "set -euo pipefail; cd /opt/takyon/hermes-agent-main; "
+                "UV=$(command -v uv || echo /root/.local/bin/uv); "
+                "test -x \"$UV\"; export UV_NO_CONFIG=1 "
+                "UV_PROJECT_ENVIRONMENT=/opt/takyon/hermes-agent-main/.venv; "
+                "\"$UV\" sync --locked --extra all --extra postgres --no-progress"
+            )
+            result = subprocess.run(
+                ["ssh", *ssh_base, f"root@{ip}", remote],
+                capture_output=True, text=True, timeout=1200,
+            )
+            if result.returncode != 0:
+                return False, f"locked runtime dependencies failed: {(result.stderr or result.stdout or '').strip()[-240:]}"
+            if role != "operator":
+                return True, "locked runtime dependencies ready"
+
+            # Existing droplets converge too: the Agent SDK runtime and worker image need Node 20+.
+            node_ready = subprocess.run(
+                [
+                    "ssh", *ssh_base, f"root@{ip}",
+                    "set -euo pipefail; "
+                    "major=$(node --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\\1/' || true); "
+                    "if [ -z \"$major\" ] || [ \"$major\" -lt 20 ]; then "
+                    "apt-get update -y >/dev/null; apt-get install -y ca-certificates curl gnupg >/dev/null; "
+                    "install -m 0755 -d /etc/apt/keyrings; "
+                    "curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key "
+                    "| gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg; "
+                    "printf 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] "
+                    "https://deb.nodesource.com/node_20.x nodistro main\\n' "
+                    "> /etc/apt/sources.list.d/nodesource.list; "
+                    "apt-get update -y >/dev/null; apt-get install -y nodejs >/dev/null; fi; "
+                    "test \"$(node --version | sed -E 's/^v([0-9]+).*/\\1/')\" -ge 20",
+                ],
+                capture_output=True, text=True, timeout=600,
+            )
+            if node_ready.returncode != 0:
+                return False, (
+                    "Node 20 convergence failed: "
+                    f"{(node_ready.stderr or node_ready.stdout or '').strip()[-240:]}"
+                )
+
+            helper = tree_root / "scripts" / "prepare-claude-agent-sdk-runtime.sh"
+            if not helper.is_file():
+                return False, "staged revision is missing the Agent SDK runtime helper"
+            copied = subprocess.run(
+                ["scp", *ssh_base, str(helper), f"root@{ip}:/opt/takyon/prepare-claude-agent-sdk-runtime.sh"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if copied.returncode != 0:
+                return False, f"Agent SDK helper sync failed: {(copied.stderr or '').strip()[-240:]}"
+            prepared = subprocess.run(
+                [
+                    "ssh", *ssh_base, f"root@{ip}",
+                    "chown root:root /opt/takyon/prepare-claude-agent-sdk-runtime.sh; "
+                    "chmod 0755 /opt/takyon/prepare-claude-agent-sdk-runtime.sh; "
+                    "runuser -u takyon -- env "
+                    "TAKYON_PYTHON=/opt/takyon/hermes-agent-main/.venv/bin/python "
+                    "/opt/takyon/prepare-claude-agent-sdk-runtime.sh "
+                    "/opt/takyon /opt/takyon/.takyon >/dev/null",
+                ],
+                capture_output=True, text=True, timeout=1200,
+            )
+            if prepared.returncode != 0:
+                return False, f"Agent SDK runtime failed: {(prepared.stderr or prepared.stdout or '').strip()[-240:]}"
+            return True, "locked runtime dependencies and Agent SDK ready"
+
+        def _ensure_subuser_publish_rail(
+            operator_ip: str, replica_blocks: list[Mapping[str, Any]]
+        ) -> "tuple[bool, str]":
+            """Give the operator a role-scoped key that reaches only dev subuser replicas."""
+            sync_key = Path(str(
+                (self.manifest.get("droplets") or {}).get("subuser_sync_private_key_path")
+                or "~/.ssh/takyon_dev_subuser_sync"
+            )).expanduser()
+            sync_key.parent.mkdir(parents=True, exist_ok=True)
+            if not sync_key.is_file() or not Path(str(sync_key) + ".pub").is_file():
+                generated = subprocess.run(
+                    [
+                        "ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+                        "-C", "takyon-dev-operator-to-subuser", "-f", str(sync_key),
+                    ],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if generated.returncode != 0:
+                    return False, f"subuser publish key generation failed: {(generated.stderr or '').strip()[-200:]}"
+            public_key_path = Path(str(sync_key) + ".pub")
+            for rep in replica_blocks:
+                rep_ip = str(rep.get("public_ip") or "").strip()
+                if not rep_ip:
+                    return False, "subuser replica is missing a public IP"
+                copied = subprocess.run(
+                    ["scp", *ssh_base, str(public_key_path), f"root@{rep_ip}:/root/takyon-dev-subuser-sync.pub"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if copied.returncode != 0:
+                    return False, f"publish public-key sync failed for {rep_ip}: {(copied.stderr or '').strip()[-200:]}"
+                installed = subprocess.run(
+                    [
+                        "ssh", *ssh_base, f"root@{rep_ip}",
+                        "set -euo pipefail; install -d -m 0700 /root/.ssh; "
+                        "touch /root/.ssh/authorized_keys; chmod 0600 /root/.ssh/authorized_keys; "
+                        "key=$(cat /root/takyon-dev-subuser-sync.pub); "
+                        "grep -qxF \"$key\" /root/.ssh/authorized_keys || "
+                        "printf '%s\\n' \"$key\" >> /root/.ssh/authorized_keys; "
+                        "rm -f /root/takyon-dev-subuser-sync.pub",
+                    ],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if installed.returncode != 0:
+                    return False, f"publish public-key install failed for {rep_ip}: {(installed.stderr or '').strip()[-200:]}"
+
+            copied_private = subprocess.run(
+                [
+                    "scp", *ssh_base, str(sync_key),
+                    f"root@{operator_ip}:/opt/takyon/takyon-subuser-sync.key",
+                ],
+                capture_output=True, text=True, timeout=60,
+            )
+            if copied_private.returncode != 0:
+                return False, f"operator publish-key sync failed: {(copied_private.stderr or '').strip()[-200:]}"
+            hosts = ",".join(str(rep.get("public_ip") or "").strip() for rep in replica_blocks)
+            configured = subprocess.run(
+                [
+                    "ssh", *ssh_base, f"root@{operator_ip}",
+                    "python3 - /opt/takyon/.takyon/.env "
+                    f"{hosts!r} /opt/takyon/secrets/takyon-subuser-sync.key",
+                ],
+                input=(
+                    "from pathlib import Path\n"
+                    "import sys\n"
+                    "path=Path(sys.argv[1]); hosts=sys.argv[2]; key_path=sys.argv[3]\n"
+                    "updates={'TAKYON_SUBUSER_VPS_HOSTS':hosts,'TAKYON_SUBUSER_VPS_USER':'root',"
+                    "'TAKYON_SUBUSER_VPS_SSH_KEY':key_path}\n"
+                    "lines=path.read_text().splitlines() if path.exists() else []\n"
+                    "kept=[line for line in lines if line.split('=',1)[0] not in updates]\n"
+                    "kept.extend(f'{key}={value}' for key,value in updates.items())\n"
+                    "path.write_text('\\n'.join(kept)+'\\n')\n"
+                ),
+                capture_output=True, text=True, timeout=60,
+            )
+            if configured.returncode != 0:
+                return False, f"operator publish env failed: {(configured.stderr or '').strip()[-200:]}"
+            secured = subprocess.run(
+                [
+                    "ssh", *ssh_base, f"root@{operator_ip}",
+                    "set -euo pipefail; install -d -o takyon -g takyon -m 0700 /opt/takyon/secrets; "
+                    "mv /opt/takyon/takyon-subuser-sync.key /opt/takyon/secrets/takyon-subuser-sync.key; "
+                    "chown takyon:takyon /opt/takyon/secrets/takyon-subuser-sync.key /opt/takyon/.takyon/.env; "
+                    "chmod 0600 /opt/takyon/secrets/takyon-subuser-sync.key /opt/takyon/.takyon/.env; "
+                    "runuser -u takyon -- ssh -i /opt/takyon/secrets/takyon-subuser-sync.key "
+                    "-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "
+                    f"root@{str(replica_blocks[0].get('public_ip') or '').strip()} true",
+                ],
+                capture_output=True, text=True, timeout=60,
+            )
+            if secured.returncode != 0:
+                return False, f"operator-to-subuser publish proof failed: {(secured.stderr or '').strip()[-200:]}"
+            return True, f"operator publish key reaches {len(replica_blocks)} subuser replica(s)"
+
         def _restart(ip: str, services: "list[str]") -> "tuple[bool, str]":
             remote = (
                 "find /opt/takyon/hermes-agent-main -name '._*' -delete 2>/dev/null; "
                 "runuser -u takyon -- /opt/takyon/hermes-agent-main/.venv/bin/python -m compileall -q "
                 "/opt/takyon/hermes-agent-main/plugins/takyon >/dev/null 2>&1; systemctl daemon-reload; "
                 + "; ".join(f"systemctl restart {s}" for s in services) + "; sleep 2; "
-                + "systemctl is-active " + " ".join(services)
+                + "systemctl is-active " + " ".join(services) + "; "
+                + "grep -q '" + sha + "' "
+                  "/opt/takyon/hermes-agent-main/.takyon-deploy-artifact.json"
             )
             r = subprocess.run(["ssh", *ssh_base, f"root@{ip}", remote],
                                capture_output=True, text=True, timeout=180)
@@ -2734,7 +3147,9 @@ class EnvironmentProvisioner:
                 continue
             ok, why = _push_code(ip)
             if ok:
-                ok, why = _push_public_service_unit(ip, role, block)
+                ok, why = _push_service_units(ip, role, block)
+            if ok:
+                ok, why = _prepare_remote_runtime(ip, role)
             if ok and role == "operator":
                 ok, why = _build_operator_worker_image(ip)
             if not ok:
@@ -2754,7 +3169,9 @@ class EnvironmentProvisioner:
             ip = str(rep.get("public_ip")).strip()
             ok, why = _push_code(ip)
             if ok:
-                ok, why = _push_public_service_unit(ip, "subuser", rep)
+                ok, why = _push_service_units(ip, "subuser", rep)
+            if ok:
+                ok, why = _prepare_remote_runtime(ip, "subuser")
             receipts.append(StepReceipt(
                 "subuser", STATUS_EXISTS if ok else STATUS_ERROR, "deploy",
                 f"{rep.get('name') or ip}: code {'staged' if ok else 'sync FAILED — ' + why}"))
@@ -2769,6 +3186,17 @@ class EnvironmentProvisioner:
             return ProvisionResult(self.name, "deploy", tuple(receipts))
 
         declared_operator_ip = str(((ds.get("operator") or {}).get("public_ip") or "")).strip()
+        publish_ready, publish_why = _ensure_subuser_publish_rail(
+            declared_operator_ip, replicas,
+        ) if declared_operator_ip and replicas else (False, "operator or replicas missing")
+        receipts.append(StepReceipt(
+            "subuser_publish",
+            STATUS_EXISTS if publish_ready else STATUS_ERROR,
+            "deploy",
+            publish_why,
+        ))
+        if not publish_ready:
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
         operator_ip = next((ip for role, ip, _ in staged_singletons if role == "operator"), "")
         if not declared_operator_ip:
             receipts.append(StepReceipt(
@@ -2806,62 +3234,28 @@ class EnvironmentProvisioner:
 
         # Replicas activate drain-aware only after schema and singleton convergence.
         if synced:
-            receipts.extend(self.rolling_restart().receipts)
+            restarted = self.rolling_restart()
+            receipts.extend(restarted.receipts)
+            if not restarted.ok:
+                return ProvisionResult(self.name, "deploy", tuple(receipts))
+        try:
+            import yaml
+            self.env_dir.mkdir(parents=True, exist_ok=True)
+            cfg = yaml.safe_load(self.config_path.read_text()) if self.config_path.exists() else {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+            cfg["deployed_code_revision"] = {"ref": target_ref, "sha": sha, "tree": tree_sha}
+            self.config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        except Exception:
+            pass
         return ProvisionResult(self.name, "deploy", tuple(receipts))
-
-    def promote(self, confirm: bool = False) -> ProvisionResult:
-        """Promote this env's tested revision to prod: fast-forward `main` to the pinned ref. The
-        ONLY dev -> prod path. Refuses unless it is a clean fast-forward (main is an ancestor of the
-        ref) — prod must never silently lose commits or take a diverged merge. Dry by default:
-        reports the ff plan with NO side effect; `--confirm` performs `git push origin <ref>:main`,
-        which triggers the tracked prod deploy workflow. prod -> dev stays automatic + one-way."""
-        receipts: list[StepReceipt] = []
-        ref = self.code_revision or "dev"
-        dev_sha = _git("rev-parse", "--short", ref)
-        main_sha = _git("rev-parse", "--short", "main")
-        if dev_sha is None or main_sha is None:
-            receipts.append(StepReceipt(
-                "promote", STATUS_BLOCKED, "promote",
-                f"cannot resolve {ref}/main — run promote from the workspace git checkout"))
-            return ProvisionResult(self.name, "promote", tuple(receipts))
-        if not _git_ok("merge-base", "--is-ancestor", "main", ref):
-            receipts.append(StepReceipt(
-                "promote", STATUS_ERROR, "promote",
-                f"{ref} @ {dev_sha} is NOT a fast-forward of main @ {main_sha} (dev diverged) — "
-                "forward main->dev and reconcile before promoting"))
-            return ProvisionResult(self.name, "promote", tuple(receipts))
-        ahead = _git("rev-list", "--count", f"main..{ref}") or "0"
-        if ahead == "0":
-            receipts.append(StepReceipt(
-                "promote", STATUS_EXISTS, "promote",
-                f"prod (main) already at {ref} @ {dev_sha} — nothing to promote"))
-            return ProvisionResult(self.name, "promote", tuple(receipts))
-        if not confirm:
-            receipts.append(StepReceipt(
-                "promote", STATUS_EXISTS, "promote",
-                f"READY: fast-forward main {main_sha} -> {ref} {dev_sha} ({ahead} commit(s)). "
-                f"Re-run `takyon env promote {self.name} --confirm` to ff main and trigger the prod deploy.",
-                data={"dev_sha": dev_sha, "main_sha": main_sha, "ahead": int(ahead)}))
-            return ProvisionResult(self.name, "promote", tuple(receipts))
-        pushed = _git("push", "origin", f"{ref}:main")
-        if pushed is None:
-            receipts.append(StepReceipt(
-                "promote", STATUS_ERROR, "promote",
-                f"git push origin {ref}:main failed (not a ff, or no push perms)"))
-            return ProvisionResult(self.name, "promote", tuple(receipts))
-        receipts.append(StepReceipt(
-            "promote", STATUS_CREATED, "promote",
-            f"promoted: main fast-forwarded to {dev_sha}; the prod deploy workflow is triggered. "
-            "If migrations changed, run `takyon migrate` on the operator host.",
-            data={"promoted_sha": dev_sha, "ahead": int(ahead)}))
-        return ProvisionResult(self.name, "promote", tuple(receipts))
 
     def status(self) -> ProvisionResult:
         """Report the environment's current state WITHOUT any side effect. A nonexistent env is a clean
         report (every twin 'blocked'/'disabled'), never a crash."""
         receipts: list[StepReceipt] = []
 
-        # code_revision — THE code gate, reported first. dev must run a rev AHEAD of prod (main);
+        # code_revision — THE code gate, reported first. Dev and prod must resolve to main;
         # this surfaces the pin + any drift with no side effect. Git-only; degrades to a literal
         # report off a checkout (e.g. a deployed host that is not the workspace repo).
         rev = self._resolve_rev_info()
@@ -2876,10 +3270,42 @@ class EnvironmentProvisioner:
                 data={"pinned_ref": rev["pinned_ref"]}))
         else:
             detail = (f"pinned {rev['pinned_ref']} @ {rev['pinned_sha']}; prod main @ {rev['prod_sha']}; "
-                      f"dev {rev['ahead']} ahead, {rev['behind']} behind")
+                      f"drift: {rev['ahead']} ahead, {rev['behind']} behind")
             if rev["diverged"]:
-                detail += " — dev is BEHIND prod; forward main->dev (auto-workflow or `git merge main`)"
+                detail += " — dev is not on the published production revision"
             receipts.append(StepReceipt("code_revision", STATUS_EXISTS, "status", detail, data=rev))
+
+        # The dedicated Safebox is the authority store in the prod-shaped dev topology. Read only
+        # secret NAMES from it so status does not falsely report a managed provider secret missing
+        # merely because it is intentionally absent from the local operator store.
+        dev_split: dict[str, Any] = {}
+        remote_aliases: set[str] = set()
+        try:
+            import yaml
+            config = yaml.safe_load(self.config_path.read_text()) if self.config_path.exists() else {}
+            dev_split = (config or {}).get("dev_split") or {}
+            key_path = str(dev_split.get("ssh_key_path") or "").strip()
+            safebox_ip = str(((dev_split.get("safebox") or {}).get("public_ip") or "")).strip()
+            if key_path and safebox_ip:
+                names = subprocess.run(
+                    [
+                        "ssh", "-i", key_path, "-o", "IdentitiesOnly=yes",
+                        "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                        f"root@{safebox_ip}",
+                        "set -e; env=/opt/takyon/.takyon/.env; "
+                        "awk -F= '/^[A-Z0-9_]+=/ {print $1}' \"$env\"; "
+                        "sed -n 's/^TAKYON_MANAGED_SECRET_KEYS=//p' \"$env\" "
+                        "| tr ' ,' '\\n' | tr -d '\"'",
+                    ],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if names.returncode == 0:
+                    remote_aliases = {
+                        line.strip() for line in names.stdout.splitlines()
+                        if re.fullmatch(r"[A-Z][A-Z0-9_]*", line.strip())
+                    }
+        except Exception:
+            dev_split = {}
 
         db_cfg = self.manifest.get("database") or {}
         if not db_cfg.get("enabled", False):
@@ -2902,7 +3328,7 @@ class EnvironmentProvisioner:
                 for aliases in (groups.values() if isinstance(groups, dict) else [])
                 for a in (aliases or []) if str(a).strip()
             ]
-            missing = [a for a in wanted if not self._resolve_alias(a)]
+            missing = [a for a in wanted if not self._resolve_alias(a) and a not in remote_aliases]
             receipts.append(
                 StepReceipt("safebox", STATUS_BLOCKED if missing else STATUS_EXISTS, "status",
                             f"{len(missing)} alias(es) missing" if missing else "all aliases present",
@@ -2968,6 +3394,49 @@ class EnvironmentProvisioner:
             StepReceipt("config", STATUS_EXISTS if self.config_path.exists() else STATUS_SKIPPED, "status",
                         f"config at {self.config_path}" if self.config_path.exists() else "not yet provisioned")
         )
+
+        # Prove each declared host is healthy and executing the published production revision.
+        key_path = str(dev_split.get("ssh_key_path") or "").strip()
+        target_sha = _git("rev-parse", "origin/main") or ""
+        host_specs = [
+            ("safebox", dev_split.get("safebox") or {}, ["takyon-safebox.service"],
+             lambda block: f"http://{block.get('private_ip')}:8000/healthz"),
+            ("operator", dev_split.get("operator") or {},
+             ["takyon-dashboard.service", "takyon-worker.service", "takyon-docker-broker.service"],
+             lambda _block: "http://127.0.0.1:9119/healthz"),
+        ]
+        host_specs.extend(
+            ("subuser", block or {}, ["takyon-subuser.service", "caddy.service"],
+             lambda _block: "http://127.0.0.1/healthz")
+            for block in (dev_split.get("replicas") or [])
+        )
+        for role, block, services, health_url in host_specs:
+            ip = str(block.get("public_ip") or "").strip()
+            name = str(block.get("name") or role).strip()
+            if not key_path or not ip:
+                continue
+            command = (
+                "set -euo pipefail; systemctl is-active --quiet " + " ".join(services)
+                + "; curl -fsS --max-time 5 " + health_url(block) + " >/dev/null; "
+                "python3 -c \"import json; print(json.load(open("
+                "'/opt/takyon/hermes-agent-main/.takyon-deploy-artifact.json'))"
+                "['source_revision'])\""
+            )
+            checked = subprocess.run(
+                ["ssh", "-i", key_path, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+                 "-o", "ConnectTimeout=5", f"root@{ip}", command],
+                capture_output=True, text=True, timeout=20,
+            )
+            live_sha = str(checked.stdout or "").strip().splitlines()[-1:] or [""]
+            live_sha = live_sha[0]
+            current = checked.returncode == 0 and bool(target_sha) and live_sha == target_sha
+            receipts.append(StepReceipt(
+                f"host:{name}", STATUS_EXISTS if current else STATUS_ERROR, "status",
+                (f"healthy at production revision {live_sha[:12]}" if current else
+                 f"unhealthy or revision drift (live {live_sha[:12] or 'unknown'}, "
+                 f"expected {target_sha[:12] or 'unknown'})"),
+                data={"role": role, "source_revision": live_sha, "expected_revision": target_sha},
+            ))
         return ProvisionResult(name=self.name, action="status", receipts=tuple(receipts))
 
     # ── DESTROY ───────────────────────────────────────────────────────────────────────────────
@@ -3210,6 +3679,11 @@ class EnvironmentProvisioner:
         sb_host = cfg.get("safebox_host") or {}
         if sb_host.get("enabled", False):
             owned_names.add(str(sb_host.get("name") or f"takyon-{self.name}-safebox").strip())
+        operator_host = cfg.get("operator_host") or {}
+        if operator_host.get("enabled", False):
+            owned_names.add(
+                str(operator_host.get("name") or f"takyon-{self.name}-operator").strip()
+            )
         try:
             listed = self.http.request(
                 "GET", f"{self._DO_BASE}/droplets?per_page=200", headers=headers

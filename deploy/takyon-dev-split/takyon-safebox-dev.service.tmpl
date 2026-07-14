@@ -32,9 +32,11 @@ Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
 Environment=TAKYON_ENV=dev
+Environment=TAKYON_STRIPE_MODE=test
 Environment=TAKYON_HOST_ROLE=safebox
 # Checkout redirect validation must use the same isolated dev product base as the subuser plane.
 Environment=PUBLIC_COMPANY_BASE_DOMAIN=dev.coscale.app
+Environment=TAKYON_SAFEBOX_OPERATOR_CLIENTS=__OPERATOR_VPC_IP__
 # Stage 4a parity (and the 4c headroom subject): 2 stateless uvicorn workers — every safebox
 # handler is sync `def` (threadpool-run) and all mutable authority state lives in Postgres.
 Environment=TAKYON_UVICORN_WORKERS=2
