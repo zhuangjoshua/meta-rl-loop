@@ -1582,6 +1582,25 @@ def test_business_refresh_product_surface_uses_longer_default_timeout(monkeypatc
     monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", fake_finalize)
     monkeypatch.setattr(
         takyon_core,
+        "_assert_product_refresh_legacy_idempotency_safe",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_acquire_idempotency_preclaim",
+        lambda *_args, **_kwargs: (
+            takyon_core._IdempotencyPreclaim(
+                kind="business_refresh_product_surface",
+                operation_hash="a" * 64,
+                claim_token="test-claim",
+                accepted_state_identities=("test-state",),
+                result_context={},
+            ),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        takyon_core,
         "_product_surface_refresh_operations",
         lambda **_: [{"action": "event.record", "business": "latexflow", "scope": "business:latexflow", "event_type": "test", "payload": {}}],
     )
@@ -1645,6 +1664,25 @@ def test_business_refresh_product_surface_treats_null_install_as_default_true(mo
     monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", fake_finalize)
     monkeypatch.setattr(
         takyon_core,
+        "_assert_product_refresh_legacy_idempotency_safe",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_acquire_idempotency_preclaim",
+        lambda *_args, **_kwargs: (
+            takyon_core._IdempotencyPreclaim(
+                kind="business_refresh_product_surface",
+                operation_hash="a" * 64,
+                claim_token="test-claim",
+                accepted_state_identities=("test-state",),
+                result_context={},
+            ),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        takyon_core,
         "_product_surface_refresh_operations",
         lambda **_: [{"action": "event.record", "business": "latexflow", "scope": "business:latexflow", "event_type": "test", "payload": {}}],
     )
@@ -1698,6 +1736,138 @@ def test_business_refresh_product_surface_rejects_source_path_drift(monkeypatch)
     assert result["success"] is False
     assert "anchored to 'product/site'" in str(result.get("error") or "")
     assert finalize_called is False
+
+
+def _prepare_product_refresh_idempotency_test(tmp_path, monkeypatch, pg_store_dsn):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.delenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", raising=False)
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn)
+    _commit(
+        store,
+        "business:refresh-idempotency",
+        [
+            {
+                "action": "business.upsert",
+                "business": "refresh-idempotency",
+                "name": "Refresh Idempotency",
+            }
+        ],
+        f"init-refresh-idempotency-{uuid.uuid4().hex}",
+    )
+    source_root = tmp_path / "businesses" / "refresh-idempotency" / "product" / "site"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_file = source_root / "src.tsx"
+    source_file.write_text("export const version = 'one';\n", encoding="utf-8")
+    surface = {
+        "source_path": "product/site",
+        "publish_target": "https://refresh-idempotency.coscale.app/",
+        "publish_policy": "publish_after_refresh",
+        "runtime_features": [],
+        "routes": ["/"],
+        "metadata": {},
+    }
+    monkeypatch.setattr(
+        store,
+        "read",
+        lambda **_: {"app": {"surface_contract": dict(surface), "plans": []}},
+    )
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    finalize_calls: list[dict[str, object]] = []
+
+    def fake_finalize(**kwargs: object) -> dict[str, object]:
+        finalize_calls.append(dict(kwargs))
+        return {
+            "status": "passed",
+            "kind": "node_build",
+            "source_path": kwargs["source_path"],
+            "receipt_path": kwargs["receipt_path"],
+            "runtime_features": [],
+            "inventory": {},
+            "publish": {
+                "status": "published",
+                "public_url": kwargs["publish_target"],
+                "live_build_id": "build-one",
+                "database_build_activated": True,
+                "blocker": "",
+            },
+            "blocker": "",
+        }
+
+    def fake_operations(**kwargs: object) -> list[dict[str, object]]:
+        refresh = kwargs["surface_refresh"]
+        assert isinstance(refresh, dict)
+        return [
+            {
+                "action": "event.record",
+                "business": "refresh-idempotency",
+                "event_type": "product.surface.refresh.idempotency-test",
+                "payload": {"receipt_path": refresh["receipt_path"]},
+            }
+        ]
+
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", fake_finalize)
+    monkeypatch.setattr(takyon_core, "_product_surface_refresh_operations", fake_operations)
+    return store, source_file, finalize_calls
+
+
+def test_product_refresh_reused_key_with_changed_source_fails_before_build_or_publish(
+    tmp_path,
+    monkeypatch,
+    pg_store_dsn,
+):
+    _store_for_test, source_file, finalize_calls = _prepare_product_refresh_idempotency_test(
+        tmp_path,
+        monkeypatch,
+        pg_store_dsn,
+    )
+    args = {
+        "business": "refresh-idempotency",
+        "source_path": "product/site",
+        "install": False,
+        "idempotency_key": "refresh-idempotency-conflict",
+    }
+
+    first = json.loads(handle_business_refresh_product_surface(args))
+    assert first["success"] is True
+    assert len(finalize_calls) == 1
+    source_file.write_text("export const version = 'two';\n", encoding="utf-8")
+
+    conflicting = json.loads(handle_business_refresh_product_surface(args))
+
+    assert conflicting["success"] is False
+    assert "idempotency_key already used for different operations" in conflicting["error"]
+    assert len(finalize_calls) == 1
+
+
+def test_product_refresh_exact_retry_replays_without_build_publish_or_second_commit(
+    tmp_path,
+    monkeypatch,
+    pg_store_dsn,
+):
+    store, _source_file, finalize_calls = _prepare_product_refresh_idempotency_test(
+        tmp_path,
+        monkeypatch,
+        pg_store_dsn,
+    )
+    args = {
+        "business": "refresh-idempotency",
+        "source_path": "product/site",
+        "install": False,
+        "idempotency_key": "refresh-idempotency-replay",
+    }
+
+    first = json.loads(handle_business_refresh_product_surface(args))
+    replay = json.loads(handle_business_refresh_product_surface(args))
+
+    assert replay == first
+    assert len(finalize_calls) == 1
+    with store._connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM events "
+            "WHERE business_slug = ? AND event_type = ?",
+            ("refresh-idempotency", "product.surface.refresh.idempotency-test"),
+        ).fetchone()["count"]
+    assert int(count) == 1
 
 
 def test_claude_agent_task_injects_workspace_relative_contract(tmp_path, monkeypatch):

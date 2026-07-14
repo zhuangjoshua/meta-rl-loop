@@ -232,6 +232,7 @@ The runtime configuration must:
 - expose the native `Skill` tool;
 - make all approved skills discoverable;
 - allow `skill_read_resource` to open only a manifest skill permitted for the current invocation mode, even though the full approved description catalog is discoverable;
+- resolve both the manifest-local skill name and the SDK's exact `<plugin>:<skill>` name to the same read-only resource, while rejecting every foreign, malformed, nested, or unpublished name;
 - omit the SDK `Agent` tool so the model cannot create subagents;
 - expose only the MCP and local tools allowed for the current invocation mode;
 - keep filesystem and process execution inside the external sandbox.
@@ -704,6 +705,7 @@ Direct VPS edits, ad hoc `rsync`, local-only proof, hand-patched business files,
 - Multi-skill tasks select compatible skills without loading unrelated bodies.
 - No excluded, nested, personal, or invalidly named skill is discoverable.
 - Direct skill-resource reads fail for skills outside the current invocation mode even when their descriptions are globally discoverable.
+- Canonical plugin-qualified skill names can read their own manifest-published resources; foreign or malformed qualifiers cannot.
 - Changing a bound path or tool requires only a HANDOFF change.
 
 ### Sessions and jobs
@@ -741,6 +743,7 @@ Direct VPS edits, ad hoc `rsync`, local-only proof, hand-patched business files,
 ### Product and deployment
 
 - Verified artifacts publish through existing rails with receipts.
+- Product publication claims a business-and-operation-scoped durable idempotency key before build/publish; an exact post-publication retry replays the stored result, changed source/arguments fail before publication, ambiguous pending claims never repeat the side effect, and pre-upgrade unscoped publication rows fail closed.
 - Placeholder or failed product surfaces remain blocked.
 - The operator service and queue worker deploy successfully with the SDK runtime.
 - Both subuser replicas remain authority-free and behaviorally unchanged.

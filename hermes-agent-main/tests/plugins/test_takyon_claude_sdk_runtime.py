@@ -260,6 +260,7 @@ def _policy_manifest(tmp_path, *, allowed_tools=None):
         "\0".join(inventory).encode("utf-8")
     ).hexdigest()
     manifest = {
+        "plugin": {"name": "test-approved-skills", "version": "1.0.0"},
         "capability_bindings": {
             "business.safe.read": {
                 "adapter": "mcp",
@@ -395,11 +396,33 @@ def test_skill_resource_reader_is_manifest_exact_and_blocks_escape(tmp_path) -> 
     )
 
     assert reader({"skill": "safe-skill", "path": "references//./guide.md"}) == "guide"
+    assert reader(
+        {
+            "skill": "test-approved-skills:safe-skill",
+            "path": "references/guide.md",
+        }
+    ) == "guide"
     assert reader({"skill": "safe-skill", "path": "SKILL.md"}) == "skill"
     with pytest.raises(ClaudeSdkRuntimeError, match="manifest-approved"):
         reader({"skill": "wake-only-skill", "path": "SKILL.md"})
+    with pytest.raises(ClaudeSdkRuntimeError, match="manifest-approved"):
+        reader({"skill": "other-plugin:safe-skill", "path": "SKILL.md"})
+    with pytest.raises(ClaudeSdkRuntimeError, match="manifest-approved"):
+        reader(
+            {
+                "skill": "test-approved-skills:safe-skill:extra",
+                "path": "SKILL.md",
+            }
+        )
     with pytest.raises(ClaudeSdkRuntimeError):
         reader({"skill": "safe-skill", "path": "../../secret.txt"})
+    with pytest.raises(ClaudeSdkRuntimeError):
+        reader(
+            {
+                "skill": "test-approved-skills:safe-skill",
+                "path": "../../secret.txt",
+            }
+        )
     with pytest.raises(ClaudeSdkRuntimeError):
         reader({"skill": "safe-skill", "path": "unpublished.md"})
 

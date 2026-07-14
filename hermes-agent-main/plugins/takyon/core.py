@@ -11865,18 +11865,25 @@ def _strict_tree_snapshot(
     root: Path,
     *,
     excluded_parts: frozenset[str] = frozenset(),
+    excluded_relative_paths: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Hash every regular file and fail on symlinks, special files, or unreadable entries."""
     resolved = Path(root).resolve()
     if not resolved.is_dir():
         raise TakyonError(f"snapshot root is not a directory: {resolved}")
+    relative_exclusions = {
+        str(value or "").strip().strip("/")
+        for value in excluded_relative_paths
+        if str(value or "").strip().strip("/")
+    }
     files: dict[str, str] = {}
     for current, dirnames, filenames in os.walk(resolved, followlinks=False):
         current_path = Path(current)
         kept_dirs: list[str] = []
         for name in sorted(dirnames):
             candidate = current_path / name
-            if name in excluded_parts:
+            relative_candidate = candidate.relative_to(resolved).as_posix()
+            if name in excluded_parts or relative_candidate in relative_exclusions:
                 continue
             if candidate.is_symlink():
                 raise TakyonError(
@@ -11887,7 +11894,10 @@ def _strict_tree_snapshot(
         for name in sorted(filenames):
             candidate = current_path / name
             rel = candidate.relative_to(resolved)
-            if any(part in excluded_parts for part in rel.parts):
+            if (
+                any(part in excluded_parts for part in rel.parts)
+                or rel.as_posix() in relative_exclusions
+            ):
                 continue
             try:
                 metadata = candidate.lstat()
@@ -14882,6 +14892,191 @@ def _tier_rank(tier: str) -> int:
 
 def _hash_operation(value: Any) -> str:
     return hashlib.sha256(_json_dumps(value).encode("utf-8")).hexdigest()
+
+
+def _scoped_tool_idempotency_key(
+    raw_idempotency_key: str,
+    *,
+    resolved_scope: str,
+    action: str,
+    reason: str,
+    actor: str,
+    normalized_operation: Mapping[str, Any],
+    include_operation_hash: bool = False,
+) -> str:
+    """Keep caller keys reusable across independent scopes/actions without weakening replay checks."""
+
+    if not raw_idempotency_key:
+        return ""
+    suffix_parts = [
+        hashlib.sha256(f"{resolved_scope}:{action}".encode("utf-8")).hexdigest()[:12]
+    ]
+    if include_operation_hash:
+        suffix_parts.append(
+            _hash_operation(
+                {
+                    "scope": resolved_scope,
+                    "operations": [dict(normalized_operation)],
+                    "reason": reason,
+                    "actor": actor,
+                }
+            )[:12]
+        )
+    suffix = ":".join(suffix_parts)
+    candidate = f"{raw_idempotency_key}:{suffix}"
+    if len(candidate) <= 200:
+        return candidate
+    keep = max(1, 200 - len(suffix) - 1)
+    return f"{raw_idempotency_key[:keep]}:{suffix}"
+
+
+_IDEMPOTENCY_PRECLAIM_FIELD = "_takyon_idempotency_preclaim_v1"
+
+
+@dataclass(frozen=True)
+class _IdempotencyPreclaim:
+    """Opaque ownership proof for one side-effectful operation claimed before it runs."""
+
+    kind: str
+    operation_hash: str
+    claim_token: str
+    accepted_state_identities: tuple[str, ...]
+    result_context: dict[str, Any]
+
+
+def _idempotency_preclaim_metadata(value: Any) -> dict[str, Any]:
+    payload = value if isinstance(value, Mapping) else {}
+    metadata = payload.get(_IDEMPOTENCY_PRECLAIM_FIELD)
+    return dict(metadata) if isinstance(metadata, Mapping) else {}
+
+
+def _idempotency_preclaim_payload(
+    *,
+    kind: str,
+    state: str,
+    operation_hash: str,
+    claim_token: str,
+    accepted_state_identities: Iterable[str],
+    tool_response: Mapping[str, Any] | None = None,
+    commit_result: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    identities = sorted(
+        {
+            str(identity or "").strip()
+            for identity in accepted_state_identities
+            if str(identity or "").strip()
+        }
+    )
+    metadata: dict[str, Any] = {
+        "kind": str(kind or "").strip(),
+        "state": str(state or "").strip(),
+        "operation_hash": str(operation_hash or "").strip(),
+        "claim_token": str(claim_token or "").strip(),
+        "accepted_state_identities": identities,
+    }
+    if state == "pending":
+        metadata["claimed_at"] = _now()
+    elif state == "completed":
+        metadata["completed_at"] = _now()
+    payload: dict[str, Any] = {_IDEMPOTENCY_PRECLAIM_FIELD: metadata}
+    if tool_response is not None:
+        payload["tool_response"] = dict(tool_response)
+    if commit_result is not None:
+        payload["commit_result"] = dict(commit_result)
+    return payload
+
+
+def _acquire_idempotency_preclaim(
+    store: "TakyonStore",
+    *,
+    idempotency_key: str,
+    kind: str,
+    operation_identity: Mapping[str, Any],
+    current_state_identity: str,
+) -> tuple[_IdempotencyPreclaim | None, dict[str, Any] | None]:
+    """Claim a key atomically or replay its completed response without running the operation.
+
+    The durable claim occupies the canonical idempotency row before any external side effect. A
+    different request or source-state identity therefore fails before build/publish; an exact
+    completed retry returns the stored tool response. Pending claims never transfer ownership, so
+    concurrent or ambiguous retries fail closed instead of repeating a live side effect.
+    """
+
+    key = str(idempotency_key or "").strip()
+    if not key:
+        raise TakyonError("idempotency_key is required")
+    if len(key) > 200:
+        raise TakyonError("idempotency_key is too long")
+    normalized_kind = str(kind or "").strip()
+    if not normalized_kind:
+        raise TakyonError("idempotency preclaim kind is required")
+    _assert_active_worker_claim(store, f"idempotency preclaim {normalized_kind}")
+    operation_hash = _hash_operation(dict(operation_identity))
+    state_identity = str(current_state_identity or "").strip()
+    if not state_identity:
+        raise TakyonError("idempotency preclaim state identity is required")
+    claim_token = uuid.uuid4().hex
+    pending_payload = _idempotency_preclaim_payload(
+        kind=normalized_kind,
+        state="pending",
+        operation_hash=operation_hash,
+        claim_token=claim_token,
+        accepted_state_identities=(state_identity,),
+    )
+
+    with store._connect() as conn:
+        with conn:
+            inserted = conn.execute(
+                "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT (key) DO NOTHING RETURNING key",
+                (key, operation_hash, _json_dumps(pending_payload), _now()),
+            ).fetchone()
+            if inserted:
+                return (
+                    _IdempotencyPreclaim(
+                        kind=normalized_kind,
+                        operation_hash=operation_hash,
+                        claim_token=claim_token,
+                        accepted_state_identities=(state_identity,),
+                        result_context={},
+                    ),
+                    None,
+                )
+            prior = conn.execute(
+                "SELECT operation_hash, result_json FROM idempotency_keys WHERE key = ?",
+                (key,),
+            ).fetchone()
+
+    if prior is None:
+        raise TakyonError("idempotency preclaim disappeared before it could be verified")
+    prior_hash = str(prior["operation_hash"] or "").strip()
+    prior_payload = _json_loads(prior["result_json"], {})
+    prior_metadata = _idempotency_preclaim_metadata(prior_payload)
+    if (
+        prior_hash != operation_hash
+        or str(prior_metadata.get("operation_hash") or "").strip() != operation_hash
+        or str(prior_metadata.get("kind") or "").strip() != normalized_kind
+    ):
+        raise TakyonError("idempotency_key already used for different operations")
+    accepted = {
+        str(identity or "").strip()
+        for identity in (prior_metadata.get("accepted_state_identities") or [])
+        if str(identity or "").strip()
+    }
+    if state_identity not in accepted:
+        raise TakyonError("idempotency_key already used for different operations")
+    state = str(prior_metadata.get("state") or "").strip()
+    if state == "completed":
+        tool_response = prior_payload.get("tool_response") if isinstance(prior_payload, Mapping) else None
+        if not isinstance(tool_response, Mapping):
+            raise TakyonError("completed idempotency record is missing its stored tool response")
+        return None, dict(tool_response)
+    if state == "pending":
+        raise TakyonError(
+            "idempotency_key is already claimed by an in-progress operation; "
+            "the live side effect will not be repeated"
+        )
+    raise TakyonError("idempotency_key has an invalid preclaim state")
 
 
 def _normalize_budget_spec(value: Any) -> Any:
@@ -19989,6 +20184,7 @@ class TakyonStore:
         reason: str = "",
         actor: str = "agent",
         principal: dict[str, Any] | None = None,
+        _idempotency_preclaim: _IdempotencyPreclaim | None = None,
     ) -> dict[str, Any]:
         _assert_active_worker_claim(self, f"durable commit {idempotency_key or '<missing>'}")
         self._workspace_sync_cache.clear()
@@ -20000,11 +20196,41 @@ class TakyonStore:
         if not isinstance(operations, list) or not operations:
             raise TakyonError("operations must be a non-empty list")
         parsed = _scope_parts(scope)
-        op_hash = _hash_operation({"scope": scope, "operations": operations, "reason": reason, "actor": actor})
+        if _idempotency_preclaim is not None:
+            if not isinstance(_idempotency_preclaim, _IdempotencyPreclaim):
+                raise TakyonError("invalid idempotency preclaim")
+            op_hash = str(_idempotency_preclaim.operation_hash or "").strip()
+            if not re.fullmatch(r"[0-9a-f]{64}", op_hash):
+                raise TakyonError("invalid idempotency preclaim operation hash")
+            if not str(_idempotency_preclaim.claim_token or "").strip():
+                raise TakyonError("invalid idempotency preclaim token")
+        else:
+            op_hash = _hash_operation(
+                {"scope": scope, "operations": operations, "reason": reason, "actor": actor}
+            )
+
+        def _assert_owned_pending_preclaim(row: Any) -> dict[str, Any]:
+            if row is None:
+                raise TakyonError("idempotency preclaim is missing")
+            if str(row["operation_hash"] or "").strip() != op_hash:
+                raise TakyonError("idempotency_key already used for different operations")
+            payload = _json_loads(row["result_json"], {})
+            metadata = _idempotency_preclaim_metadata(payload)
+            if (
+                str(metadata.get("kind") or "").strip() != _idempotency_preclaim.kind
+                or str(metadata.get("operation_hash") or "").strip() != op_hash
+                or str(metadata.get("state") or "").strip() != "pending"
+                or str(metadata.get("claim_token") or "").strip()
+                != _idempotency_preclaim.claim_token
+            ):
+                raise TakyonError("idempotency preclaim ownership was lost")
+            return metadata
 
         with self._connect() as conn:
             prior = conn.execute("SELECT * FROM idempotency_keys WHERE key = ?", (idempotency_key,)).fetchone()
-            if prior:
+            if _idempotency_preclaim is not None:
+                _assert_owned_pending_preclaim(prior)
+            elif prior:
                 if prior["operation_hash"] != op_hash:
                     raise TakyonError("idempotency_key already used for different operations")
                 return _json_loads(prior["result_json"], {"success": True, "idempotent": True})
@@ -20076,6 +20302,55 @@ class TakyonStore:
                     expected_base_revision=self._canonical_workspace_revision(slug),
                 )
 
+        def _write_idempotency_result(
+            conn: sqlite3.Connection,
+            commit_result: dict[str, Any],
+        ) -> None:
+            if _idempotency_preclaim is None:
+                conn.execute(
+                    "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (idempotency_key, op_hash, _json_dumps(commit_result), _now()),
+                )
+                return
+            locked = conn.execute(
+                "SELECT operation_hash, result_json FROM idempotency_keys WHERE key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            pending_metadata = _assert_owned_pending_preclaim(locked)
+            pending_result_json = str(locked["result_json"] or "")
+            accepted_state_identities = {
+                str(identity or "").strip()
+                for identity in (pending_metadata.get("accepted_state_identities") or [])
+                if str(identity or "").strip()
+            }
+            accepted_state_identities.update(_idempotency_preclaim.accepted_state_identities)
+            tool_response = {
+                **dict(_idempotency_preclaim.result_context),
+                "result": commit_result,
+            }
+            completed_payload = _idempotency_preclaim_payload(
+                kind=_idempotency_preclaim.kind,
+                state="completed",
+                operation_hash=op_hash,
+                claim_token=_idempotency_preclaim.claim_token,
+                accepted_state_identities=accepted_state_identities,
+                tool_response=tool_response,
+                commit_result=commit_result,
+            )
+            updated = conn.execute(
+                "UPDATE idempotency_keys SET result_json = ? "
+                "WHERE key = ? AND operation_hash = ? AND result_json = ?",
+                (
+                    _json_dumps(completed_payload),
+                    idempotency_key,
+                    op_hash,
+                    pending_result_json,
+                ),
+            )
+            if int(getattr(updated, "rowcount", 0) or 0) != 1:
+                raise TakyonError("idempotency preclaim completion was not persisted")
+
         final: dict[str, Any] | None = None
         if not postcommit_workspace_sync:
             last_exc: BaseException | None = None
@@ -20098,10 +20373,7 @@ class TakyonStore:
                                     touched_workspaces.add(slug)
                             final = {"success": True, "scope": str(parsed["raw"]), "results": results}
                             _commit_touched_workspaces(conn, touched_workspaces)
-                            conn.execute(
-                                "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
-                                (idempotency_key, op_hash, _json_dumps(final), _now()),
-                            )
+                            _write_idempotency_result(conn, final)
                     return final
                 except Exception as exc:  # noqa: BLE001
                     if not _is_recoverable_commit_conflict(exc):
@@ -20132,10 +20404,7 @@ class TakyonStore:
                     with self._connect() as conn:
                         with conn:
                             _commit_touched_workspaces(conn, touched_workspaces)
-                            conn.execute(
-                                "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
-                                (idempotency_key, op_hash, _json_dumps(final), _now()),
-                            )
+                            _write_idempotency_result(conn, final)
                     return final
                 except Exception as exc:  # noqa: BLE001
                     if not _is_recoverable_commit_conflict(exc):
@@ -23557,39 +23826,6 @@ def _commit_tool_data(
     store: "TakyonStore" | None = None,
     principal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    def _scoped_tool_idempotency_key(
-        raw_idempotency_key: str,
-        *,
-        resolved_scope: str,
-        action: str,
-        reason: str,
-        actor: str,
-        normalized_operation: dict[str, Any],
-        include_operation_hash: bool = False,
-    ) -> str:
-        if not raw_idempotency_key:
-            return ""
-        suffix_parts = [
-            hashlib.sha256(f"{resolved_scope}:{action}".encode("utf-8")).hexdigest()[:12]
-        ]
-        if include_operation_hash:
-            suffix_parts.append(
-                _hash_operation(
-                    {
-                        "scope": resolved_scope,
-                        "operations": [normalized_operation],
-                        "reason": reason,
-                        "actor": actor,
-                    }
-                )[:12]
-            )
-        suffix = ":".join(suffix_parts)
-        candidate = f"{raw_idempotency_key}:{suffix}"
-        if len(candidate) <= 200:
-            return candidate
-        keep = max(1, 200 - len(suffix) - 1)
-        return f"{raw_idempotency_key[:keep]}:{suffix}"
-
     business = _business_slug(
         {
             "business": operation.get("business") or args.get("business"),
@@ -25716,6 +25952,181 @@ def _product_surface_refresh_operations(
     return operations
 
 
+_PRODUCT_REFRESH_VOLATILE_SURFACE_FIELDS = frozenset(
+    {
+        "business_slug",
+        "status",
+        "public_url",
+        "publish_status",
+        "published_at",
+        "live_build_id",
+        "live_probe_status",
+        "live_probe_detail",
+        "publish_receipt_path",
+        "publish_blocker",
+        "created_at",
+        "updated_at",
+    }
+)
+_PRODUCT_REFRESH_VOLATILE_METADATA_FIELDS = frozenset(
+    {"takyon_publish", "takyon_publish_last_attempt"}
+)
+_PRODUCT_REFRESH_IDEMPOTENCY_EXCLUDED_RELATIVE_PATHS = frozenset(
+    {SUBUSER_KIT_DIRNAME}
+)
+_PRODUCT_REFRESH_IDEMPOTENCY_ACTION = "business_refresh_product_surface"
+
+
+def _product_refresh_idempotency_storage_key(
+    raw_idempotency_key: str,
+    *,
+    business: str,
+) -> str:
+    return _scoped_tool_idempotency_key(
+        raw_idempotency_key,
+        resolved_scope=f"business:{business}",
+        action=_PRODUCT_REFRESH_IDEMPOTENCY_ACTION,
+        reason="",
+        actor="",
+        normalized_operation={},
+    )
+
+
+def _assert_product_refresh_legacy_idempotency_safe(
+    store: "TakyonStore",
+    *,
+    raw_idempotency_key: str,
+    storage_key: str,
+    business: str,
+) -> None:
+    """Refuse ambiguous pre-upgrade rows instead of silently repeating an old publication."""
+
+    if not raw_idempotency_key or raw_idempotency_key == storage_key:
+        return
+    with store._connect() as conn:
+        prior = conn.execute(
+            "SELECT result_json FROM idempotency_keys WHERE key = ?",
+            (raw_idempotency_key,),
+        ).fetchone()
+    if prior is None:
+        return
+    payload = _json_loads(prior["result_json"], {})
+    if not isinstance(payload, Mapping):
+        raise TakyonError(
+            "legacy idempotency_key has an ambiguous durable result; product publication will not be repeated"
+        )
+    expected_scope = f"business:{business}"
+    prior_scope = str(payload.get("scope") or "").strip()
+    if prior_scope and prior_scope != expected_scope:
+        return
+    results = payload.get("results")
+    if prior_scope == expected_scope and isinstance(results, list) and results:
+        fully_classified = True
+        publication_marker = False
+        for item in results:
+            if not isinstance(item, Mapping):
+                fully_classified = False
+                continue
+            action = str(item.get("action") or "").strip()
+            if not action:
+                fully_classified = False
+                continue
+            path = str(item.get("path") or "").strip()
+            if (
+                action in {
+                    "app.surface.publish_result",
+                    "app.surface.stage_build",
+                    "app.surface.finalize_build_activation",
+                    "app.surface.mark_build_activation_ambiguous",
+                }
+                or (
+                    action == "artifact.write"
+                    and path.startswith("metrics/receipts/product-surface/")
+                )
+            ):
+                publication_marker = True
+        if fully_classified and not publication_marker:
+            return
+    raise TakyonError(
+        "legacy idempotency_key already records or may record a product publication; "
+        "the live side effect will not be repeated"
+    )
+
+
+def _product_refresh_source_state_identity(source_root: Path) -> str:
+    """Stable identity for source inputs, including deterministic missing/invalid states."""
+
+    root = Path(source_root)
+    if not root.exists():
+        return _hash_operation({"state": "missing"})
+    if not root.is_dir():
+        return _hash_operation({"state": "not_directory"})
+    try:
+        # The runtime-owned AppKit projection embeds publication output such as publicUrl and is
+        # rematerialized on every read. Excluding only that owned directory keeps exact retries
+        # stable after pointer activation while all product-owned source remains collision-bound.
+        snapshot = _strict_tree_snapshot(
+            root,
+            excluded_parts=_PRODUCT_SOURCE_SNAPSHOT_EXCLUDED_PARTS,
+            excluded_relative_paths=_PRODUCT_REFRESH_IDEMPOTENCY_EXCLUDED_RELATIVE_PATHS,
+        )
+    except Exception as exc:
+        return _hash_operation({"state": "invalid", "error": str(exc)})
+    return _hash_operation(
+        {
+            "state": "present",
+            "sha256": str(snapshot.get("sha256") or ""),
+            "file_count": int(snapshot.get("file_count") or 0),
+        }
+    )
+
+
+def _product_refresh_operation_identity(
+    *,
+    business: str,
+    surface: Mapping[str, Any],
+    plans: list[dict[str, Any]] | None,
+    source_path: str,
+    publish_target: str,
+    requested_publish_policy: str,
+    publish_policy: str,
+    install: bool,
+    timeout_seconds: int,
+    activate_on_success: bool,
+    reason: str,
+    actor: str,
+) -> dict[str, Any]:
+    # Publication output fields are deliberately excluded: this refresh mutates them itself, so an
+    # exact retry must still match after success. Every build-affecting contract field (including
+    # future additions) remains bound unless it is explicitly listed as publication output above.
+    contract_input: dict[str, Any] = {
+        str(key): value
+        for key, value in surface.items()
+        if str(key) not in _PRODUCT_REFRESH_VOLATILE_SURFACE_FIELDS
+    }
+    if isinstance(contract_input.get("metadata"), Mapping):
+        contract_input["metadata"] = {
+            str(key): value
+            for key, value in contract_input["metadata"].items()
+            if str(key) not in _PRODUCT_REFRESH_VOLATILE_METADATA_FIELDS
+        }
+    return {
+        "tool": "business_refresh_product_surface",
+        "business": business,
+        "surface_contract": contract_input,
+        "plans": list(plans or []),
+        "source_path": source_path,
+        "publish_target": publish_target,
+        "requested_publish_policy": requested_publish_policy,
+        "publish_policy": publish_policy,
+        "install": bool(install),
+        "timeout_seconds": int(timeout_seconds),
+        "activate_on_success": bool(activate_on_success),
+        "reason": reason,
+        "actor": actor,
+    }
+
+
 def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
     store = _store()
     try:
@@ -25729,6 +26140,8 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
+        if len(idempotency_key) > 200:
+            raise TakyonError("idempotency_key is too long")
         summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
         app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
         surface = app.get("surface") or app.get("surface_contract") or {}
@@ -25747,6 +26160,52 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
         publish_policy = "publish_after_refresh" if legacy_shared_renderer else requested_publish_policy
         install = _boolish(args.get("install"), default=True)
         timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=300, minimum=15, maximum=900)
+        activate_on_success = _boolish(args.get("activate_on_success"), default=True)
+        reason = str(args.get("reason") or "product surface publication")
+        actor = str(args.get("actor") or "agent")
+        business_root_resolver = getattr(store, "_business_root", None)
+        if callable(business_root_resolver):
+            try:
+                business_root = business_root_resolver(business, sync=False)
+            except TypeError:
+                business_root = business_root_resolver(business)
+            source_root = Path(business_root) / source_path
+        else:  # Narrow test-double compatibility; production TakyonStore always owns this method.
+            source_root = Path(os.getenv("TAKYON_HOME") or get_takyon_home() / DEFAULT_TAKYON_DIRNAME) / "businesses" / business / source_path
+        initial_source_identity = _product_refresh_source_state_identity(source_root)
+        storage_key = _product_refresh_idempotency_storage_key(
+            idempotency_key,
+            business=business,
+        )
+        _assert_product_refresh_legacy_idempotency_safe(
+            store,
+            raw_idempotency_key=idempotency_key,
+            storage_key=storage_key,
+            business=business,
+        )
+        preclaim, replay = _acquire_idempotency_preclaim(
+            store,
+            idempotency_key=storage_key,
+            kind=_PRODUCT_REFRESH_IDEMPOTENCY_ACTION,
+            operation_identity=_product_refresh_operation_identity(
+                business=business,
+                surface=surface,
+                plans=plans,
+                source_path=source_path,
+                publish_target=publish_target,
+                requested_publish_policy=requested_publish_policy,
+                publish_policy=publish_policy,
+                install=install,
+                timeout_seconds=timeout_seconds,
+                activate_on_success=activate_on_success,
+                reason=reason,
+                actor=actor,
+            ),
+            current_state_identity=initial_source_identity,
+        )
+        if replay is not None:
+            return tool_result(replay)
+        assert preclaim is not None
         receipt_path = f"metrics/receipts/product-surface/{uuid.uuid4().hex}.json"
         surface_refresh = _finalize_product_surface_refresh(
             store=store,
@@ -25762,6 +26221,21 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
             receipt_path=receipt_path,
             refresh_source="business_refresh_product_surface",
         )
+        final_source_identity = _product_refresh_source_state_identity(source_root)
+        response_context = {
+            "success": True,
+            "business": business,
+            "surface_refresh": surface_refresh,
+        }
+        completion_preclaim = _IdempotencyPreclaim(
+            kind=preclaim.kind,
+            operation_hash=preclaim.operation_hash,
+            claim_token=preclaim.claim_token,
+            accepted_state_identities=tuple(
+                sorted({initial_source_identity, final_source_identity})
+            ),
+            result_context=response_context,
+        )
         result = store.commit(
             scope=f"business:{business}",
             operations=_product_surface_refresh_operations(
@@ -25771,13 +26245,14 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
                 publish_target=publish_target,
                 publish_policy=publish_policy,
                 requested_publish_policy=requested_publish_policy,
-                activate_on_success=_boolish(args.get("activate_on_success"), default=True),
+                activate_on_success=activate_on_success,
             ),
-            idempotency_key=idempotency_key,
-            reason=args.get("reason") or "product surface publication",
-            actor=args.get("actor") or "agent",
+            idempotency_key=storage_key,
+            reason=reason,
+            actor=actor,
+            _idempotency_preclaim=completion_preclaim,
         )
-        return tool_result({"success": True, "business": business, "surface_refresh": surface_refresh, "result": result})
+        return tool_result({**response_context, "result": result})
     except Exception as exc:
         return tool_error(str(exc), success=False)
 

@@ -671,6 +671,16 @@ def _build_skill_resource_reader(
     raw_skills = manifest.get("skills") if isinstance(manifest, Mapping) else None
     if not isinstance(raw_skills, list):
         raise ClaudeSdkRuntimeError("approved skill manifest has no skills list")
+    raw_plugin = manifest.get("plugin") if isinstance(manifest, Mapping) else None
+    approved_plugin_name = (
+        str(raw_plugin.get("name") or "").strip()
+        if isinstance(raw_plugin, Mapping)
+        else ""
+    )
+    if not approved_plugin_name or ":" in approved_plugin_name:
+        raise ClaudeSdkRuntimeError(
+            "approved skill manifest has no valid plugin name"
+        )
     active_skills = {
         str(name or "").strip()
         for name in allowed_skills
@@ -717,7 +727,18 @@ def _build_skill_resource_reader(
     root = plugin_root.resolve(strict=True)
 
     def read_resource(args: Mapping[str, Any]) -> str:
-        skill = str(args.get("skill") or "").strip()
+        requested_skill = str(args.get("skill") or "").strip()
+        skill = requested_skill
+        if ":" in requested_skill:
+            prefix, skill = requested_skill.split(":", 1)
+            if (
+                prefix != approved_plugin_name
+                or not skill
+                or ":" in skill
+            ):
+                raise ClaudeSdkRuntimeError(
+                    "skill resource is not manifest-approved"
+                )
         if skill not in approved:
             raise ClaudeSdkRuntimeError("skill resource is not manifest-approved")
         relative = _canonical_relative_path(
