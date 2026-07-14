@@ -2938,7 +2938,10 @@ class EnvironmentProvisioner:
                     "https://deb.nodesource.com/node_20.x nodistro main\\n' "
                     "> /etc/apt/sources.list.d/nodesource.list; "
                     "apt-get update -y >/dev/null; apt-get install -y nodejs >/dev/null; fi; "
-                    "test \"$(node --version | sed -E 's/^v([0-9]+).*/\\1/')\" -ge 20",
+                    "test \"$(node --version | sed -E 's/^v([0-9]+).*/\\1/')\" -ge 20; "
+                    "if ! command -v chromium >/dev/null; then "
+                    "apt-get update -y >/dev/null; apt-get install -y chromium >/dev/null; fi; "
+                    "chromium --version >/dev/null",
                 ],
                 capture_output=True, text=True, timeout=600,
             )
