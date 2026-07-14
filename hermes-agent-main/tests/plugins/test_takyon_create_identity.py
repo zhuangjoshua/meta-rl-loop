@@ -190,6 +190,15 @@ def test_ceo_prompt_rule_8_stops_redelegation_on_blocked_authority_violation():
     assert "automatic local source/build repair retry" not in text
 
 
+def test_ceo_prompt_routes_matching_domain_work_through_native_skill_descriptions():
+    prompt_path = Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "prompts" / "ceo.md"
+    text = prompt_path.read_text(encoding="utf-8")
+
+    assert "compare the request with their native descriptions" in text
+    assert "invoke those skills first" in text
+    assert "when none match, do not invoke one" in text
+
+
 def test_interactive_only_rules_are_suppressed_on_bootstrap():
     from plugins.takyon.cli import _load_ceo_prompt
 
