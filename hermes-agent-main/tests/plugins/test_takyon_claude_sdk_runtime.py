@@ -259,6 +259,20 @@ def _policy_manifest(tmp_path, *, allowed_tools=None):
         "\0".join(inventory).encode("utf-8")
     ).hexdigest()
     manifest = {
+        "capability_bindings": {
+            "business.safe.read": {
+                "adapter": "mcp",
+                "tools": ["safe_tool"],
+                "scope": "current_business",
+                "authority": "operator_session",
+            },
+            "business.danger.control": {
+                "adapter": "mcp",
+                "tools": ["dangerous_tool"],
+                "scope": "current_business",
+                "authority": "operator_session",
+            },
+        },
         "capability_tools": {
             "business.safe.read": ["safe_tool"],
             "business.danger.control": ["dangerous_tool"],
@@ -279,6 +293,7 @@ def _policy_manifest(tmp_path, *, allowed_tools=None):
         "skills": [
             {
                 "name": "safe-skill",
+                "allowed_modes": ["bootstrap"],
                 "plugin_path": "skills/safe-skill",
                 "publish_files": [
                     "skills/safe-skill/SKILL.md",
@@ -287,6 +302,7 @@ def _policy_manifest(tmp_path, *, allowed_tools=None):
             },
             {
                 "name": "wake-only-skill",
+                "allowed_modes": ["wake"],
                 "plugin_path": "skills/wake-only-skill",
                 "publish_files": ["skills/wake-only-skill/SKILL.md"],
             },
@@ -323,6 +339,40 @@ def test_mode_policy_refuses_unknown_allowed_tool(tmp_path) -> None:
             manifest_path=manifest,
             mode="bootstrap",
             tool_definitions=[_skill_resource_tool_definition()],
+        )
+
+
+def test_mode_policy_refuses_allowed_skill_mode_drift(tmp_path) -> None:
+    manifest_path = _policy_manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["skills"][0]["allowed_modes"] = ["interactive"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ClaudeSdkRuntimeError, match="allowed_skills drifted"):
+        enforce_sdk_mode_tool_policy(
+            manifest_path=manifest_path,
+            mode="bootstrap",
+            tool_definitions=[
+                {"name": "safe_tool", "inputSchema": {"type": "object"}},
+                _skill_resource_tool_definition(),
+            ],
+        )
+
+
+def test_mode_policy_refuses_capability_binding_policy_drift(tmp_path) -> None:
+    manifest_path = _policy_manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["capability_bindings"]["business.safe.read"]["scope"] = "any_business"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ClaudeSdkRuntimeError, match="invalid or drifted binding"):
+        enforce_sdk_mode_tool_policy(
+            manifest_path=manifest_path,
+            mode="bootstrap",
+            tool_definitions=[
+                {"name": "safe_tool", "inputSchema": {"type": "object"}},
+                _skill_resource_tool_definition(),
+            ],
         )
 
 

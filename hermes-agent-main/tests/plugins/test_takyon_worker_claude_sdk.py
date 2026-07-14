@@ -50,6 +50,124 @@ def test_run_ceo_turn_passes_stable_sdk_contract_without_fallback(monkeypatch) -
     assert captured["record_final_chat"] is False
 
 
+@pytest.mark.parametrize("task_kind", ["ceo_bootstrap", "ceo_wake"])
+def test_sdk_retry_before_session_init_restarts_same_stable_session(
+    monkeypatch, tmp_path, task_kind
+) -> None:
+    owner = str(uuid.uuid4())
+    captured = {}
+
+    class Store:
+        project_key = "scoped-project"
+
+        def has_durable_transcript(self, key):
+            captured["evidence_key"] = key
+            return False
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return {
+            "session_id": kwargs["session_id"],
+            "summary": "done",
+            "total_cost_usd": 0.0,
+        }
+
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: owner)
+    monkeypatch.setattr(claude_sdk_sessions, "PostgresClaudeSdkSessionStore", lambda **_kw: Store())
+    monkeypatch.setattr(claude_sdk_runtime, "run_primary_sdk_subprocess", fake_run)
+    monkeypatch.setattr(
+        core,
+        "_active_operator_task_receipt_context",
+        lambda: {"run_id": "job-1", "task_kind": task_kind},
+    )
+    monkeypatch.setattr(cost_events, "record_operator_event_autoconn", lambda **_kw: None)
+    monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda *_a: None)
+    monkeypatch.setattr(
+        "gateway.session_context.get_session_env",
+        lambda key, default="": str(tmp_path)
+        if key == "TAKYON_SESSION_WORKSPACE_ROOT"
+        else default,
+    )
+
+    worker._run_claude_sdk_ceo_turn(
+        slug="acme",
+        system_prompt="system",
+        user_prompt="retry",
+        toolsets=["takyon"],
+        max_turns=10,
+        max_budget_usd=2,
+        effort="high",
+        inactivity_limit=30,
+        sdk_session_id="job-1",
+        sdk_resume_session=True,
+        sdk_epoch="bootstrap" if task_kind == "ceo_bootstrap" else "wake",
+    )
+
+    stable_session = claude_sdk_runtime.stable_sdk_session_id("job-1")
+    assert captured["resume_session"] is False
+    assert captured["session_id"] == stable_session
+    assert captured["evidence_key"] == {
+        "projectKey": "scoped-project",
+        "sessionId": stable_session,
+    }
+
+
+@pytest.mark.parametrize("task_kind", ["ceo_bootstrap", "ceo_wake"])
+def test_sdk_retry_resumes_only_with_real_durable_transcript(
+    monkeypatch, tmp_path, task_kind
+) -> None:
+    owner = str(uuid.uuid4())
+    captured = {}
+
+    class Store:
+        project_key = "scoped-project"
+        transcript = [{"type": "user", "uuid": "durable-user-turn"}]
+
+        def has_durable_transcript(self, _key):
+            return bool(self.transcript)
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return {
+            "session_id": kwargs["session_id"],
+            "summary": "continued",
+            "total_cost_usd": 0.0,
+        }
+
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: owner)
+    monkeypatch.setattr(claude_sdk_sessions, "PostgresClaudeSdkSessionStore", lambda **_kw: Store())
+    monkeypatch.setattr(claude_sdk_runtime, "run_primary_sdk_subprocess", fake_run)
+    monkeypatch.setattr(
+        core,
+        "_active_operator_task_receipt_context",
+        lambda: {"run_id": "job-1", "task_kind": task_kind},
+    )
+    monkeypatch.setattr(cost_events, "record_operator_event_autoconn", lambda **_kw: None)
+    monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda *_a: None)
+    monkeypatch.setattr(
+        "gateway.session_context.get_session_env",
+        lambda key, default="": str(tmp_path)
+        if key == "TAKYON_SESSION_WORKSPACE_ROOT"
+        else default,
+    )
+
+    worker._run_claude_sdk_ceo_turn(
+        slug="acme",
+        system_prompt="system",
+        user_prompt="retry",
+        toolsets=["takyon"],
+        max_turns=10,
+        max_budget_usd=2,
+        effort="high",
+        inactivity_limit=30,
+        sdk_session_id="job-1",
+        sdk_resume_session=True,
+        sdk_epoch="bootstrap" if task_kind == "ceo_bootstrap" else "wake",
+    )
+
+    assert captured["resume_session"] is True
+
+
 @pytest.mark.parametrize(
     ("record_final_chat", "expected_chats"),
     (

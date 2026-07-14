@@ -8,6 +8,19 @@ export const PRIMARY_RUNTIME_EVENT_VERSION = 1;
 export const PRIMARY_RUNTIME_SOURCE = "claude-agent-sdk";
 export const SDK_PROGRESS_PREFIX = "TAKYON_SDK_EVENT ";
 export const SDK_MODULE_PATH_ENV = "TAKYON_CLAUDE_AGENT_SDK_MODULE";
+export const PINNED_CLAUDE_BUILTIN_SKILLS = Object.freeze([
+  "update-config",
+  "verify",
+  "debug",
+  "code-review",
+  "batch",
+  "fewer-permission-prompts",
+  "loop",
+  "claude-api",
+  "run",
+  "run-skill-generator",
+]);
+export const PINNED_CLAUDE_INIT_TOOLS = Object.freeze(["Monitor", "PushNotification"]);
 
 const SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const DEFAULT_LOCAL_TOOLS = Object.freeze(["Skill"]);
@@ -31,6 +44,8 @@ const MODEL_ALIASES = Object.freeze([
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DIGEST_PATTERN = /^sha256:([0-9a-f]{64})$/;
 const INVOCATION_MODES = new Set(["interactive", "bootstrap", "wake"]);
+const PINNED_CLAUDE_BUILTIN_SKILL_SET = new Set(PINNED_CLAUDE_BUILTIN_SKILLS);
+const PINNED_CLAUDE_INIT_TOOL_SET = new Set(PINNED_CLAUDE_INIT_TOOLS);
 const SESSION_APPEND_MAX_BYTES = 8 * 1024 * 1024;
 const SESSION_LOAD_MAX_BYTES = 64 * 1024 * 1024;
 const SESSION_APPEND_MAX_ENTRIES = 2_000;
@@ -218,6 +233,50 @@ function normalizeDiscoveryRoot(value) {
   return normalizeRelative(String(value || "").replace(/^\.\//, ""));
 }
 
+function assertManifestModeSkillPolicy(approvedManifest, skills) {
+  const modePolicies = approvedManifest.mode_tool_policy;
+  if (!modePolicies || typeof modePolicies !== "object" || Array.isArray(modePolicies)) {
+    fail("skill_manifest_mode_policy", "approved-skills.json has no compiled mode skill policy");
+  }
+  const policyModes = Object.keys(modePolicies);
+  if (
+    policyModes.length !== INVOCATION_MODES.size
+    || policyModes.some((mode) => !INVOCATION_MODES.has(mode))
+  ) {
+    fail(
+      "skill_manifest_mode_policy",
+      "approved-skills.json must define exactly interactive, bootstrap, and wake mode policies"
+    );
+  }
+  for (const mode of INVOCATION_MODES) {
+    const rawPolicy = modePolicies[mode];
+    const rawAllowed = rawPolicy?.allowed_skills;
+    if (
+      !rawPolicy
+      || typeof rawPolicy !== "object"
+      || Array.isArray(rawPolicy)
+      || !Array.isArray(rawAllowed)
+      || rawAllowed.some((name) => typeof name !== "string" || name !== cleanString(name) || !name)
+      || new Set(rawAllowed).size !== rawAllowed.length
+    ) {
+      fail("skill_manifest_mode_policy", `approved ${mode} allowed_skills is invalid`);
+    }
+    const expected = new Set(
+      skills.filter((skill) => skill.allowedModes.includes(mode)).map((skill) => skill.name)
+    );
+    const actual = new Set(rawAllowed.map(cleanString));
+    const missing = [...expected].filter((name) => !actual.has(name));
+    const extra = [...actual].filter((name) => !expected.has(name));
+    if (missing.length || extra.length) {
+      fail(
+        "skill_manifest_mode_policy",
+        `approved ${mode} allowed_skills drifted from per-skill allowed_modes; `
+          + `missing=${missing.sort().join(",") || "none"}; extra=${extra.sort().join(",") || "none"}`
+      );
+    }
+  }
+}
+
 function assertPluginManifest(pluginMetadata, approvedManifest) {
   if (!pluginMetadata || typeof pluginMetadata !== "object" || Array.isArray(pluginMetadata)) {
     fail("skill_plugin_metadata", ".claude-plugin/plugin.json must contain an object");
@@ -315,6 +374,7 @@ export async function verifyApprovedSkillPlugin({ pluginPath, manifestPath }) {
   const discoveryRoots = approvedManifest.discovery_roots.map(normalizeDiscoveryRoot);
   const skills = approvedManifest.skills.map((entry) => normalizeManifestSkill(entry, pluginRoot));
   if (skills.length === 0) fail("skill_manifest_empty", "approved skill manifest must not be empty");
+  assertManifestModeSkillPolicy(approvedManifest, skills);
   const names = new Set();
   const skillFiles = new Set();
   for (const skill of skills) {
@@ -543,9 +603,13 @@ export function createPrimaryToolGuard({
       const requested = cleanString(toolInput?.skill || toolInput?.name || toolInput?.command);
       const prefix = `${cleanString(pluginName)}:`;
       const canonical = requested.startsWith(prefix) ? requested.slice(prefix.length) : requested;
-      const allowedModes = approvedSkillModes.get(canonical);
+      const allowedModes = approvedSkillModes.get(canonical)
+        || (PINNED_CLAUDE_BUILTIN_SKILL_SET.has(requested) ? INVOCATION_MODES : null);
       if (!requested || !allowedModes || (requested.includes(":") && !requested.startsWith(prefix))) {
-        return { allowed: false, reason: `skill ${requested || "<empty>"} is not in the approved manifest` };
+        return {
+          allowed: false,
+          reason: `skill ${requested || "<empty>"} is not in the approved or pinned built-in set`,
+        };
       }
       if (!allowedModes.has(invocationMode)) {
         return {
@@ -932,7 +996,10 @@ function verifySdkInitialization(message, { plugin, tools, allowedMcpTools, mode
       fail("agent_tool_exposed", `SDK exposed forbidden model-agent tool ${forbidden}`);
     }
   }
-  const configuredTools = new Set([...tools, ...allowedMcpTools]);
+  // Claude Code 0.3.148 reports two inert UI/runtime tools even when the SDK's
+  // exact tool configuration omits them. Accept their presence in init, but do
+  // not add them to the tool guard: model calls remain denied as unscoped.
+  const configuredTools = new Set([...tools, ...allowedMcpTools, ...PINNED_CLAUDE_INIT_TOOL_SET]);
   for (const initializedTool of initializedTools) {
     if (!configuredTools.has(initializedTool)) {
       fail("sdk_tool_set_mismatch", `SDK exposed unconfigured tool ${initializedTool}`);
@@ -943,9 +1010,22 @@ function verifySdkInitialization(message, { plugin, tools, allowedMcpTools, mode
   }
   const expectedSkills = new Set(plugin.skillNames);
   const discovered = Array.isArray(message.skills) ? message.skills : [];
-  const canonical = discovered.map((name) => canonicalDiscoveredSkill(name, plugin.pluginName, expectedSkills));
-  if (canonical.some((name) => !name) || new Set(canonical).size !== expectedSkills.size) {
-    fail("sdk_skill_set_mismatch", "SDK discovered a skill set outside the approved manifest");
+  const canonical = [];
+  for (const rawName of discovered) {
+    const discoveredName = cleanString(rawName);
+    if (PINNED_CLAUDE_BUILTIN_SKILL_SET.has(discoveredName)) continue;
+    const approvedName = canonicalDiscoveredSkill(
+      discoveredName,
+      plugin.pluginName,
+      expectedSkills,
+    );
+    if (!approvedName) {
+      fail("sdk_skill_set_mismatch", `SDK discovered unapproved skill ${discoveredName || "<empty>"}`);
+    }
+    canonical.push(approvedName);
+  }
+  if (canonical.length !== expectedSkills.size || new Set(canonical).size !== expectedSkills.size) {
+    fail("sdk_skill_set_mismatch", "SDK discovered duplicate or missing approved skills");
   }
   for (const expected of expectedSkills) {
     if (!canonical.includes(expected)) fail("sdk_skill_set_mismatch", `SDK did not discover approved skill ${expected}`);

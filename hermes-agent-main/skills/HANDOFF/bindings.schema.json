@@ -27,8 +27,8 @@
         "properties": {
           "adapter": {"enum": ["mcp", "sandbox", "web"]},
           "tools": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
-          "scope": {"enum": ["current_business", "current_workspace"]},
-          "authority": {"enum": ["operator_session", "creative_credit", "mobile_release", "none"]}
+          "scope": {"enum": ["current_business", "current_workspace", "current_operator", "current_session"]},
+          "authority": {"enum": ["operator_session", "explicit_operator_interaction", "creative_credit", "mobile_release", "none"]}
         }
       }
     },

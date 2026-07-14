@@ -292,6 +292,32 @@ def test_mode_tool_policy_is_compiled_and_preserves_wake_creative_paths() -> Non
     )
 
 
+def test_capability_security_bindings_are_schema_covered_and_retained() -> None:
+    bindings = _load_yaml(SKILLS_ROOT / "HANDOFF" / "bindings.yaml")["capabilities"]
+    schema = json.loads(
+        (SKILLS_ROOT / "HANDOFF" / "bindings.schema.json").read_text(encoding="utf-8")
+    )
+    capability_schema = schema["properties"]["capabilities"]["additionalProperties"]["properties"]
+    used_scopes = {binding["scope"] for binding in bindings.values()}
+    used_authorities = {binding["authority"] for binding in bindings.values()}
+    assert used_scopes <= set(capability_schema["scope"]["enum"])
+    assert used_authorities <= set(capability_schema["authority"]["enum"])
+    assert set(capability_schema["scope"]["enum"]) == manifest_tool.ALLOWED_CAPABILITY_SCOPES
+    assert set(capability_schema["authority"]["enum"]) == manifest_tool.ALLOWED_CAPABILITY_AUTHORITIES
+
+    manifest = manifest_tool.build_manifest(SKILLS_ROOT)
+    retained = manifest["capability_bindings"]
+    assert set(retained) == set(bindings)
+    for capability, binding in bindings.items():
+        assert retained[capability] == {
+            "adapter": binding["adapter"],
+            "tools": sorted(binding["tools"]),
+            "scope": binding["scope"],
+            "authority": binding["authority"],
+        }
+        assert manifest["capability_tools"][capability] == retained[capability]["tools"]
+
+
 def test_product_tuning_invariants_and_floors_are_rebound() -> None:
     entries = {entry["name"]: entry for entry in manifest_tool.build_manifest(SKILLS_ROOT)["skills"]}
     product = entries["takyon-product"]
@@ -456,6 +482,25 @@ def test_bound_tool_must_exist_in_model_definitions(tmp_path: Path) -> None:
         policy["baseline_tools"] = ["missing_tool"]
     bindings_path.write_text(yaml.safe_dump(bindings, sort_keys=False), encoding="utf-8")
     with pytest.raises(manifest_tool.ManifestValidationError, match="absent from model-tool definitions"):
+        manifest_tool.build_manifest(root)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    (
+        ("scope", "any_business", "unsupported scope"),
+        ("authority", "shared_token", "unsupported authority"),
+    ),
+)
+def test_capability_scope_and_authority_enums_fail_closed(
+    tmp_path: Path, field: str, value: str, error: str
+) -> None:
+    root = _minimal_release(tmp_path)
+    bindings_path = root / "HANDOFF" / "bindings.yaml"
+    bindings = _load_yaml(bindings_path)
+    bindings["capabilities"]["business.state.read"][field] = value
+    bindings_path.write_text(yaml.safe_dump(bindings, sort_keys=False), encoding="utf-8")
+    with pytest.raises(manifest_tool.ManifestValidationError, match=error):
         manifest_tool.build_manifest(root)
 
 

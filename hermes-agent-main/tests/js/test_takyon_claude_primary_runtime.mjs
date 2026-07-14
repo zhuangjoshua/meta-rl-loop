@@ -6,6 +6,8 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  PINNED_CLAUDE_BUILTIN_SKILLS,
+  PINNED_CLAUDE_INIT_TOOLS,
   PRIMARY_AGENT_MODEL,
   PrimaryRuntimeError,
   buildPrimaryRuntimeOptions,
@@ -109,11 +111,17 @@ async function createApprovedPlugin(t, { writable = false, secondSkill = false }
     });
   }
   const manifestPath = path.join(pluginPath, "approved-skills.json");
+  const modeToolPolicy = Object.fromEntries(
+    ["interactive", "bootstrap", "wake"].map((mode) => [mode, {
+      allowed_skills: specs.filter((skill) => skill.allowed_modes.includes(mode)).map((skill) => skill.name),
+    }])
+  );
   await fs.writeFile(manifestPath, JSON.stringify({
     schema_version: 1,
     generated_from: "release-skills.yaml",
     plugin: { name: "takyon-approved-skills", version: "test-1" },
     discovery_roots: secondSkill ? ["creative", "takyon"] : ["takyon"],
+    mode_tool_policy: modeToolPolicy,
     skills: specs,
   }));
   if (!writable) await chmodTree(pluginPath, 0o444, 0o555);
@@ -231,6 +239,19 @@ test("approved plugin rejects digest drift and unmanifested skills", async (t) =
   await assert.rejects(
     verifyApprovedSkillPlugin(extra),
     (error) => error instanceof PrimaryRuntimeError && error.code === "skill_manifest_coverage"
+  );
+});
+
+test("approved plugin rejects top-level allowed_skills drift from per-skill allowed_modes", async (t) => {
+  const fixture = await createApprovedPlugin(t);
+  await chmodTree(fixture.pluginPath, 0o644, 0o755);
+  const manifest = JSON.parse(await fs.readFile(fixture.manifestPath, "utf8"));
+  manifest.mode_tool_policy.bootstrap.allowed_skills = [];
+  await fs.writeFile(fixture.manifestPath, JSON.stringify(manifest));
+  await chmodTree(fixture.pluginPath, 0o444, 0o555);
+  await assert.rejects(
+    verifyApprovedSkillPlugin(fixture),
+    (error) => error instanceof PrimaryRuntimeError && error.code === "skill_manifest_mode_policy"
   );
 });
 
@@ -377,6 +398,9 @@ test("Skill stays surfaced globally while PreToolUse enforces HANDOFF allowed_mo
   }
   assert.equal((await guard.decide("Skill", { skill: "other-plugin:takyon-product" })).allowed, false);
   assert.equal((await guard.decide("Skill", { skill: "unapproved" })).allowed, false);
+  assert.equal((await guard.decide("Skill", { skill: "verify" })).allowed, true);
+  assert.equal((await guard.decide("Monitor", {})).allowed, false);
+  assert.equal((await guard.decide("PushNotification", {})).allowed, false);
 });
 
 test("JSON-line progress sink preserves the established structured event prefix", async () => {
@@ -566,6 +590,36 @@ test("new primary turn persists session, verifies SDK init, and emits concise ep
   assert.ok(events.some((event) => event.kind === "skill" && event.status === "started"));
   assert.ok(events.some((event) => event.kind === "skill" && event.status === "completed"));
   assert.equal(JSON.stringify(events).includes("private reasoning"), false);
+});
+
+test("pinned Claude built-ins may initialize without widening scoped tools", async (t) => {
+  const fixture = await createApprovedPlugin(t);
+  const sessionId = randomUUID();
+  const init = sdkInit(
+    "takyon-approved-skills",
+    sessionId,
+    ["market-research"],
+    ["Skill", ...PINNED_CLAUDE_INIT_TOOLS],
+  );
+  init.skills.push(...PINNED_CLAUDE_BUILTIN_SKILLS);
+  init.plugins[0].path = fixture.pluginPath;
+
+  const result = await runPrimaryAgentTurn({
+    prompt: "Research this market.",
+    systemPrompt: "Follow Takyon policy.",
+    cwd: fixture.workspaceRoot,
+    workspaceRoot: fixture.workspaceRoot,
+    configDir: fixture.configDir,
+    pluginPath: fixture.pluginPath,
+    manifestPath: fixture.manifestPath,
+    sourceEnv: BROKER_ENV,
+    epoch: "bootstrap:market-research",
+    sessionId,
+  }, {
+    sdk: fakeSdk([init, successfulResult(sessionId, "Initialized safely.")]),
+  });
+
+  assert.equal(result.summary, "Initialized safely.");
 });
 
 test("resume uses the exact persisted session and reports the resume hook", async (t) => {

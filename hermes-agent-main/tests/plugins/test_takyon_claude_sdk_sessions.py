@@ -54,6 +54,17 @@ class _SessionConn:
             return _Cursor(one=(1,))
         if normalized.startswith("select 1 from public.users"):
             return _Cursor(one=(1,))
+        if normalized.startswith("select 1 from public.agent_sdk_session_entries"):
+            owner, business, project, session = params
+            exists = any(
+                row["owner"] == owner
+                and row["business"] == business
+                and row["project"] == project
+                and row["session"] == session
+                and row["subpath"] == ""
+                for row in self.rows
+            )
+            return _Cursor(one=(1,) if exists else None)
         if "pg_advisory_xact_lock" in normalized:
             self.locks.append(str(params[0]))
             if callable(self.lock_hook):
@@ -276,6 +287,20 @@ def test_postgres_session_store_scopes_project_session_and_subpaths() -> None:
     assert store.list_subkeys(key) == ["subagents/agent-a"]
     with pytest.raises(ClaudeSdkSessionScopeError):
         store.load({**key, "sessionId": str(uuid.uuid4()), "subpath": "../escape"})
+
+
+def test_session_resume_evidence_requires_a_committed_main_transcript() -> None:
+    conn = _SessionConn()
+    store, key = _store(conn)
+
+    assert store.has_durable_transcript(key) is False
+    store.append(
+        {**key, "subpath": "subagents/agent-a"},
+        [{"type": "assistant", "uuid": "subagent-only"}],
+    )
+    assert store.has_durable_transcript(key) is False
+    store.append(key, [{"type": "user", "uuid": "sdk-transcript"}])
+    assert store.has_durable_transcript(key) is True
 
 
 def test_postgres_session_store_supports_global_scope_and_deletes_all_subkeys() -> None:

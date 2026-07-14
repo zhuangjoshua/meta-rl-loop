@@ -1810,6 +1810,18 @@ def _run_claude_sdk_ceo_turn(
         operator_user_id=owner_user_id,
         business_slug=slug,
     )
+    # ``sdk_resume_session`` is permission to resume when possible, never
+    # evidence by itself. A retry that failed before SDK initialization has no
+    # transcript and must start the same stable session ID as a fresh session.
+    resume_session = bool(
+        sdk_resume_session
+        and session_store.has_durable_transcript(
+            {
+                "projectKey": session_store.project_key,
+                "sessionId": stable_session,
+            }
+        )
+    )
     started_at = time.time()
     started_monotonic = time.monotonic()
     completion_observed_at: float | None = None
@@ -1953,7 +1965,7 @@ def _run_claude_sdk_ceo_turn(
                 invocation_allowed_tools=sdk_allowed_tools,
                 workspace_root=workspace_root,
                 session_id=stable_session,
-                resume_session=sdk_resume_session,
+                resume_session=resume_session,
                 session_store=session_store,
                 task_id=task_id,
                 mode=invocation_mode,
@@ -1983,7 +1995,7 @@ def _run_claude_sdk_ceo_turn(
         _LAST_SDK_TURN_RECEIPT.set(
             {
                 "session_id": stable_session,
-                "resumed": bool(sdk_resume_session),
+                "resumed": resume_session,
                 "mode": str(task_context.get("task_kind") or "ceo_turn"),
                 "epoch": str(sdk_epoch or task_context.get("task_kind") or "ceo_turn"),
                 "status": "stopped",
@@ -2011,7 +2023,7 @@ def _run_claude_sdk_ceo_turn(
     _LAST_SDK_TURN_RECEIPT.set(
         {
             "session_id": stable_session,
-            "resumed": bool(sdk_resume_session),
+            "resumed": resume_session,
             "mode": str(task_context.get("task_kind") or "ceo_turn"),
             "epoch": str(sdk_epoch or task_context.get("task_kind") or "ceo_turn"),
             "status": "completed",
@@ -3324,10 +3336,6 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
         or "high"
     ).strip().lower()
     try:
-        wake_attempt = max(1, int(getattr(job, "attempts", 1) or 1))
-    except (TypeError, ValueError):
-        wake_attempt = 1
-    try:
         max_turns = int(payload.get("max_turns") or _DEFAULT_MAX_TURNS)
     except (TypeError, ValueError):
         max_turns = _DEFAULT_MAX_TURNS
@@ -3447,7 +3455,10 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
                     progress=progress,
                     agent_runtime=agent_runtime,
                     sdk_session_id=str(job.id),
-                    sdk_resume_session=wake_attempt > 1,
+                    # Durable SessionStore evidence, checked inside the SDK
+                    # runner, is the only authority to resume. This flag only
+                    # permits that check.
+                    sdk_resume_session=True,
                     sdk_max_budget_usd=sdk_max_budget_usd,
                     sdk_effort=sdk_effort,
                     sdk_epoch="wake",
@@ -3700,7 +3711,6 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 cost_usd = 0.0
                 cost_status = "unknown"
                 turn_completed = False
-                sdk_query_count = 0
                 phase_calls_this_attempt: dict[str, int] = {}
 
                 def verify_phase(run: Any, phase: str) -> Any | None:
@@ -3785,7 +3795,6 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                         animations=animations,
                     )
                     refresh_cursor, _ = _product_publish_blocker_after(store, slug, "")
-                    sdk_query_count += 1
                     configured_phase_turns = PHASE_MAX_TURNS.get(phase, _DEFAULT_MAX_TURNS)
                     if payload.get("max_turns") is not None:
                         configured_phase_turns = min(configured_phase_turns, max_turns)
@@ -3834,9 +3843,9 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                         progress=progress,
                         agent_runtime=agent_runtime,
                         sdk_session_id=bootstrap_job_id,
-                        sdk_resume_session=(
-                            bootstrap_attempt > 1 or sdk_query_count > 1
-                        ),
+                        # Every phase may continue the stable job session, but
+                        # only committed transcript evidence can select resume.
+                        sdk_resume_session=True,
                         sdk_max_budget_usd=sdk_max_budget_usd,
                         sdk_effort=sdk_effort,
                         # Every continuation and retry belongs to this one

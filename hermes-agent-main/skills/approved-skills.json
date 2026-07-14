@@ -9,6 +9,357 @@
     "creative",
     "takyon"
   ],
+  "capability_bindings": {
+    "app.customer.admin": {
+      "adapter": "mcp",
+      "tools": [
+        "business_act_on_app_connection",
+        "business_delete_app_record",
+        "business_disable_app_directory_entry",
+        "business_grant_app_entitlement",
+        "business_list_app_connections",
+        "business_list_app_directory_entries",
+        "business_list_app_records",
+        "business_read_app_account",
+        "business_read_app_directory_entry",
+        "business_read_app_profile",
+        "business_read_app_record",
+        "business_record_app_usage",
+        "business_record_stripe_webhook",
+        "business_upsert_app_customer",
+        "business_upsert_app_directory_entry",
+        "business_upsert_app_profile",
+        "business_upsert_app_record",
+        "business_upsert_conversation_thread"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "app.runtime.operate": {
+      "adapter": "mcp",
+      "tools": [
+        "business_check_runtime_capabilities",
+        "business_create_app_checkout",
+        "business_invoke_app_action",
+        "business_list_app_media",
+        "business_send_app_email",
+        "business_supabase_login",
+        "business_upsert_app_plan"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "budget.channel.manage": {
+      "adapter": "mcp",
+      "tools": [
+        "business_read_channel_credit_budgets",
+        "business_set_channel_credit_budgets"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "business.files.read": {
+      "adapter": "mcp",
+      "tools": [
+        "business_list_files",
+        "business_read_file"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "business.files.write": {
+      "adapter": "mcp",
+      "tools": [
+        "business_patch_file",
+        "business_write_file"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "business.memory.write": {
+      "adapter": "mcp",
+      "tools": [
+        "business_record_memory"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "business.state.read": {
+      "adapter": "mcp",
+      "tools": [
+        "business_read_business"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "commerce.shopify.operate": {
+      "adapter": "mcp",
+      "tools": [
+        "business_connect_shopify",
+        "business_shopify_create_product",
+        "business_shopify_read_orders"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "conversation.manage": {
+      "adapter": "mcp",
+      "tools": [
+        "business_record_conversation_message",
+        "business_update_conversation_message_status"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "conversation.read": {
+      "adapter": "mcp",
+      "tools": [
+        "business_list_conversation_messages",
+        "business_read_conversation_thread"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "creative.logo.generate": {
+      "adapter": "mcp",
+      "tools": [
+        "business_generate_logo"
+      ],
+      "scope": "current_business",
+      "authority": "creative_credit"
+    },
+    "creative.site-image.generate": {
+      "adapter": "mcp",
+      "tools": [
+        "business_generate_site_image"
+      ],
+      "scope": "current_business",
+      "authority": "creative_credit"
+    },
+    "creative.static-ad.generate": {
+      "adapter": "mcp",
+      "tools": [
+        "business_static_ad_generate"
+      ],
+      "scope": "current_business",
+      "authority": "creative_credit"
+    },
+    "creative.ugc-video.generate": {
+      "adapter": "mcp",
+      "tools": [
+        "business_ugc_ad_generate",
+        "business_ugc_ad_write"
+      ],
+      "scope": "current_business",
+      "authority": "creative_credit"
+    },
+    "creative.ugc-workflow.compose": {
+      "adapter": "mcp",
+      "tools": [
+        "business_list_files",
+        "business_patch_file",
+        "business_read_file",
+        "business_write_file"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "distribution.coordinate": {
+      "adapter": "mcp",
+      "tools": [
+        "business_create_workspace",
+        "business_enqueue_job",
+        "business_publish_test_outreach"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "meta.ads.operate": {
+      "adapter": "mcp",
+      "tools": [
+        "business_meta_ad_control",
+        "business_meta_ad_evaluate",
+        "business_meta_ad_insights_sync",
+        "business_meta_ad_launch",
+        "business_meta_pixel_ensure",
+        "business_meta_pixel_verify"
+      ],
+      "scope": "current_business",
+      "authority": "creative_credit"
+    },
+    "metrics.business.read": {
+      "adapter": "mcp",
+      "tools": [
+        "business_calculate_pulse",
+        "business_read_app_analytics"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "mobile.store.read": {
+      "adapter": "mcp",
+      "tools": [
+        "business_read_store_status"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "mobile.store.release": {
+      "adapter": "mcp",
+      "tools": [
+        "business_publish_mobile_release"
+      ],
+      "scope": "current_business",
+      "authority": "mobile_release"
+    },
+    "operator.business.admin": {
+      "adapter": "mcp",
+      "tools": [
+        "business_decide_operator_approval",
+        "business_delete_business",
+        "business_gc",
+        "business_list_businesses",
+        "business_set_control",
+        "business_set_identity",
+        "business_set_mode",
+        "business_set_money_shape",
+        "business_set_work_focus",
+        "business_upgrade_businesses",
+        "business_upsert_business"
+      ],
+      "scope": "current_operator",
+      "authority": "operator_session"
+    },
+    "operator.credentials.request": {
+      "adapter": "mcp",
+      "tools": [
+        "business_request_credential"
+      ],
+      "scope": "current_business",
+      "authority": "explicit_operator_interaction"
+    },
+    "operator.lifecycle.record": {
+      "adapter": "mcp",
+      "tools": [
+        "business_open_state_of_mind",
+        "business_post_operator_update",
+        "business_record_agent",
+        "business_record_episode",
+        "business_record_event",
+        "business_record_learning",
+        "business_record_pulse",
+        "business_schedule_ceo_wakeup"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "operator.todo.manage": {
+      "adapter": "mcp",
+      "tools": [
+        "todo"
+      ],
+      "scope": "current_session",
+      "authority": "operator_session"
+    },
+    "product.runtime.verify": {
+      "adapter": "mcp",
+      "tools": [
+        "business_check_runtime_capabilities",
+        "business_invoke_app_action"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "product.source.edit": {
+      "adapter": "mcp",
+      "tools": [
+        "business_list_files",
+        "business_patch_file",
+        "business_read_file",
+        "business_write_file"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "product.surface.configure": {
+      "adapter": "mcp",
+      "tools": [
+        "business_upsert_app_plan",
+        "business_upsert_app_surface_contract"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "product.surface.publish": {
+      "adapter": "mcp",
+      "tools": [
+        "business_refresh_product_surface"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "reddit.ads.operate": {
+      "adapter": "mcp",
+      "tools": [
+        "business_reddit_ad_control",
+        "business_reddit_ad_insights_sync",
+        "business_reddit_ad_launch"
+      ],
+      "scope": "current_business",
+      "authority": "creative_credit"
+    },
+    "reddit.channel.publish": {
+      "adapter": "mcp",
+      "tools": [
+        "business_reddit_publish_outreach"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "seo.evidence.read": {
+      "adapter": "mcp",
+      "tools": [
+        "business_seo_query_data"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "seo.property.manage": {
+      "adapter": "mcp",
+      "tools": [
+        "business_register_search_console",
+        "business_seo_add_property"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "web.evidence.search": {
+      "adapter": "mcp",
+      "tools": [
+        "web_extract",
+        "web_search"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "x.channel.operate": {
+      "adapter": "mcp",
+      "tools": [
+        "business_x_publish_outreach",
+        "business_x_search"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    },
+    "x.metrics.read": {
+      "adapter": "mcp",
+      "tools": [
+        "business_x_metrics_sync"
+      ],
+      "scope": "current_business",
+      "authority": "operator_session"
+    }
+  },
   "capability_tools": {
     "app.customer.admin": [
       "business_act_on_app_connection",

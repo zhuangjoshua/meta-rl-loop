@@ -512,6 +512,37 @@ class PostgresClaudeSdkSessionStore:
             result.append(entry)
         return result
 
+    def has_durable_transcript(self, key: Mapping[str, str]) -> bool:
+        """Return whether the exact main session has committed transcript data.
+
+        A job retry is not resume evidence: only a committed main-transcript row
+        proves that the SDK initialized far enough for its resume protocol.
+        """
+
+        validated = self._validated_key(key)
+        self._prune_retention_once()
+        if validated.get("subpath"):
+            raise ClaudeSdkSessionScopeError(
+                "SDK SessionStore transcript evidence key may not contain a subpath"
+            )
+        with self._connection() as conn:
+            with conn.transaction():
+                self._lock_and_assert_owner(conn, validated)
+                row = conn.execute(
+                    "select 1 from public.agent_sdk_session_entries "
+                    "where owner_user_id = %s::uuid "
+                    "and business_slug is not distinct from %s "
+                    "and project_key = %s and session_id = %s::uuid "
+                    "and subpath = '' limit 1",
+                    (
+                        self.operator_user_id,
+                        self.business_slug or None,
+                        validated["projectKey"],
+                        validated["sessionId"],
+                    ),
+                ).fetchone()
+        return row is not None
+
     def list_subkeys(self, key: Mapping[str, str]) -> list[str]:
         validated = self._validated_key(key)
         self._prune_retention_once()

@@ -912,5 +912,17 @@ def _strip_fenced_block(text: str, name: str) -> str:
 
 def _ceo_prompt_for_bootstrap() -> str:
     # Bootstrap runs the standard build sequence under its own instruction, not a single
-    # operator request to inspect — so drop the per-request completion-discipline rule.
-    return _strip_fenced_block(_load_ceo_prompt(), "COMPLETION-DISCIPLINE")
+    # operator request to inspect — so drop the per-request completion-discipline rule. Its
+    # durable phase runner owns customer milestone posts, so model-owned update instructions must
+    # also be absent: the phase capability allowlist deliberately does not expose that tool.
+    prompt = _strip_fenced_block(_load_ceo_prompt(), "COMPLETION-DISCIPLINE")
+    prompt = _strip_fenced_block(prompt, "MODEL-OWNED-OPERATOR-UPDATES")
+    return (
+        prompt.rstrip()
+        + "\n\nBootstrap customer-update policy:\n\n"
+        + "- Customer milestone updates are runtime-owned, idempotent phase-boundary effects. "
+        + "Do not call or request `business_post_operator_update`; it is intentionally unavailable "
+        + "to bootstrap phase queries.\n"
+        + "- Return only the bounded phase result. The runtime records it internally and emits the "
+        + "customer-facing start, transition, blocker, and completion updates.\n"
+    )

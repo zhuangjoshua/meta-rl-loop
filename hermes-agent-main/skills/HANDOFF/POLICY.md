@@ -4,8 +4,9 @@ Skills own reusable domain methods: routing, inputs, procedure, quality criteria
 failure conditions. A skill may declare semantic capabilities and outputs in `contract.yaml`.
 
 HANDOFF owns every Takyon-specific binding: exact tools, workspace roots, artifact paths, invocation
-modes, authority, publication, idempotency, receipts, validators, and completion gates. Runtime code
-enforces those bindings; prompt compliance is not an authority boundary.
+modes, authority, publication, idempotency-key classes, required receipt kinds, and validator IDs.
+Runtime code owns phase order, key derivation, atomic effects, validator implementations, and
+completion transitions; prompt compliance and editable HANDOFF data are not authority boundaries.
 
 All approved skills are installed and discoverable in every session. `allowed_modes` controls native
 selection, while `mode_tool_policy` controls authority independently: the generated manifest contains

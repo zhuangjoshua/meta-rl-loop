@@ -187,7 +187,7 @@ def test_ceo_prompt_rule_8_stops_redelegation_on_blocked_authority_violation():
     assert "automatic local source/build repair retry" not in text
 
 
-def test_completion_discipline_rule_present_for_normal_turns_but_suppressed_on_bootstrap():
+def test_interactive_only_rules_are_suppressed_on_bootstrap():
     from plugins.takyon.cli import _load_ceo_prompt
 
     anchor = "inspect what you actually built against what the operator asked for"
@@ -198,6 +198,7 @@ def test_completion_discipline_rule_present_for_normal_turns_but_suppressed_on_b
     full = _load_ceo_prompt()
     assert anchor in full
     assert proof_rule in full
+    assert "Each call you make is one conversational message" in full
 
     # Bootstrap runs the standard build sequence under its own instruction → the per-request
     # completion-discipline rule is dropped, but the always-on proof rule survives and the
@@ -209,6 +210,10 @@ def test_completion_discipline_rule_present_for_normal_turns_but_suppressed_on_b
     assert anchor not in bootstrap_prompt
     assert proof_rule in bootstrap_prompt
     assert "COMPLETION-DISCIPLINE" not in bootstrap_prompt
+    assert "Each call you make is one conversational message" not in bootstrap_prompt
+    assert "MODEL-OWNED-OPERATOR-UPDATES" not in bootstrap_prompt
+    assert "Customer milestone updates are runtime-owned" in bootstrap_prompt
+    assert "intentionally unavailable to bootstrap phase queries" in bootstrap_prompt
 
 
 def test_resolve_dashboard_create_identity_prefers_llm_name(monkeypatch):

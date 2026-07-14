@@ -34,6 +34,19 @@ MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
 RESERVED_PREFIXES = ("anthropic-", "claude-", "codex-", "deepseek-", "gemini-", "hermes-", "openai-")
 ALLOWED_FRONTMATTER_KEYS = frozenset({"name", "description"})
 ALLOWED_MODES = frozenset({"interactive", "bootstrap", "wake"})
+ALLOWED_CAPABILITY_ADAPTERS = frozenset({"mcp", "sandbox", "web"})
+ALLOWED_CAPABILITY_SCOPES = frozenset(
+    {"current_business", "current_workspace", "current_operator", "current_session"}
+)
+ALLOWED_CAPABILITY_AUTHORITIES = frozenset(
+    {
+        "operator_session",
+        "explicit_operator_interaction",
+        "creative_credit",
+        "mobile_release",
+        "none",
+    }
+)
 MAX_SKILL_LINES = 499
 FORBIDDEN_PUBLISHED_SUFFIXES = frozenset({".py", ".js", ".mjs", ".cjs", ".sh", ".ts"})
 FORBIDDEN_INSTRUCTION_PATTERNS = (
@@ -287,10 +300,25 @@ def _validate_bindings(bindings: dict, skill_names: set[str]) -> tuple[dict, dic
         if set(binding) != {"adapter", "tools", "scope", "authority"}:
             _fail(f"HANDOFF capability {semantic_id} has invalid keys")
         tools = binding.get("tools")
-        if binding.get("adapter") not in {"mcp", "sandbox", "web"} or not isinstance(tools, list) or not tools:
+        if not isinstance(tools, list) or not tools:
             _fail(f"HANDOFF capability {semantic_id} is malformed")
-        if len(tools) != len(set(map(str, tools))):
+        if any(not isinstance(tool, str) or not tool.strip() for tool in tools):
+            _fail(f"HANDOFF capability {semantic_id} has invalid tools")
+        binding["tools"] = [tool.strip() for tool in tools]
+        if len(binding["tools"]) != len(set(binding["tools"])):
             _fail(f"HANDOFF capability {semantic_id} has duplicate tools")
+        adapter = str(binding.get("adapter") or "").strip()
+        scope = str(binding.get("scope") or "").strip()
+        authority = str(binding.get("authority") or "").strip()
+        if adapter not in ALLOWED_CAPABILITY_ADAPTERS:
+            _fail(f"HANDOFF capability {semantic_id} has unsupported adapter: {adapter!r}")
+        if scope not in ALLOWED_CAPABILITY_SCOPES:
+            _fail(f"HANDOFF capability {semantic_id} has unsupported scope: {scope!r}")
+        if authority not in ALLOWED_CAPABILITY_AUTHORITIES:
+            _fail(f"HANDOFF capability {semantic_id} has unsupported authority: {authority!r}")
+        binding["adapter"] = adapter
+        binding["scope"] = scope
+        binding["authority"] = authority
     for semantic_id, binding in artifacts.items():
         if not SEMANTIC_ID_RE.fullmatch(str(semantic_id)) or not isinstance(binding, dict):
             _fail(f"invalid HANDOFF artifact binding: {semantic_id!r}")
@@ -729,9 +757,18 @@ def build_manifest(skills_root: Path = DEFAULT_SKILLS_ROOT) -> dict:
         )
 
     manifest_entries.sort(key=lambda entry: entry["name"])
-    capability_tools = {
-        semantic_id: sorted(map(str, binding["tools"]))
+    capability_bindings = {
+        semantic_id: {
+            "adapter": str(binding["adapter"]),
+            "tools": sorted(map(str, binding["tools"])),
+            "scope": str(binding["scope"]),
+            "authority": str(binding["authority"]),
+        }
         for semantic_id, binding in sorted(capabilities.items())
+    }
+    capability_tools = {
+        semantic_id: list(binding["tools"])
+        for semantic_id, binding in capability_bindings.items()
     }
     artifact_bindings = {
         semantic_id: {
@@ -781,6 +818,7 @@ def build_manifest(skills_root: Path = DEFAULT_SKILLS_ROOT) -> dict:
         "generated_from": DEFAULT_RELEASE_FILE,
         "plugin": {"name": release_plugin["name"], "version": release_plugin["version"]},
         "discovery_roots": roots,
+        "capability_bindings": capability_bindings,
         "capability_tools": capability_tools,
         "artifact_bindings": artifact_bindings,
         "mode_tool_policy": compiled_mode_policy,

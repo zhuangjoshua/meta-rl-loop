@@ -82,6 +82,13 @@ The queue worker remains; the nested model worker disappears.
 | Exact tools, paths, publication targets, capabilities, spend rules, and receipts | HANDOFF policy | These are Takyon deployment bindings, not domain knowledge. |
 | Job ordering, retries, checkpoints, security enforcement, spend settlement, and done gates | Runtime code | Prompt compliance is not enforcement. |
 
+Bootstrap is the exception to the base prompt's model-owned chat-update procedure: the durable phase
+runner posts idempotent start, transition, blocker, and completion updates itself, and the phase SDK
+query does not receive `business_post_operator_update`. The bootstrap prompt compiler must therefore
+remove the model-owned update block and inject an explicit runtime-owned update policy; leaving both
+instructions in context is a prompt conflict, not harmless redundancy. Interactive and wake turns
+retain model-owned conversational updates because their mode policy exposes the guarded capability.
+
 ## Current Prompt Inventory and Destination
 
 | Current surface | Current role | Target |
@@ -166,6 +173,21 @@ The wake prompt stops being a stored monolith. Code assembles fresh state, and t
 ### What is not a wake skill
 
 Scheduling, last-wake-of-day calculation, fresh-state assembly, autonomous authority restrictions, spend settlement, and durable reporting remain runtime responsibilities. Distribution, SEO, research, analytics interpretation, and copy methods can be skills.
+
+### Code-owned validators versus HANDOFF bindings
+
+| Runtime code owns | HANDOFF configures |
+|---|---|
+| Bootstrap phase graph, transition order, retry/resume rules, deterministic idempotency-key derivation, runtime-owned milestone posting, atomic receipt recording, validator implementations, and authoritative done predicates | Semantic phase capability to exact tool mapping, semantic artifact to exact path mapping, broad mode capability sets, publish destinations, authority scopes, receipt kinds, and validator identifiers |
+| Wake job/session lifecycle, pre-wake deterministic refresh/distillation, last-wake calculation, fresh-state assembly, the invariant that autonomous wakes cannot edit product state, settlement, and next-wake scheduling | Exact wake tools, readable/writable artifact paths, provider/publication adapters, and the tool/path deny projection used in addition to server enforcement |
+| The restrictive intersection between a phase's required semantic capabilities and its mode authority | The concrete tools that each semantic capability resolves to |
+
+The current `PHASE_ALLOWED_TOOLS`, phase prompt path strings, and `_ceo_cron_prompt` tool/path strings
+are transitional exact-name duplication, not portable skill content and not validator authority. A
+focused later refactor should express phase requirements as semantic capability/artifact IDs, resolve
+their exact names from HANDOFF, and pass those resolved bindings to code-owned validators. Until that
+refactor is separately tested, the hard-coded restrictive checks remain fail-closed; they must not be
+deleted, relaxed, or moved into a skill merely to remove duplication.
 
 ## Interactive Sessions After Migration
 
@@ -320,7 +342,7 @@ Every skill in the release manifest must be surfaced to the SDK correctly; copyi
 1. Generate an approved-skill manifest from the exact release tree with canonical name, source path, version, content digest, routing description, semantic requirements, and allowed invocation modes.
 2. Fail build/startup validation on malformed frontmatter, duplicate names, reserved names, missing files, digest drift, an unapproved discovery root, or a manifest/file count mismatch.
 3. Mount exactly that manifest-owned plugin read-only on the operator SDK runtime; do not install skills independently on each call or restore them into mutable `$TAKYON_HOME/skills` copies.
-4. Verify the SDK initialization sees the exact approved set and no excluded skill.
+4. Verify SDK initialization sees every approved Takyon skill plus only Claude Code 0.3.148's pinned bundled set (`update-config`, `verify`, `debug`, `code-review`, `batch`, `fewer-permission-prompts`, `loop`, `claude-api`, `run`, and `run-skill-generator`); the parent guard still denies every unscoped tool requested by any bundled instruction.
 5. Verify a skill resource body or reference cannot be read when that skill is excluded from the current mode's `allowed_skills`, including by direct MCP invocation.
 6. Run a native positive routing probe for every skill and require an actual SDK `Skill` invocation event naming the expected skill.
 7. Run negative and adjacent-intent probes for every skill and fail if it is selected outside its declared boundary.
@@ -345,10 +367,13 @@ HANDOFF becomes the higher-level policy and binding layer. It must not duplicate
 - publish targets and deployment rails;
 - authority-token acquisition and scope;
 - paid-call reservation and settlement behavior;
-- idempotency keys;
-- required receipts;
-- deterministic validators and completion gates;
+- idempotency-key classes and binding metadata;
+- required receipt kinds and validator identifiers;
 - production-specific restrictions.
+
+Runtime code, not HANDOFF, derives concrete keys, performs atomic effects, implements validators, and
+advances durable completion gates. HANDOFF selects the bound adapter and proof type those validators
+consume; it cannot make a failed authoritative predicate pass.
 
 ### Skills own
 

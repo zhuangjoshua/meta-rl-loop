@@ -44,6 +44,19 @@ SDK_ENTRYPOINT_MODES = {
     "bootstrap": "ceo_bootstrap",
     "wake": "ceo_wake",
 }
+SDK_HANDOFF_CAPABILITY_ADAPTERS = frozenset({"mcp", "sandbox", "web"})
+SDK_HANDOFF_CAPABILITY_SCOPES = frozenset(
+    {"current_business", "current_workspace", "current_operator", "current_session"}
+)
+SDK_HANDOFF_CAPABILITY_AUTHORITIES = frozenset(
+    {
+        "operator_session",
+        "explicit_operator_interaction",
+        "creative_credit",
+        "mobile_release",
+        "none",
+    }
+)
 SDK_GLOBAL_OPERATOR_TOOLS = frozenset(
     {
         "business_list_app_connections",
@@ -309,14 +322,48 @@ def enforce_sdk_mode_tool_policy(
         ) from exc
     if not isinstance(manifest, Mapping):
         raise ClaudeSdkRuntimeError("approved skill manifest must be an object")
+    capability_bindings = manifest.get("capability_bindings")
     capability_tools = manifest.get("capability_tools")
     mode_policies = manifest.get("mode_tool_policy")
-    if not isinstance(capability_tools, Mapping) or not isinstance(
-        mode_policies, Mapping
+    if (
+        not isinstance(capability_bindings, Mapping)
+        or not isinstance(capability_tools, Mapping)
+        or not isinstance(mode_policies, Mapping)
     ):
         raise ClaudeSdkRuntimeError(
             "approved skill manifest omits compiled HANDOFF tool policy"
         )
+    if set(capability_bindings) != set(capability_tools):
+        raise ClaudeSdkRuntimeError(
+            "approved skill manifest capability bindings drifted from capability tools"
+        )
+    for capability, raw_binding in capability_bindings.items():
+        if not str(capability or "").strip() or not isinstance(raw_binding, Mapping):
+            raise ClaudeSdkRuntimeError(
+                "SDK HANDOFF capability_bindings contains an invalid entry"
+            )
+        if set(raw_binding) != {"adapter", "tools", "scope", "authority"}:
+            raise ClaudeSdkRuntimeError(
+                f"SDK HANDOFF capability {capability!r} has invalid binding fields"
+            )
+        adapter = str(raw_binding.get("adapter") or "").strip()
+        scope = str(raw_binding.get("scope") or "").strip()
+        authority = str(raw_binding.get("authority") or "").strip()
+        raw_tools = raw_binding.get("tools")
+        compiled_tools = capability_tools.get(capability)
+        if (
+            adapter not in SDK_HANDOFF_CAPABILITY_ADAPTERS
+            or scope not in SDK_HANDOFF_CAPABILITY_SCOPES
+            or authority not in SDK_HANDOFF_CAPABILITY_AUTHORITIES
+            or not isinstance(raw_tools, list)
+            or not raw_tools
+            or any(not isinstance(tool, str) or not tool.strip() for tool in raw_tools)
+            or len(raw_tools) != len(set(raw_tools))
+            or raw_tools != compiled_tools
+        ):
+            raise ClaudeSdkRuntimeError(
+                f"SDK HANDOFF capability {capability!r} has an invalid or drifted binding"
+            )
     raw_policy = mode_policies.get(normalized_mode)
     if not isinstance(raw_policy, Mapping):
         raise ClaudeSdkRuntimeError(
@@ -326,12 +373,17 @@ def enforce_sdk_mode_tool_policy(
     def string_list(field: str) -> tuple[str, ...]:
         value = raw_policy.get(field)
         if not isinstance(value, list) or any(
-            not str(item or "").strip() for item in value
+            not isinstance(item, str) or not item.strip() for item in value
         ):
             raise ClaudeSdkRuntimeError(
                 f"SDK HANDOFF {normalized_mode}.{field} must be a string list"
             )
-        return tuple(dict.fromkeys(str(item).strip() for item in value))
+        normalized = tuple(item.strip() for item in value)
+        if len(normalized) != len(set(normalized)):
+            raise ClaudeSdkRuntimeError(
+                f"SDK HANDOFF {normalized_mode}.{field} must not contain duplicates"
+            )
+        return normalized
 
     raw_inventory = manifest.get("model_tool_inventory")
     inventory_digest = str(manifest.get("model_tool_inventory_digest") or "")
@@ -352,16 +404,40 @@ def enforce_sdk_mode_tool_policy(
     denied_capabilities = string_list("denied_capabilities")
     denied_tools = string_list("denied_tools")
     denied_write_paths = string_list("denied_write_paths")
-    manifest_skills = {
-        str(item.get("name") or "").strip()
-        for item in manifest.get("skills", [])
-        if isinstance(item, Mapping)
-    }
-    unknown_skills = set(allowed_skills) - manifest_skills
-    if unknown_skills or not allowed_skills:
+    raw_skills = manifest.get("skills")
+    if not isinstance(raw_skills, list) or not raw_skills:
+        raise ClaudeSdkRuntimeError("approved skill manifest has no skills list")
+    manifest_skills: set[str] = set()
+    expected_allowed_skills: set[str] = set()
+    for raw_skill in raw_skills:
+        if not isinstance(raw_skill, Mapping):
+            raise ClaudeSdkRuntimeError("approved skill manifest contains an invalid skill")
+        name = str(raw_skill.get("name") or "").strip()
+        raw_modes = raw_skill.get("allowed_modes")
+        if (
+            not name
+            or name in manifest_skills
+            or not isinstance(raw_modes, list)
+            or not raw_modes
+            or any(
+                not isinstance(skill_mode, str)
+                or skill_mode not in SDK_ENTRYPOINT_MODES
+                for skill_mode in raw_modes
+            )
+            or len(raw_modes) != len(set(raw_modes))
+        ):
+            raise ClaudeSdkRuntimeError(
+                "approved skill manifest contains invalid per-skill allowed_modes"
+            )
+        manifest_skills.add(name)
+        if normalized_mode in raw_modes:
+            expected_allowed_skills.add(name)
+    missing_allowed = expected_allowed_skills - set(allowed_skills)
+    unexpected_allowed = set(allowed_skills) - expected_allowed_skills
+    if missing_allowed or unexpected_allowed or not allowed_skills:
         raise ClaudeSdkRuntimeError(
-            "SDK HANDOFF allowed_skills drifted from approved skill manifest: "
-            + ", ".join(sorted(unknown_skills or {"<empty>"}))
+            "SDK HANDOFF allowed_skills drifted from per-skill allowed_modes: "
+            f"missing={sorted(missing_allowed)}, extra={sorted(unexpected_allowed)}"
         )
     unknown_capabilities = set(denied_capabilities) - {
         str(name or "").strip() for name in capability_tools
