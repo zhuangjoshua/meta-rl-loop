@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextvars
 import copy
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -260,6 +261,13 @@ def sdk_tool_definitions(
     cannot drift from the guarded handlers used by Hermes during the canary.
     Legacy skill/delegation tools are removed unconditionally.
     """
+
+    # The standalone Takyon CLI does not bootstrap Hermes' full tool-module
+    # loader.  Register the existing web handlers explicitly when HANDOFF asks
+    # for that toolset so schema discovery and bridge dispatch see the same
+    # guarded web_search/web_extract implementations as the dashboard runtime.
+    if "web" in {str(name or "").strip() for name in enabled_toolsets}:
+        importlib.import_module("tools.web_tools")
 
     from model_tools import get_tool_definitions
 

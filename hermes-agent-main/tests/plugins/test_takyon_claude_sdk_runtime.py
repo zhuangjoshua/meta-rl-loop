@@ -68,6 +68,19 @@ def test_sdk_tool_definitions_remove_legacy_delegation(monkeypatch) -> None:
     assert [item["name"] for item in selected] == ["business_read_business"]
 
 
+def test_sdk_tool_definitions_register_web_handlers_for_standalone_cli(monkeypatch) -> None:
+    imports: list[str] = []
+    monkeypatch.setattr(
+        "plugins.takyon.claude_sdk_runtime.importlib.import_module",
+        lambda name: imports.append(name),
+    )
+    monkeypatch.setattr("model_tools.get_tool_definitions", lambda **_kwargs: [])
+
+    sdk_tool_definitions(enabled_toolsets=["takyon", "web"])
+
+    assert imports == ["tools.web_tools"]
+
+
 def test_primary_sdk_env_is_key_free_and_authorized_by_scoped_capability(
     monkeypatch, tmp_path
 ) -> None:
