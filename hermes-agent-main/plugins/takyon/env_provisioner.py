@@ -2943,21 +2943,22 @@ class EnvironmentProvisioner:
                     return False, f"Safebox dependencies failed: {(result.stderr or result.stdout or '').strip()[-240:]}"
                 return True, "Safebox locked dependencies ready"
 
+            # Production code deploys preserve the host-owned venv and preflight it; dependency
+            # mutation belongs to bootstrap (or the Safebox's separately locked venv rail).
             remote = (
                 "set -euo pipefail; cd /opt/takyon/hermes-agent-main; "
-                "UV=$(command -v uv || echo /root/.local/bin/uv); "
-                "test -x \"$UV\"; export UV_NO_CONFIG=1 "
-                "UV_PROJECT_ENVIRONMENT=/opt/takyon/hermes-agent-main/.venv; "
-                "\"$UV\" sync --locked --extra all --extra postgres --no-progress"
+                "test -x .venv/bin/python; "
+                ".venv/bin/python -c 'import fastapi, psycopg, uvicorn; "
+                "from plugins.takyon import core'"
             )
             result = subprocess.run(
                 ["ssh", *ssh_base, f"root@{ip}", remote],
                 capture_output=True, text=True, timeout=1200,
             )
             if result.returncode != 0:
-                return False, f"locked runtime dependencies failed: {(result.stderr or result.stdout or '').strip()[-240:]}"
+                return False, f"runtime dependency preflight failed: {(result.stderr or result.stdout or '').strip()[-240:]}"
             if role != "operator":
-                return True, "locked runtime dependencies ready"
+                return True, "host-owned runtime dependencies ready"
 
             # Existing droplets converge too: the Agent SDK runtime and worker image need Node 20+.
             node_ready = subprocess.run(
@@ -3007,7 +3008,7 @@ class EnvironmentProvisioner:
             )
             if prepared.returncode != 0:
                 return False, f"Agent SDK runtime failed: {(prepared.stderr or prepared.stdout or '').strip()[-240:]}"
-            return True, "locked runtime dependencies and Agent SDK ready"
+            return True, "host-owned runtime dependencies and Agent SDK ready"
 
         def _ensure_subuser_publish_rail(
             operator_ip: str, replica_blocks: list[Mapping[str, Any]]
