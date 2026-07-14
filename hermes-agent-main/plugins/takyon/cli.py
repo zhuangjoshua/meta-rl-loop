@@ -13,6 +13,7 @@ import shlex
 import shutil
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -486,9 +487,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _sync_bundled_skills_startup() -> None:
     try:
-        from tools.skills_sync import sync_skills
+        from tools.skills_sync import should_sync_legacy_skills, sync_skills
 
-        sync_skills(quiet=True)
+        if should_sync_legacy_skills():
+            sync_skills(quiet=True)
     except Exception:
         pass
 
@@ -2967,26 +2969,34 @@ def _list_harness_commands() -> list[dict[str, Any]]:
 
 
 def _takyon_skill_entries() -> list[dict[str, Any]]:
-    try:
-        from agent.skill_commands import get_skill_commands
-    except Exception:
-        return []
-
-    entries: list[dict[str, Any]] = []
-    for command, info in sorted(get_skill_commands().items()):
-        bare = str(command or "").lstrip("/")
-        if not bare.startswith(_TAKYON_SKILL_PREFIX):
+    manifest_candidates = [
+        Path(str(os.environ.get("TAKYON_CLAUDE_SKILLS_MANIFEST") or "")),
+        Path(__file__).resolve().parents[2] / "skills" / "approved-skills.json",
+    ]
+    for manifest_path in manifest_candidates:
+        if not str(manifest_path) or not manifest_path.is_file():
             continue
-        skill_dir = Path(str((info or {}).get("skill_dir") or "")).expanduser()
-        if skill_dir.parent.name != "takyon":
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
             continue
-        entries.append({
-            "command": command,
-            "name": bare,
-            "description": str((info or {}).get("description") or "").strip(),
-            "skill_dir": str(skill_dir).strip(),
-        })
-    return entries
+        entries: list[dict[str, Any]] = []
+        for item in manifest.get("skills", []):
+            if not isinstance(item, Mapping):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            entries.append(
+                {
+                    "command": f"/{name}",
+                    "name": name,
+                    "description": str(item.get("description") or "").strip(),
+                    "skill_dir": str(item.get("plugin_path") or "").strip(),
+                }
+            )
+        return sorted(entries, key=lambda entry: entry["name"])
+    return []
 
 
 def _get_harness_command(name: str) -> dict[str, Any] | None:
@@ -4518,6 +4528,7 @@ def _interactive_shell(
     entries = _slash_entries()
     print(_startup_graphic(current_business))
     shell_history: list[dict[str, str]] = []
+    sdk_session_id = f"cli-shell:{uuid.uuid4()}"
     raw_hermes_enabled = bool(raw_hermes or _raw_hermes_default())
 
     while True:
@@ -4562,6 +4573,7 @@ def _interactive_shell(
                 model=model,
                 max_turns=max_turns,
                 shell_history=shell_history,
+                sdk_session_id=sdk_session_id,
                 follow_logs=follow_logs,
                 raw_hermes=raw_hermes_enabled,
             )
@@ -4590,6 +4602,7 @@ def _handle_shell_line(
     model: str,
     max_turns: int,
     shell_history: list[dict[str, str]] | None = None,
+    sdk_session_id: str | None = None,
     operator_user_id: str | None = None,
     follow_logs: bool = False,
     raw_hermes: bool = False,
@@ -4665,6 +4678,7 @@ def _handle_shell_line(
             shell_history=shell_history,
             operator_user_id=operator_user_id,
             current_business=current_business,
+            sdk_session_id=sdk_session_id,
             follow_logs=follow_logs,
             raw_hermes=raw_hermes,
         ), current_business
@@ -4713,6 +4727,7 @@ def _handle_shell_line(
             shell_history=shell_history,
             operator_user_id=operator_user_id,
             current_business=business,
+            sdk_session_id=sdk_session_id,
             follow_logs=follow_logs,
             raw_hermes=raw_hermes,
         ), current_business
@@ -4754,16 +4769,10 @@ def _handle_shell_line(
             if command != "ceo":
                 _require_current_business(current_business)
             instruction = " ".join(tokens[1:]).strip() or f"Use the {command} skill for the current scope."
-            if skill_ref[0] == "slash":
-                from agent.skill_commands import build_skill_invocation_message
-
-                message = build_skill_invocation_message(
-                    skill_ref[1],
-                    instruction,
-                    runtime_note="Invoked through the Takyon scoped shell.",
-                )
-            else:
-                message = _plugin_skill_invocation_message(skill_ref[1], instruction) or instruction
+            message = (
+                f"Invoke the approved native skill `{skill_ref[1]}` for this turn. "
+                f"Operator instruction: {instruction}"
+            )
             return _run_agent(
                 _operator_context_message(message, current_business),
                 model=model or os.getenv("TAKYON_MODEL", ""),
@@ -4773,6 +4782,7 @@ def _handle_shell_line(
                 shell_history=shell_history,
                 operator_user_id=operator_user_id,
                 current_business=current_business,
+                sdk_session_id=sdk_session_id,
                 follow_logs=follow_logs,
                 raw_hermes=raw_hermes,
             ), current_business
@@ -4791,6 +4801,7 @@ def _handle_shell_line(
         shell_history=shell_history,
         operator_user_id=operator_user_id,
         current_business=current_business,
+        sdk_session_id=sdk_session_id,
         follow_logs=follow_logs,
         raw_hermes=raw_hermes,
     ), current_business
@@ -4871,37 +4882,46 @@ def _resolve_skill_reference(name: str) -> tuple[str, str] | None:
     clean = str(name or "").strip().lstrip("/")
     if not clean:
         return None
-    try:
-        from agent.skill_commands import resolve_skill_command_key
-
-        resolved = resolve_skill_command_key(clean)
-        if resolved:
-            return ("slash", resolved)
-        alias = _TAKYON_SKILL_ALIASES.get(clean)
-        if alias:
-            resolved = resolve_skill_command_key(alias)
-            if resolved:
-                return ("slash", resolved)
-    except Exception:
-        pass
+    manifest_candidates = [
+        Path(str(os.environ.get("TAKYON_CLAUDE_SKILLS_MANIFEST") or "")),
+        Path(__file__).resolve().parents[2] / "skills" / "approved-skills.json",
+    ]
+    alias = _TAKYON_SKILL_ALIASES.get(clean, clean)
+    for manifest_path in manifest_candidates:
+        if not str(manifest_path) or not manifest_path.is_file():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            plugin_name = str((manifest.get("plugin") or {}).get("name") or "").strip()
+            for item in manifest.get("skills", []):
+                if not isinstance(item, Mapping):
+                    continue
+                approved_name = str(item.get("name") or "").strip()
+                source_slug = Path(str(item.get("source_path") or "")).name
+                identifiers = {
+                    approved_name,
+                    source_slug,
+                    *(str(value or "").strip() for value in item.get("legacy_names", [])),
+                }
+                if clean in identifiers or alias in identifiers:
+                    qualified = f"{plugin_name}:{approved_name}" if plugin_name else approved_name
+                    return ("native", qualified)
+        except Exception:
+            continue
     return None
 
 
 def _queue_skill_invocation(ctx: Any, skill_ref: str, instruction: str) -> str:
-    try:
-        from agent.skill_commands import build_skill_invocation_message
-
-        msg = build_skill_invocation_message(
-            skill_ref,
-            instruction,
-            runtime_note="Invoked through the /takyon skill namespace.",
-        )
-    except Exception as exc:
-        return f"Takyon skill error: {exc}"
-    if not msg:
+    resolved = _resolve_skill_reference(skill_ref)
+    if not resolved:
         return f"Takyon could not load skill {skill_ref}."
+    native_name = resolved[1]
+    msg = (
+        f"Invoke the approved native skill `{native_name}` for this turn. "
+        f"Operator instruction: {instruction}"
+    )
     if ctx is not None and hasattr(ctx, "inject_message") and ctx.inject_message(msg):
-        return f"Queued Takyon skill {skill_ref}."
+        return f"Queued Takyon skill {native_name}."
     return (
         f"Takyon loaded {skill_ref}, but no active CLI conversation was available "
         "to receive it. Use the skill slash command directly in a running session."
@@ -4912,7 +4932,7 @@ def _queue_ceo_invocation(ctx: Any, message: str) -> str:
     prompt = (
         "Takyon operator command:\n\n"
         f"{_operator_context_message(message, None)}\n\n"
-        "Use the Takyon CEO prompt, real Takyon skills from the Hermes skills index, and concrete business_* tools. Keep business state isolated."
+        "Use the Takyon CEO policy, approved native skills, and concrete business_* tools. Keep business state isolated."
     )
     if ctx is not None and hasattr(ctx, "inject_message") and ctx.inject_message(prompt):
         return "Queued Takyon CEO command."
@@ -4962,25 +4982,32 @@ def _run_agent_with_meta(
     shell_history: list[dict[str, str]] | None = None,
     operator_user_id: str | None = None,
     current_business: str | None = None,
+    sdk_session_id: str | None = None,
     follow_logs: bool = False,
     raw_hermes: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     load_takyon_env()
-    from takyon_cli.runtime_provider import resolve_runtime_provider
+    from .claude_sdk_runtime import (
+        primary_sdk_session_project_key,
+        run_primary_sdk_subprocess,
+        stable_sdk_session_id,
+    )
+    from .claude_sdk_sessions import PostgresClaudeSdkSessionStore
+    from .operator_gateway import (
+        compose_primary_agent_system_prompt,
+        primary_interactive_budget_usd,
+        primary_interactive_epoch,
+    )
 
     ceo_prompt = _load_ceo_prompt()
     store = TakyonStore()
     model_config = _read_model_config(store)
-    resolved_model = _require_agent_model_config(model_config, model_override=model)
-    provider = model_config.get("provider", "")
     response_style = model_config.get("response_style", "").strip().lower()
     configured_activity = _config_bool(model_config.get("show_agent_activity"), default=False)
     show_agent_activity = configured_activity if show_activity is None else bool(show_activity)
-    history_text = _format_shell_history(shell_history)
-    history_block = f"{history_text}\n\nCurrent turn:\n" if history_text else ""
     prompt = (
         "Takyon operator command:\n\n"
-        f"{history_block}{message}\n\n"
+        f"{message}\n\n"
         f"Configured response style: {response_style or 'default'}.\n"
         "Use source-of-truth state, command behavior, declared skill metadata, and loaded skills before assumptions. "
         "Resolve short follow-ups like 'make #1' against the recent shell transcript when it is provided. "
@@ -5008,159 +5035,179 @@ def _run_agent_with_meta(
         business_slug=current_business,
     )
     resolved_operator_user_id = _resolved_operator_user_id(operator_user_id)
-    reservation_key = ""
-    reserved_cents = 0
-    billing_warning = ""
-    agent_box: dict[str, Any] = {}
-    session_context_tokens: list[Any] = []
-
-    def invoke() -> tuple[dict[str, Any], int]:
-        from .operator_gateway import build_operator_gateway_agent
-
-        runtime = resolve_runtime_provider(
-            requested=provider or None,
-            target_model=resolved_model,
+    if not resolved_operator_user_id:
+        raise RuntimeError("primary Claude Agent SDK turns require an operator user")
+    business_slug = str(current_business or "").strip()
+    if not business_slug:
+        raise RuntimeError(
+            "primary Claude Agent SDK model chat requires a selected business; "
+            "global slash and create commands remain local"
         )
-        agent = build_operator_gateway_agent(
-            runtime=runtime,
-            model=resolved_model,
+    stable_session = stable_sdk_session_id(
+        sdk_session_id
+        or os.getenv("TAKYON_SESSION_KEY")
+        or f"cli:{resolved_operator_user_id}:{business_slug}:{uuid.uuid4().hex}"
+    )
+    session_store = PostgresClaudeSdkSessionStore(
+        operator_user_id=resolved_operator_user_id,
+        business_slug=business_slug,
+    )
+    session_key = {
+        "projectKey": primary_sdk_session_project_key(
             operator_user_id=resolved_operator_user_id,
-            business_slug=current_business,
-            agent_kwargs={
-                "max_iterations": max_turns,
-                # ``takyon-authority`` carries the CEO's spendful business methods (logo/ad/x-search/
-                # app-plan/checkout/etc.); they are quarantined into a separate toolset so they never
-                # leak into generic Hermes contexts, but the operator CEO turn is the role that owns
-                # them. They are fail-closed money gates; worker-only operations self-guard against
-                # session-bound calls regardless of toolset membership.
-                "enabled_toolsets": ["takyon", "takyon-authority", "web", "skills", "todo"],
-                "disabled_toolsets": [
-                    "cronjob",
-                    "messaging",
-                    "memory",
-                    "session_search",
-                    "terminal",
-                    "file",
-                    "browser",
-                    "code_execution",
-                ],
-                "ephemeral_system_prompt": ceo_prompt,
-                "load_soul_identity": False,
-                "skip_memory": True,
-                "skip_context_files": True,
-                "platform": "takyon",
-                "quiet_mode": not show_agent_activity,
-                "reasoning_config": _takyon_reasoning_config(),
-                "reasoning_callback": _reasoning_progress_callback(progress) if progress.enabled else None,
-                "tool_progress_callback": progress.tool_progress if progress.enabled else None,
-                "tool_start_callback": progress.tool_started if progress.enabled else None,
-                "tool_gen_callback": progress.tool_generating if progress.enabled else None,
-                "tool_complete_callback": progress.tool_completed if progress.enabled else None,
-                "interim_assistant_callback": stream.hermes_turn if progress.enabled else None,
-            },
-        )
-        agent_box["agent"] = agent
-        agent._memory_nudge_interval = 0
-        agent._skill_nudge_interval = 0
-        agent.activity_callback = progress.activity if progress.enabled else None
-        agent.suppress_status_output = not show_agent_activity
-        result = agent.run_conversation(
-            prompt,
-            stream_callback=None
-            if show_agent_activity
-            else (stream.stream_delta if progress.enabled else (lambda _delta: None)),
+            business=business_slug,
+        ),
+        "sessionId": stable_session,
+    }
+    resume_session = session_store.load(session_key) is not None
+    invocation_epoch = primary_interactive_epoch()
+    session_context_tokens: list[Any] = []
+    tool_started_at: dict[str, float] = {}
+
+    def sdk_progress(event: Mapping[str, Any]) -> None:
+        kind = str(event.get("kind") or "runtime").strip()
+        status = str(event.get("status") or "running").strip()
+        raw_detail = str(event.get("detail") or "")
+        if kind == "assistant":
+            if progress.enabled and status == "delta":
+                # SDK partial messages are the exact provider text deltas.  Do
+                # not strip or reconstruct them: leading/trailing whitespace is
+                # part of the customer-visible assistant response.
+                stream.stream_delta(raw_detail)
+            elif progress.enabled and status == "output" and progress.streamed_chars:
+                # The SDK also projects the completed assistant message after
+                # its deltas.  Treat it only as the message boundary so the
+                # completed text is never printed a second time.
+                stream.finish_stream()
+            return
+        detail = raw_detail.strip()
+        if kind == "tool":
+            return
+        if kind == "skill":
+            trace = event.get("trace") if isinstance(event.get("trace"), Mapping) else {}
+            skill_name = str(trace.get("skill_name") or "Skill").strip()
+            if progress.enabled:
+                progress.emit(detail or f"skill -> {skill_name} {status}")
+            return
+        if detail and progress.enabled:
+            progress.activity(f"{kind} -> {detail}")
+
+    def tool_start(tool_id: str, name: str, args: Mapping[str, Any]) -> None:
+        tool_started_at[tool_id] = time.monotonic()
+        if progress.enabled:
+            progress.tool_progress(
+                "tool.started",
+                name=name,
+                preview="",
+                args=dict(args),
+            )
+            progress.tool_started(tool_id, name, dict(args))
+
+    def tool_complete(
+        tool_id: str,
+        name: str,
+        args: Mapping[str, Any],
+        result: str,
+    ) -> None:
+        started = tool_started_at.pop(tool_id, None)
+        if progress.enabled:
+            progress.tool_progress(
+                "tool.completed",
+                name=name,
+                args=dict(args),
+                duration=(time.monotonic() - started) if started else None,
+            )
+            progress.tool_completed(tool_id, name, dict(args), result)
+
+    def invoke(workspace_home: object) -> tuple[dict[str, Any], int]:
+        reasoning = _takyon_reasoning_config()
+        effort = "high"
+        if isinstance(reasoning, Mapping) and str(reasoning.get("effort") or "") in {
+            "low",
+            "medium",
+            "high",
+        }:
+            effort = str(reasoning["effort"])
+        result = run_primary_sdk_subprocess(
+            business=business_slug,
+            operator_user_id=resolved_operator_user_id,
+            system_prompt=compose_primary_agent_system_prompt(ceo_prompt),
+            user_prompt=prompt,
+            enabled_toolsets=["takyon", "takyon-authority", "web", "skills", "todo"],
+            disabled_toolsets=[
+                "cronjob",
+                "messaging",
+                "memory",
+                "session_search",
+                "terminal",
+                "file",
+                "browser",
+                "code_execution",
+            ],
+            workspace_root=str(workspace_home or ""),
+            session_id=stable_session,
+            resume_session=resume_session,
+            session_store=session_store,
+            task_id=str(sdk_session_id or stable_session),
+            mode="interactive",
+            epoch=invocation_epoch,
+            max_turns=max_turns,
+            max_budget_usd=primary_interactive_budget_usd(),
+            effort=effort,
+            progress_callback=sdk_progress,
+            on_tool_start=tool_start,
+            on_tool_complete=tool_complete,
         )
         stream.finish_stream()
-        actual_cents = max(
-            0,
-            int(round(float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0) * 100)),
-        )
+        raw_cost = result.get("actual_cost_cents")
+        actual_cents = max(0, int(raw_cost or 0))
         return result, actual_cents
 
     try:
-        if resolved_operator_user_id:
-            reservation_key, reserved_cents = _operator_budget_reserve(
-                operator_user_id=resolved_operator_user_id,
-                business_slug=current_business,
-                reservation_key=_idempotency_key(
-                    "operator-turn",
-                    current_business or "global",
-                    uuid.uuid4().hex,
-                ),
-            )
-        workspace_context = (
-            _business_workspace_execution_context(
-                current_business,
-                operator_user_id=resolved_operator_user_id,
-            )
-            if current_business
-            else contextlib.nullcontext(None)
+        workspace_context = _business_workspace_execution_context(
+            business_slug,
+            operator_user_id=resolved_operator_user_id,
         )
         with workspace_context as workspace_home:
-            if resolved_operator_user_id or workspace_home is not None:
-                try:
-                    from gateway.session_context import set_session_vars
+            if workspace_home is None:
+                raise RuntimeError("primary Claude Agent SDK business workspace is unavailable")
+            try:
+                from gateway.session_context import set_session_vars
 
-                    session_context_tokens = set_session_vars(
-                        session_key="",
-                        user_id=resolved_operator_user_id,
-                        workspace_root=str(workspace_home or ""),
-                        business_slug=current_business or "",
-                    )
-                except Exception:
-                    session_context_tokens = []
+                session_context_tokens = set_session_vars(
+                    session_key=str(sdk_session_id or stable_session),
+                    user_id=resolved_operator_user_id,
+                    workspace_root=str(workspace_home),
+                    business_slug=business_slug,
+                )
+            except Exception:
+                session_context_tokens = []
             with _AgentLogTail(enabled=follow_logs):
                 if show_agent_activity:
-                    result, actual_cents = invoke()
+                    result, actual_cents = invoke(workspace_home)
                 else:
                     progress.start_thinking()
                     with _silence_process_stdio():
-                        result, actual_cents = invoke()
+                        result, actual_cents = invoke(workspace_home)
         progress._stop_thinking()  # guarantee the spinner is cleared before the response is returned/printed
-        if reservation_key:
-            billing_warning = _operator_budget_finalize(
-                operator_user_id=resolved_operator_user_id,
-                business_slug=current_business,
-                reservation_key=reservation_key,
-                reserved_cents=reserved_cents,
-                actual_cents=actual_cents,
-            )
-        final_response = str(result.get("final_response") or "")
+        final_response = str(result.get("summary") or "").strip()
+        if not final_response:
+            raise RuntimeError("primary Claude Agent SDK returned no final response")
         if progress.streamed_chars:
-            final_response = f"[Budget warning] {billing_warning}" if billing_warning else ""
-        elif billing_warning:
-            final_response = (
-                final_response.rstrip()
-                + ("\n\n" if final_response.strip() else "")
-                + f"[Budget warning] {billing_warning}"
-            )
+            # The exact assistant response was already emitted from SDK text
+            # deltas; returning it would make the shell/one-shot printer repeat
+            # the final message.
+            final_response = ""
         return final_response, {
             "actual_cost_cents": actual_cents,
-            "reserved_cents": reserved_cents,
-            "billing_warning": billing_warning,
+            "reserved_cents": 0,
+            "billing_warning": "",
+            "billing_mode": "provider_broker",
+            "invocation_epoch": invocation_epoch,
+            "session_id": stable_session,
+            "model": str(result.get("model") or "deepseek-v4-pro"),
+            "skill_receipt": result.get("skill_receipt"),
         }
-    except Exception:
-        actual_cents = max(
-            0,
-            int(
-                round(
-                    float(
-                        getattr(agent_box.get("agent"), "session_estimated_cost_usd", 0.0)
-                        or 0.0
-                    )
-                    * 100
-                )
-            ),
-        )
-        if reservation_key:
-            billing_warning = _operator_budget_finalize(
-                operator_user_id=resolved_operator_user_id,
-                business_slug=current_business,
-                reservation_key=reservation_key,
-                reserved_cents=reserved_cents,
-                actual_cents=actual_cents,
-            )
-        raise
     finally:
         if session_context_tokens:
             try:
@@ -5182,6 +5229,7 @@ def _run_agent(
     shell_history: list[dict[str, str]] | None = None,
     operator_user_id: str | None = None,
     current_business: str | None = None,
+    sdk_session_id: str | None = None,
     follow_logs: bool = False,
     raw_hermes: bool = False,
 ) -> str:
@@ -5194,6 +5242,7 @@ def _run_agent(
         shell_history=shell_history,
         operator_user_id=operator_user_id,
         current_business=current_business,
+        sdk_session_id=sdk_session_id,
         follow_logs=follow_logs,
         raw_hermes=raw_hermes,
     )

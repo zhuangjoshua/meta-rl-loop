@@ -188,9 +188,17 @@ export interface SessionCompressResponse {
   after_tokens?: number
   before_messages?: number
   before_tokens?: number
+  compact_receipt?: {
+    duration_ms?: null | number
+    post_tokens?: null | number
+    pre_tokens?: number
+    trigger?: 'manual' | 'auto'
+    uuid?: string
+  }
   info?: SessionInfo
   messages?: GatewayTranscriptMessage[]
   removed?: number
+  status?: 'compacted'
   summary?: {
     headline?: string
     noop?: boolean

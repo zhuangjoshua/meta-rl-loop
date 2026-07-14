@@ -144,6 +144,10 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
 
     profile = _coerce_job_text(normalized.get("profile")).strip()
     normalized["profile"] = profile or None
+    business = _coerce_job_text(normalized.get("business")).strip().lower()
+    normalized["business"] = business or None
+    owner = _coerce_job_text(normalized.get("operator_user_id")).strip()
+    normalized["operator_user_id"] = owner or None
 
     return normalized
 
@@ -520,6 +524,27 @@ def _normalize_profile(profile: Optional[str]) -> Optional[str]:
     return normalized
 
 
+def _normalize_business(business: Optional[str]) -> Optional[str]:
+    """Normalize an internal business scope without accepting path-like values."""
+
+    raw = str(business or "").strip().lower()
+    if not raw:
+        return None
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", raw):
+        raise ValueError(f"Invalid cron business scope: {business!r}")
+    return raw
+
+
+def _normalize_operator_user_id(operator_user_id: Optional[str]) -> Optional[str]:
+    raw = str(operator_user_id or "").strip()
+    if not raw:
+        return None
+    try:
+        return str(uuid.UUID(raw))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("Invalid cron operator_user_id") from exc
+
+
 def create_job(
     prompt: Optional[str],
     schedule: str,
@@ -538,6 +563,8 @@ def create_job(
     workdir: Optional[str] = None,
     profile: Optional[str] = None,
     no_agent: bool = False,
+    business: Optional[str] = None,
+    operator_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -587,6 +614,9 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        business: Exact Takyon business scope for an LLM job. Script-only
+                ``no_agent`` jobs may remain unscoped; unscoped LLM jobs are
+                stored for compatibility but fail closed at execution.
 
     Returns:
         The created job dict
@@ -622,6 +652,8 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_profile = _normalize_profile(profile)
     normalized_no_agent = bool(no_agent)
+    normalized_business = _normalize_business(business)
+    normalized_operator_user_id = _normalize_operator_user_id(operator_user_id)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -676,6 +708,8 @@ def create_job(
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
         "profile": normalized_profile,
+        "business": normalized_business,
+        "operator_user_id": normalized_operator_user_id,
     }
 
     jobs = load_jobs()
@@ -764,6 +798,9 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 updates["profile"] = None
             else:
                 updates["profile"] = _normalize_profile(_profile)
+
+        if "business" in updates:
+            updates["business"] = _normalize_business(updates.get("business"))
 
         updated = _apply_skill_fields({**job, **updates})
         schedule_changed = "schedule" in updates

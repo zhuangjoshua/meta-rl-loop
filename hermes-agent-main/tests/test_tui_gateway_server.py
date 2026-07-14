@@ -905,6 +905,43 @@ def _session(agent=None, **extra):
     }
 
 
+def _inline_primary_sdk_turn(
+    _sid,
+    _session_state,
+    agent,
+    run_message,
+    history,
+    *,
+    streamer,
+    **_kwargs,
+):
+    result = agent.run_conversation(
+        run_message,
+        conversation_history=history,
+        stream_callback=streamer,
+    )
+    return {
+        "result": result,
+        "usage": {},
+        "usage_snapshot": {},
+        "session_id": str(getattr(agent, "session_id", "") or "session-key"),
+        "session_estimated_cost_usd": float(
+            getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0
+        ),
+    }
+
+
+def _primary_sdk_session(monkeypatch, agent, **extra):
+    agent._takyon_primary_sdk = True
+    agent._takyon_operator_gateway = True
+    monkeypatch.setattr(
+        server,
+        "_run_isolated_gateway_turn",
+        _inline_primary_sdk_turn,
+    )
+    return _session(agent=agent, **extra)
+
+
 def test_session_request_reattaches_current_transport_on_reconnect():
     old_transport = _FakeTransport()
     new_transport = _FakeTransport()
@@ -1424,6 +1461,7 @@ def test_session_create_drops_pending_title_on_valueerror(monkeypatch):
             self._target()
 
     agent = _Agent()
+    agent._takyon_primary_sdk = True
     session = {
         "agent": agent,
         "session_key": "test-session",
@@ -1438,6 +1476,7 @@ def test_session_create_drops_pending_title_on_valueerror(monkeypatch):
         "show_reasoning": False,
         "tool_progress_mode": "all",
         "pending_title": "duplicate title",
+        "takyon_current_business": "acme",
     }
 
     server._sessions["sid"] = session
@@ -1449,6 +1488,9 @@ def test_session_create_drops_pending_title_on_valueerror(monkeypatch):
         server, "_sync_session_key_after_compress", lambda *a, **kw: None
     )
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        server, "_run_isolated_gateway_turn", _inline_primary_sdk_turn
+    )
 
     try:
         server.handle_request(
@@ -2344,7 +2386,9 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
         def start(self):
             self._target()
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="acme"
+    )
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
@@ -2399,7 +2443,9 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
     fake_meta = types.ModuleType("agent.model_metadata")
     fake_meta.get_model_context_length = lambda *args, **kwargs: 100000
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="acme"
+    )
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
@@ -2441,7 +2487,9 @@ def test_prompt_submit_keeps_raw_user_text_in_history(monkeypatch):
         def start(self):
             self._target()
 
-    server._sessions["sid"] = _session(agent=_Agent(), takyon_current_business="probe-32864")
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="probe-32864"
+    )
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
@@ -2471,6 +2519,9 @@ def test_prompt_submit_persists_inflight_user_message_for_reload(monkeypatch):
     session_ref = {"s": None}
 
     class _DB:
+        def ensure_session(self, *_args, **_kwargs):
+            return None
+
         def append_message(self, session_id, role, content=None, **kwargs):
             appended.append(
                 {
@@ -2506,7 +2557,9 @@ def test_prompt_submit_persists_inflight_user_message_for_reload(monkeypatch):
         def start(self):
             self._target()
 
-    server._sessions["sid"] = _session(agent=_Agent(), takyon_current_business="probe-32864")
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="probe-32864"
+    )
     session_ref["s"] = server._sessions["sid"]
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
@@ -2544,6 +2597,9 @@ def test_prompt_submit_persists_user_message_before_worker_starts(monkeypatch):
     appended: list[dict[str, object]] = []
 
     class _DB:
+        def ensure_session(self, *_args, **_kwargs):
+            return None
+
         def append_message(self, session_id, role, content=None, **kwargs):
             appended.append(
                 {
@@ -2758,28 +2814,13 @@ def test_session_status_reads_live_gateway_agent(monkeypatch):
     assert "Agent Running: Yes" in out
 
 
-def test_skills_reload_runs_in_gateway_process(monkeypatch):
-    import agent.skill_commands as skill_commands
-
-    called = {}
-    monkeypatch.setattr(
-        skill_commands,
-        "reload_skills",
-        lambda: called.setdefault(
-            "result",
-            {
-                "added": [{"name": "new-skill", "description": "demo"}],
-                "removed": [],
-                "total": 42,
-            },
-        ),
-    )
-
+def test_skills_reload_reports_published_plugin_is_immutable():
     resp = server.handle_request({"id": "1", "method": "skills.reload", "params": {}})
 
-    assert called["result"]["total"] == 42
-    assert "new-skill" in resp["result"]["output"]
-    assert "42 skill(s) available" in resp["result"]["output"]
+    assert resp["result"]["result"]["immutable"] is True
+    assert resp["result"]["result"]["total"] > 0
+    assert "approved skill(s) are active" in resp["result"]["output"]
+    assert "new published runtime release" in resp["result"]["output"]
 
 
 def test_snapshot_restore_is_blocked_from_tui_worker():
@@ -2885,13 +2926,21 @@ def test_input_detect_drop_attaches_image(monkeypatch):
     assert resp["result"]["text"] == "[User attached image: cat.png]"
 
 
-def test_input_detect_drop_path_with_spaces(tmp_path):
+def test_input_detect_drop_path_with_spaces(monkeypatch, tmp_path):
     """input.detect_drop correctly handles image paths containing spaces."""
     # Create a minimal PNG file with a space in its name
     img = tmp_path / "screenshot with spaces.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n")  # valid PNG header
 
     server._sessions["sid"] = _session()
+    monkeypatch.setattr(server, "_image_meta", lambda _path: {})
+    fake_cli = types.ModuleType("cli")
+    fake_cli._detect_file_drop = lambda raw: {
+        "path": img,
+        "is_image": True,
+        "remainder": "",
+    }
+    monkeypatch.setitem(sys.modules, "cli", fake_cli)
 
     resp = server.handle_request(
         {
@@ -2910,12 +2959,20 @@ def test_input_detect_drop_path_with_spaces(tmp_path):
     assert server._sessions["sid"]["attached_images"][0] == str(img)
 
 
-def test_input_detect_drop_path_with_spaces_and_remainder(tmp_path):
+def test_input_detect_drop_path_with_spaces_and_remainder(monkeypatch, tmp_path):
     """input.detect_drop splits remainder when path contains spaces."""
     img = tmp_path / "photo with space.jpg"
     img.write_bytes(b"\xff\xd8\xff" + b"fakejpeg")  # minimal-ish JPEG header
 
     server._sessions["sid"] = _session()
+    monkeypatch.setattr(server, "_image_meta", lambda _path: {})
+    fake_cli = types.ModuleType("cli")
+    fake_cli._detect_file_drop = lambda raw: {
+        "path": img,
+        "is_image": True,
+        "remainder": "describe this image",
+    }
+    monkeypatch.setitem(sys.modules, "cli", fake_cli)
 
     user_input = f"{img} describe this image"
     resp = server.handle_request(
@@ -3016,6 +3073,35 @@ def test_session_steer_rejects_empty_text():
 
     assert "error" in resp, resp
     assert resp["error"]["code"] == 4002
+
+
+def test_session_steer_streams_priority_control_to_active_primary_sdk():
+    import io
+
+    stdin = io.StringIO()
+    proc = types.SimpleNamespace(stdin=stdin, poll=lambda: None)
+    session = _session(
+        agent=types.SimpleNamespace(_takyon_primary_sdk=True, steer=lambda _text: False),
+        takyon_turn_proc=proc,
+        takyon_turn_stdin_lock=threading.Lock(),
+    )
+    server._sessions["sid"] = session
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.steer",
+                "params": {"session_id": "sid", "text": "also check auth.log"},
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert resp["result"]["status"] == "queued"
+    assert json.loads(stdin.getvalue()) == {
+        "type": "steer",
+        "text": "also check auth.log",
+    }
 
 
 def test_session_steer_errors_when_agent_has_no_steer_method():
@@ -3160,7 +3246,9 @@ def test_prompt_submit_history_version_mismatch_surfaces_warning(monkeypatch):
         def start(self):
             self._target()
 
-    server._sessions["sid"] = _session(agent=_RacyAgent())
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _RacyAgent(), takyon_current_business="acme"
+    )
     session_ref["s"] = server._sessions["sid"]
     emits: list[tuple] = []
     try:
@@ -3178,8 +3266,11 @@ def test_prompt_submit_history_version_mismatch_surfaces_warning(monkeypatch):
         )
         assert resp.get("result"), f"got error: {resp.get('error')}"
 
-        # History should NOT contain the agent's output (version mismatch)
-        assert server._sessions["sid"]["history"] == []
+        # The in-flight user message remains, but the racy assistant output is not saved.
+        assert [item["role"] for item in server._sessions["sid"]["history"]] == [
+            "user"
+        ]
+        assert server._sessions["sid"]["history_version"] == 2
 
         # message.complete must carry a 'warning' so the UI / operator
         # knows the output was not persisted.
@@ -3218,7 +3309,9 @@ def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
         def start(self):
             self._target()
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="acme"
+    )
     emits: list[tuple] = []
     try:
         monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
@@ -3239,7 +3332,7 @@ def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
         assert server._sessions["sid"]["history"] == [
             {"role": "assistant", "content": "reply"}
         ]
-        assert server._sessions["sid"]["history_version"] == 1
+        assert server._sessions["sid"]["history_version"] == 2
 
         # No warning should be attached
         complete_calls = [a for a in emits if a[0] == "message.complete"]
@@ -3267,7 +3360,9 @@ def test_prompt_submit_refreshes_product_surface_after_direct_product_write(monk
                 "messages": [{"role": "assistant", "content": "built"}],
             }
 
-    session = _session(agent=_Agent(), takyon_current_business="acme")
+    session = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="acme"
+    )
     session_ref["s"] = session
     server._sessions["sid"] = session
     try:
@@ -3315,7 +3410,9 @@ def test_prompt_submit_surfaces_product_surface_refresh_warning(monkeypatch):
                 "messages": [{"role": "assistant", "content": "built"}],
             }
 
-    server._sessions["sid"] = _session(agent=_Agent(), takyon_current_business="acme")
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="acme"
+    )
     try:
         monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
@@ -3347,7 +3444,7 @@ def test_prompt_submit_surfaces_product_surface_refresh_warning(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_prompt_submit_emits_operator_account_refresh_after_settlement(monkeypatch):
+def test_prompt_submit_emits_operator_account_refresh_from_sdk_broker_receipt(monkeypatch):
     class _Agent:
         session_estimated_cost_usd = 0.0
 
@@ -3368,10 +3465,14 @@ def test_prompt_submit_emits_operator_account_refresh_after_settlement(monkeypat
 
     import plugins.takyon.cli as takyon_cli
 
-    session = _session(agent=_Agent(), takyon_operator_user_id="user-1")
+    session = _primary_sdk_session(
+        monkeypatch,
+        _Agent(),
+        takyon_operator_user_id="user-1",
+        takyon_current_business="acme",
+    )
     server._sessions["sid"] = session
     emitted: list[tuple[str, str, dict]] = []
-    finalized: list[tuple[str, int, int]] = []
     try:
         monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
@@ -3383,19 +3484,27 @@ def test_prompt_submit_emits_operator_account_refresh_after_settlement(monkeypat
             lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
         )
         monkeypatch.setattr(takyon_cli, "_resolved_operator_user_id", lambda raw=None: str(raw or "").strip())
-        monkeypatch.setattr(takyon_cli, "_operator_budget_reserve", lambda **_kwargs: ("rk-1", 100))
+        monkeypatch.setattr(
+            takyon_cli,
+            "_operator_budget_reserve",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("SDK turns must not use the legacy outer reserve")
+            ),
+        )
         monkeypatch.setattr(
             takyon_cli,
             "_operator_budget_finalize",
-            lambda **kwargs: finalized.append(
-                (
-                    str(kwargs.get("reservation_key") or ""),
-                    int(kwargs.get("reserved_cents") or 0),
-                    int(kwargs.get("actual_cents") or 0),
-                )
-            )
-            or "",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("SDK turns must not use the legacy outer settlement")
+            ),
         )
+
+        def _sdk_runner(*args, **kwargs):
+            result = _inline_primary_sdk_turn(*args, **kwargs)
+            result["session_estimated_cost_usd"] = 0.25
+            return result
+
+        monkeypatch.setattr(server, "_run_isolated_gateway_turn", _sdk_runner)
 
         resp = server.handle_request(
             {
@@ -3406,13 +3515,16 @@ def test_prompt_submit_emits_operator_account_refresh_after_settlement(monkeypat
         )
         assert resp.get("result"), f"got error: {resp.get('error')}"
 
-        assert finalized == [("rk-1", 100, 0)]
         event_names = [event for event, _sid, _payload in emitted]
         assert "message.complete" in event_names
         assert "takyon.operator.account" in event_names
         assert event_names.index("message.complete") < event_names.index("takyon.operator.account")
         account_event = next(payload for event, _sid, payload in emitted if event == "takyon.operator.account")
-        assert account_event == {"actual_cents": 0, "reserved_cents": 100}
+        assert account_event == {
+            "actual_cents": 25,
+            "reserved_cents": 0,
+            "billing_mode": "provider_broker",
+        }
     finally:
         server._sessions.pop("sid", None)
 
@@ -4062,9 +4174,13 @@ def test_session_create_skill_lab_preloads_selected_skill(monkeypatch):
     sid = result["session_id"]
     try:
         assert result["takyon_skill_lab"]["enabled"] is True
-        assert result["takyon_skill_lab"]["skills"] == ["takyon-reddit-ads"]
+        assert result["takyon_skill_lab"]["skills"] == [
+            "takyon-approved-skills:takyon-reddit-ads"
+        ]
         session = server._sessions[sid]
-        assert session["takyon_skill_lab"]["skills"] == ["takyon-reddit-ads"]
+        assert session["takyon_skill_lab"]["skills"] == [
+            "takyon-approved-skills:takyon-reddit-ads"
+        ]
         assert "Takyon Skill Lab" in session["takyon_skill_lab"]["prompt"]
     finally:
         server._sessions.pop(sid, None)
@@ -4229,6 +4345,42 @@ def test_session_delete_success_returns_deleted_id(monkeypatch):
     assert str(captured["sessions_dir"]).endswith("sessions")
 
 
+def test_session_delete_uses_authenticated_transport_for_sdk_transcript(
+    monkeypatch,
+):
+    owner = "00000000-0000-4000-8000-000000000010"
+    deleted: list[tuple[str, str]] = []
+
+    class _DB:
+        def delete_session(self, sid, sessions_dir=None):
+            return sid == "durable-session-key"
+
+    monkeypatch.setenv("TAKYON_REQUIRE_OPERATOR_IDENTITY", "enforce")
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(
+        server,
+        "_delete_primary_sdk_session_transcript",
+        lambda *, session_key, operator_user_id: deleted.append(
+            (session_key, operator_user_id)
+        ),
+    )
+    transport = _AuthenticatedTransport(owner)
+    token = bind_transport(transport)
+    try:
+        response = server.handle_request(
+            {
+                "id": "delete",
+                "method": "session.delete",
+                "params": {"session_id": "durable-session-key"},
+            }
+        )
+    finally:
+        reset_transport(token)
+
+    assert response["result"] == {"deleted": "durable-session-key"}
+    assert deleted == [("durable-session-key", owner)]
+
+
 # --------------------------------------------------------------------------
 # model.options — curated-list parity with `takyon model` and classic /model
 # --------------------------------------------------------------------------
@@ -4321,6 +4473,7 @@ class _ImmediateThread:
 
 
 def test_prompt_submit_business_turn_uses_isolated_workspace(monkeypatch, tmp_path):
+    real_thread = threading.Thread
     home = tmp_path / "home"
     bucket = home / "storage"
     seed = tmp_path / "seed"
@@ -4343,6 +4496,8 @@ def test_prompt_submit_business_turn_uses_isolated_workspace(monkeypatch, tmp_pa
     seen: dict[str, str] = {}
 
     class _Agent:
+        _takyon_primary_sdk = True
+
         def run_conversation(
             self, prompt, conversation_history=None, stream_callback=None
         ):
@@ -4369,6 +4524,42 @@ def test_prompt_submit_business_turn_uses_isolated_workspace(monkeypatch, tmp_pa
             storage.sync_up(storage.LocalStorageBackend(bucket), slug, business_root)
             shutil.rmtree(workspace_home, ignore_errors=True)
 
+    def _fake_runner(
+        _sid,
+        _session_state,
+        agent,
+        run_message,
+        history,
+        *,
+        operator_user_id,
+        business_slug,
+        streamer,
+        **_kwargs,
+    ):
+        from gateway.session_context import clear_session_vars, set_session_vars
+
+        with _fake_business_workspace(business_slug) as workspace_home:
+            tokens = set_session_vars(
+                user_id=operator_user_id,
+                workspace_root=str(workspace_home),
+                business_slug=business_slug,
+            )
+            try:
+                result = agent.run_conversation(
+                    run_message,
+                    conversation_history=history,
+                    stream_callback=streamer,
+                )
+            finally:
+                clear_session_vars(tokens)
+        return {
+            "result": result,
+            "usage": {},
+            "usage_snapshot": {},
+            "session_id": "session-key",
+            "session_estimated_cost_usd": 0.0,
+        }
+
     server._sessions["sid"] = _session(agent=_Agent(), takyon_current_business="acme")
     try:
         monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
@@ -4381,6 +4572,7 @@ def test_prompt_submit_business_turn_uses_isolated_workspace(monkeypatch, tmp_pa
         monkeypatch.setattr(server, "_takyon_record_session_runtime_event", lambda *_a, **_k: None)
         monkeypatch.setattr(server, "_takyon_record_ceo_turn_chat", lambda *_a, **_k: None)
         monkeypatch.setattr(server, "_finalize_product_surface_after_turn", lambda *_a, **_k: "")
+        monkeypatch.setattr(server, "_run_isolated_gateway_turn", _fake_runner)
         monkeypatch.setattr(
             "plugins.takyon.cli._business_workspace_execution_context",
             _fake_business_workspace,
@@ -4398,6 +4590,7 @@ def test_prompt_submit_business_turn_uses_isolated_workspace(monkeypatch, tmp_pa
         assert seen["workspace_root"]
         assert not Path(seen["workspace_root"]).exists()
 
+        monkeypatch.setattr(server.threading, "Thread", real_thread)
         resumed = tmp_path / "resumed"
         storage.sync_down(storage.LocalStorageBackend(bucket), "acme", resumed)
         assert (resumed / "metrics" / "turn.md").read_text() == "fresh\n"
@@ -4410,6 +4603,7 @@ def test_prompt_submit_gateway_agent_uses_isolated_turn_runner(monkeypatch):
     called: dict[str, object] = {}
 
     class _Agent:
+        _takyon_primary_sdk = True
         _takyon_operator_gateway = True
         session_id = "session-key"
         session_estimated_cost_usd = 0.0
@@ -4492,6 +4686,7 @@ def test_prompt_submit_binds_authenticated_operator_for_business_turn(monkeypatc
     called: dict[str, object] = {}
 
     class _Agent:
+        _takyon_primary_sdk = True
         _takyon_operator_gateway = True
         session_id = "session-key"
         session_estimated_cost_usd = 0.0
@@ -4585,75 +4780,13 @@ def test_prompt_submit_binds_authenticated_operator_for_business_turn(monkeypatc
         server._sessions.pop("sid", None)
 
 
-def test_prompt_submit_skill_lab_uses_raw_prompt_and_preloaded_skill_prompt(monkeypatch):
-    emitted: list[tuple] = []
-    called: dict[str, object] = {}
-
-    class _Agent:
-        _takyon_operator_gateway = True
-        session_id = "session-key"
-        session_estimated_cost_usd = 0.0
-        model = "test-model"
-        provider = "openrouter"
-        api_mode = "chat_completions"
-        base_url = "https://openrouter.ai/api/v1"
-        max_iterations = 90
-        enabled_toolsets = ["takyon", "web", "skills", "todo"]
-        disabled_toolsets = ["terminal", "file"]
-        request_overrides = {}
-        reasoning_config = None
-        service_tier = None
-        pass_session_id = False
-        skip_context_files = False
-        skip_memory = False
-        ephemeral_system_prompt = "base prompt"
-
-        def run_conversation(self, *args, **kwargs):
-            raise AssertionError("inline run_conversation should not be used")
-
-    def _fake_runner(
-        sid,
-        session,
-        agent,
-        run_message,
-        history,
-        *,
-        operator_user_id,
-        business_slug,
-        streamer,
-        system_message_override=None,
-        max_iterations_override=None,
-        agent_config_overrides=None,
-    ):
-        called["run_message"] = run_message
-        called["business_slug"] = business_slug
-        called["agent_config_overrides"] = dict(agent_config_overrides or {})
-        return {
-            "result": {
-                "final_response": "skill lab ok",
-                "messages": [{"role": "assistant", "content": "skill lab ok"}],
-            },
-            "usage": {"total": 12},
-            "usage_snapshot": {"session_total_tokens": 12},
-            "session_id": "session-key",
-            "session_estimated_cost_usd": 0.0,
-        }
-
+def test_prompt_submit_skill_lab_requires_selected_business(monkeypatch):
+    agent = types.SimpleNamespace(_takyon_primary_sdk=True)
     server._sessions["sid"] = _session(
-        agent=_Agent(),
-        takyon_skill_lab={
-            "skills": ["takyon-reddit-ads"],
-            "prompt": "skill lab prompt",
-        },
+        agent=agent,
+        takyon_skill_lab={"skills": ["takyon-reddit-ads"], "prompt": "skill lab prompt"},
     )
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
-        monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
-        monkeypatch.setattr(server, "_get_db", lambda: None)
-        monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
-        monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
-        monkeypatch.setattr(server, "_run_isolated_gateway_turn", _fake_runner)
-
         resp = server.handle_request(
             {
                 "id": "1",
@@ -4661,15 +4794,8 @@ def test_prompt_submit_skill_lab_uses_raw_prompt_and_preloaded_skill_prompt(monk
                 "params": {"session_id": "sid", "text": "test the selected skill"},
             }
         )
-        assert resp.get("result"), f"got error: {resp.get('error')}"
-        assert called["run_message"] == "test the selected skill"
-        assert called["business_slug"] == ""
-        assert called["agent_config_overrides"] == {
-            "ephemeral_system_prompt": "base prompt\n\nskill lab prompt"
-        }
-        assert server._sessions["sid"]["history"] == [
-            {"role": "assistant", "content": "skill lab ok"}
-        ]
+        assert resp["error"]["code"] == 4004
+        assert "requires a selected business" in resp["error"]["message"]
     finally:
         server._sessions.pop("sid", None)
 
@@ -4679,6 +4805,7 @@ def test_prompt_submit_skill_lab_contextualizes_once_real_business_exists(monkey
     called: dict[str, object] = {}
 
     class _Agent:
+        _takyon_primary_sdk = True
         _takyon_operator_gateway = True
         session_id = "session-key"
         session_estimated_cost_usd = 0.0
@@ -4784,7 +4911,9 @@ def test_prompt_submit_auto_titles_session_on_complete(monkeypatch):
                 ],
             }
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="acme"
+    )
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
@@ -4820,7 +4949,9 @@ def test_prompt_submit_skips_auto_title_when_interrupted(monkeypatch):
                 "messages": [],
             }
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="acme"
+    )
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
@@ -4851,7 +4982,9 @@ def test_prompt_submit_skips_auto_title_when_response_empty(monkeypatch):
                 "messages": [],
             }
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="acme"
+    )
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
@@ -4888,7 +5021,9 @@ def test_prompt_submit_surfaces_backend_error_as_visible_text(monkeypatch):
                 "error": "HTTP 400: invalid model id 'kimi-k2.6'",
             }
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="acme"
+    )
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
 
     emitted: list[tuple[str, str, dict]] = []
@@ -4933,7 +5068,9 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
                 "completed": True,
             }
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions["sid"] = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="acme"
+    )
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
 
     emitted: list[tuple[str, str, dict]] = []
@@ -5789,10 +5926,12 @@ def _setup_make_agent_mocks(monkeypatch, cfg):
 def test_make_agent_reads_nested_max_turns(monkeypatch):
     _setup_make_agent_mocks(monkeypatch, {"agent": {"max_turns": 200}})
 
-    with patch("run_agent.AIAgent") as mock_agent:
+    with patch(
+        "plugins.takyon.operator_gateway.build_primary_agent_facade"
+    ) as mock_agent:
         server._make_agent("sid1", "key1")
 
-    assert mock_agent.call_args.kwargs["max_iterations"] == 200
+    assert mock_agent.call_args.kwargs["agent_kwargs"]["max_iterations"] == 200
 
 
 def test_make_agent_nested_max_turns_takes_priority(monkeypatch):
@@ -5800,95 +5939,55 @@ def test_make_agent_nested_max_turns_takes_priority(monkeypatch):
         monkeypatch, {"agent": {"max_turns": 500}, "max_turns": 100}
     )
 
-    with patch("run_agent.AIAgent") as mock_agent:
+    with patch(
+        "plugins.takyon.operator_gateway.build_primary_agent_facade"
+    ) as mock_agent:
         server._make_agent("sid1", "key1")
 
-    assert mock_agent.call_args.kwargs["max_iterations"] == 500
+    assert mock_agent.call_args.kwargs["agent_kwargs"]["max_iterations"] == 500
 
 
 def test_make_agent_defaults_to_90(monkeypatch):
     _setup_make_agent_mocks(monkeypatch, {})
 
-    with patch("run_agent.AIAgent") as mock_agent:
+    with patch(
+        "plugins.takyon.operator_gateway.build_primary_agent_facade"
+    ) as mock_agent:
         server._make_agent("sid1", "key1")
 
-    assert mock_agent.call_args.kwargs["max_iterations"] == 90
+    assert mock_agent.call_args.kwargs["agent_kwargs"]["max_iterations"] == 90
 
 
 def test_make_agent_restricts_takyon_toolsets(monkeypatch):
     _setup_make_agent_mocks(monkeypatch, {})
 
-    with patch("run_agent.AIAgent") as mock_agent:
+    with patch(
+        "plugins.takyon.operator_gateway.build_primary_agent_facade"
+    ) as mock_agent:
         server._make_agent("sid1", "key1")
 
-    assert mock_agent.call_args.kwargs["enabled_toolsets"] == ["takyon", "web", "skills", "todo"]
-    assert "takyon-authority" in (mock_agent.call_args.kwargs["disabled_toolsets"] or [])
-    assert "terminal" in (mock_agent.call_args.kwargs["disabled_toolsets"] or [])
-    assert "file" in (mock_agent.call_args.kwargs["disabled_toolsets"] or [])
-    assert "code_execution" in (mock_agent.call_args.kwargs["disabled_toolsets"] or [])
+    agent_kwargs = mock_agent.call_args.kwargs["agent_kwargs"]
+    assert agent_kwargs["enabled_toolsets"] == [
+        "takyon",
+        "takyon-authority",
+        "web",
+        "skills",
+        "todo",
+    ]
+    assert "terminal" in (agent_kwargs["disabled_toolsets"] or [])
+    assert "file" in (agent_kwargs["disabled_toolsets"] or [])
+    assert "code_execution" in (agent_kwargs["disabled_toolsets"] or [])
 
 
 def test_make_agent_handles_null_agent_config(monkeypatch):
     _setup_make_agent_mocks(monkeypatch, {"agent": None, "max_turns": 80})
 
-    with patch("run_agent.AIAgent") as mock_agent:
+    with patch(
+        "plugins.takyon.operator_gateway.build_primary_agent_facade"
+    ) as mock_agent:
         server._make_agent("sid1", "key1")
 
-    assert mock_agent.call_args.kwargs["max_iterations"] == 80
-
-
-class _FakeAgentForBackground:
-    base_url = None
-    api_key = None
-    provider = None
-    api_mode = None
-    acp_command = None
-    acp_args = None
-    model = "test-model"
-    enabled_toolsets = None
-    ephemeral_system_prompt = None
-    providers_allowed = None
-    providers_ignored = None
-    providers_order = None
-    provider_sort = None
-    provider_require_parameters = False
-    provider_data_collection = None
-    reasoning_config = None
-    service_tier = None
-    request_overrides = {}
-    _fallback_model = None
-
-
-def test_background_agent_kwargs_reads_nested_max_turns(monkeypatch):
-    monkeypatch.setattr(server, "_load_cfg", lambda: {"agent": {"max_turns": 300}})
-
-    kwargs = server._background_agent_kwargs(_FakeAgentForBackground(), "task_1")
-
-    assert kwargs["max_iterations"] == 300
-
-
-def test_background_agent_kwargs_falls_back_to_root_max_turns(monkeypatch):
-    monkeypatch.setattr(server, "_load_cfg", lambda: {"max_turns": 50})
-
-    kwargs = server._background_agent_kwargs(_FakeAgentForBackground(), "task_1")
-
-    assert kwargs["max_iterations"] == 50
-
-
-def test_background_agent_kwargs_defaults_to_25(monkeypatch):
-    monkeypatch.setattr(server, "_load_cfg", lambda: {})
-
-    kwargs = server._background_agent_kwargs(_FakeAgentForBackground(), "task_1")
-
-    assert kwargs["max_iterations"] == 25
-
-
-def test_background_agent_kwargs_handles_null_agent_config(monkeypatch):
-    monkeypatch.setattr(server, "_load_cfg", lambda: {"agent": None, "max_turns": 40})
-
-    kwargs = server._background_agent_kwargs(_FakeAgentForBackground(), "task_1")
-
-    assert kwargs["max_iterations"] == 40
+    assert mock_agent.call_args.kwargs["agent_kwargs"]["max_iterations"] == 80
 
 
 def test_config_show_displays_nested_max_turns(monkeypatch):
@@ -5929,7 +6028,9 @@ def test_notification_poller_delivers_completion(monkeypatch):
         def start(self):
             self._target()
 
-    sess = _session(agent=_Agent())
+    sess = _primary_sdk_session(
+        monkeypatch, _Agent(), takyon_current_business="acme"
+    )
     server._sessions["sid_poll"] = sess
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
@@ -6380,7 +6481,7 @@ def test_workspace_boot_payload_uses_home_snapshot(monkeypatch):
     monkeypatch.setattr(
         server,
         "_takyon_live_state_payload",
-        lambda overview, background_run: {
+        lambda overview, background_run, **_kwargs: {
             "status": "idle",
             "label": "Idle",
             "detail": "",
@@ -6409,6 +6510,7 @@ def test_workspace_boot_payload_uses_home_snapshot(monkeypatch):
         },
         "outputs": [],
         "deliverables": [],
+        "media": [],
         "background_run": None,
         "live_state": {
             "status": "idle",
@@ -6416,6 +6518,7 @@ def test_workspace_boot_payload_uses_home_snapshot(monkeypatch):
             "detail": "",
             "updated_at": "",
             "tasks": [],
+            "chat_running": False,
         },
     }
     assert captured["sync_files"] is False

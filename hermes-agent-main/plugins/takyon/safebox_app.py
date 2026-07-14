@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any, Iterable
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
@@ -1082,8 +1083,8 @@ def _microusd_to_cents_ceiling(microusd: int) -> int:
     rail (``billing.py``) is denominated in cents; provider spend is priced in microUSD. The HOLD must
     never under-charge the authority, so the estimate is rounded toward +infinity — a sub-cent provider
     call still reserves at least 1 cent, so a flood of sub-cent operator calls cannot stay forever free
-    against the cumulative ceiling. Settles re-clamp to the held cents (never over-charge the
-    reservation). This mirrors ``web_spend._microusd_to_cents_ceiling`` (the same operator rail)."""
+    against the cumulative ceiling. Settlement rejects any actual above the hold instead of silently
+    under-recording it. This mirrors ``web_spend._microusd_to_cents_ceiling`` (the same operator rail)."""
     from decimal import ROUND_CEILING, Decimal
 
     return int((Decimal(int(max(0, microusd))) / Decimal(10_000)).quantize(Decimal("1"), rounding=ROUND_CEILING))
@@ -1104,7 +1105,7 @@ class _OperatorBudgetAdapter:
     convert the microUSD estimate to cents (ceiling), take a REAL hold on ``billing.reserve`` (which
     locks the single ``billing_accounts`` row FOR UPDATE, draws the operator allowance, and raises
     ``InsufficientBalance`` when the allowance can no longer cover the estimate — so the gate is
-    cumulative and fails CLOSED), then ``billing.settle`` the clamped actual on success /
+    cumulative and fails CLOSED), then ``billing.settle`` the exact rounded actual on success /
     ``billing.release_reservation`` on failure. ``billing.reserve`` is idempotent on its
     reservation_key, so the broker can
     pass the same key safely. All of this runs INSIDE the safebox process on the safebox's own DB
@@ -1168,14 +1169,21 @@ class _OperatorBudgetAdapter:
         from . import billing
 
         reserved_cents = int(reservation.get("reserved_cents") or 0)
+        actual = int(actual_microusd)
+        if actual < 0:
+            raise RuntimeError("operator_actual_invalid")
+        actual_cents = _microusd_to_cents_ceiling(actual)
+        if actual_cents > reserved_cents:
+            # Keep the billing hold intact so it can be reconciled from the
+            # conservative estimate without losing money truth.
+            raise RuntimeError("operator_actual_exceeds_reserved_estimate")
         if reserved_cents <= 0:
             # Zero anchor: settle at 0 to finalize the hold (held -> spent, nothing to charge).
             with _safebox_db_conn() as conn:
                 billing.settle(conn, reservation["reservation_key"], 0)
             return
-        # billing.settle asserts actual <= reserved (it is custody of real money). The held estimate was
-        # rounded UP, so clamp the realized cents to the held cents — never over-charge the reservation.
-        actual_cents = min(_microusd_to_cents_ceiling(int(actual_microusd)), reserved_cents)
+        # billing.settle independently asserts actual <= reserved; pass the
+        # exact rounded actual after the fail-closed prevalidation above.
         with _safebox_db_conn() as conn:
             billing.settle(conn, reservation["reservation_key"], actual_cents)
 
@@ -1739,6 +1747,8 @@ class _OperatorSessionTokenBody(BaseModel):
     max_cost_microusd: int
     session_token: str | None = None
     ttl_seconds: int | None = None
+    invocation_id: str | None = None
+    max_total_cost_microusd: int | None = None
 
 
 class _StoreEasBuildCredentialsBody(BaseModel):
@@ -2979,6 +2989,8 @@ def _mint_capability_token(
     audience: str,
     ttl_seconds: int,
     now: int,
+    invocation_id: str | None = None,
+    max_total_cost_microusd: int | None = None,
 ) -> str:
     """Validate identity (boundary 2 + 1 for product, boundary 1 for operator) then mint a signed
     capability for the AUTHORITATIVE scope. Raises HTTPException on bad identity / unconfigured key."""
@@ -3022,6 +3034,18 @@ def _mint_capability_token(
                     action=action,
                     max_cost_microusd=int(max_cost_microusd),
                 )
+            if invocation_id is not None:
+                scope = replace(
+                    scope,
+                    invocation_id=str(invocation_id),
+                    max_total_cost_microusd=int(max_total_cost_microusd or 0),
+                )
+                effective_expires_at = _ensure_operator_sdk_invocation(
+                    conn,
+                    scope=scope,
+                    expires_at=int(now) + int(ttl_seconds),
+                )
+                ttl_seconds = max(1, int(effective_expires_at) - int(now))
     except AuthzError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -3033,6 +3057,74 @@ def _mint_capability_token(
         issued_at=int(now),
         ttl_seconds=int(ttl_seconds),
     )
+
+
+def _ensure_operator_sdk_invocation(
+    conn,
+    *,
+    scope: CapabilityScope,
+    expires_at: int,
+) -> int:
+    """Create or verify immutable scope/ceilings after fresh ownership proof.
+
+    A retry may renew only the expiry on the same envelope. Existing spend and
+    call holds remain attached to the invocation, so renewal cannot mint a new
+    budget or evade the cumulative ceiling.
+    """
+
+    invocation_id = str(scope.invocation_id or "").strip()
+    total = int(scope.max_total_cost_microusd or 0)
+    per_call = int(scope.max_cost_microusd)
+    if not invocation_id or total <= 0 or per_call <= 0 or per_call > total:
+        raise HTTPException(status_code=400, detail="invalid_invocation_envelope")
+    try:
+        invocation_id = str(uuid.UUID(invocation_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid_invocation_id") from exc
+    business = str(scope.business_slug or "").strip() or None
+    with conn.transaction():
+        conn.execute(
+            "insert into operator_sdk_invocations "
+            "(invocation_id, owner_user_id, business_slug, total_ceiling_microusd, "
+            "per_call_ceiling_microusd, expires_at) "
+            "values (%s::uuid, %s::uuid, %s, %s, %s, to_timestamp(%s)) "
+            "on conflict (invocation_id) do nothing",
+            (
+                invocation_id,
+                str(scope.takyon_user_id),
+                business,
+                total,
+                per_call,
+                int(expires_at),
+            ),
+        )
+        row = conn.execute(
+            "select owner_user_id::text, coalesce(business_slug, ''), "
+            "total_ceiling_microusd, per_call_ceiling_microusd, "
+            "extract(epoch from expires_at)::bigint "
+            "from operator_sdk_invocations where invocation_id = %s::uuid for update",
+            (invocation_id,),
+        ).fetchone()
+        expected = (
+            str(scope.takyon_user_id),
+            str(scope.business_slug or ""),
+            total,
+            per_call,
+        )
+        actual = tuple(row[:4]) if row is not None else ()
+        persisted_expires_at = int(row[4]) if row is not None else 0
+        if actual != expected:
+            raise HTTPException(status_code=409, detail="invocation_scope_conflict")
+        effective_expires_at = max(persisted_expires_at, int(expires_at))
+        if effective_expires_at <= int(time.time()):
+            raise HTTPException(status_code=409, detail="invocation_scope_conflict")
+        if effective_expires_at != persisted_expires_at:
+            conn.execute(
+                "update operator_sdk_invocations set expires_at = to_timestamp(%s) "
+                "where invocation_id = %s::uuid",
+                (effective_expires_at, invocation_id),
+            )
+        return effective_expires_at
 
 
 def _exact_approved_connection_binding(
@@ -5531,6 +5623,25 @@ def build_safebox_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="ttl_must_be_positive")
         # Clamp the session TTL so a leaked token still expires within the hard bound.
         ttl_seconds = min(ttl_seconds, _OPERATOR_SESSION_TTL_MAX_SECONDS)
+        now = int(time.time())
+        has_invocation = bool(str(body.invocation_id or "").strip())
+        has_total = body.max_total_cost_microusd is not None
+        if has_invocation != has_total:
+            raise HTTPException(status_code=400, detail="incomplete_invocation_envelope")
+        invocation_id: str | None = None
+        invocation_total: int | None = None
+        if has_invocation:
+            try:
+                invocation_id = str(uuid.UUID(str(body.invocation_id)))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise HTTPException(status_code=400, detail="invalid_invocation_id") from exc
+            invocation_total = int(body.max_total_cost_microusd or 0)
+            if (
+                int(body.max_cost_microusd) <= 0
+                or invocation_total <= 0
+                or int(body.max_cost_microusd) > invocation_total
+            ):
+                raise HTTPException(status_code=400, detail="invalid_invocation_envelope")
         business = str(body.business or "").strip()
         if business:
             token = _mint_capability_token(
@@ -5541,7 +5652,9 @@ def build_safebox_app() -> FastAPI:
                 operator_user_id=body.operator_user_id,
                 audience=_OPERATOR_SESSION_AUDIENCE,
                 ttl_seconds=ttl_seconds,
-                now=int(time.time()),
+                now=now,
+                invocation_id=invocation_id,
+                max_total_cost_microusd=invocation_total,
             )
         else:
             requested_user_id = str(body.operator_user_id or "").strip()
@@ -5578,18 +5691,29 @@ def build_safebox_app() -> FastAPI:
             signing_key = _cap_signing_key()
             if not signing_key:
                 raise HTTPException(status_code=503, detail="capability_signing_unconfigured")
-            token = mint_capability(
-                CapabilityScope(
+            scope = CapabilityScope(
                     takyon_user_id=resolved_user_id,
                     business_slug="",
                     app_user_id=None,
                     action=_OPERATOR_SESSION_AUDIENCE,
                     max_cost_microusd=int(body.max_cost_microusd),
-                ),
+                    invocation_id=invocation_id,
+                    max_total_cost_microusd=invocation_total,
+                )
+            if invocation_id is not None:
+                with _safebox_db_conn() as conn:
+                    effective_expires_at = _ensure_operator_sdk_invocation(
+                        conn,
+                        scope=scope,
+                        expires_at=now + ttl_seconds,
+                    )
+                ttl_seconds = max(1, int(effective_expires_at) - now)
+            token = mint_capability(
+                scope,
                 signing_key=signing_key,
                 audience=_OPERATOR_SESSION_AUDIENCE,
                 nonce=str(uuid.uuid4()),
-                issued_at=int(time.time()),
+                issued_at=now,
                 ttl_seconds=ttl_seconds,
             )
         return {
@@ -5597,6 +5721,8 @@ def build_safebox_app() -> FastAPI:
             "audience": _OPERATOR_SESSION_AUDIENCE,
             "ttl_seconds": ttl_seconds,
             "max_cost_microusd": int(body.max_cost_microusd),
+            "invocation_id": invocation_id,
+            "max_total_cost_microusd": invocation_total,
         }
 
     @app.post("/v1/providers/anthropic/messages")

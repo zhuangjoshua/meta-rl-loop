@@ -115,14 +115,14 @@ work off the same provisioner.
 
 ## 7. New business method (a CEO-choosable operating mode)
 
-**Seam:** a Takyon skill + optional `business_*` tool. Full authoring path in
-`AGENTS.md` → "When the operator asks to add a normal new Takyon feature or skill".
+**Seam:** a portable native skill + HANDOFF binding + optional `business_*` tool. Full authoring
+path is in `AGENTS.md` and `hermes-agent-main/skills/HANDOFF/POLICY.md`.
 
 **Steps (parsimony path):**
-1. `hermes-agent-main/skills/takyon/<name>/SKILL.md` from `SKILL-TEMPLATE.md` (keep the section order; frontmatter = valid YAML with `metadata.hermes.*` + `metadata.takyon.*`).
-2. Add a `business_*` tool **only** if the method needs a new guarded side effect / provider call / receipt / budget gate (register in `core.py` + `plugin.yaml`).
-3. Relaunch `./takyon` so `skills_sync` copies it into `$TAKYON_HOME/skills/`, then **verify** it appears in the skills index (an already-synced skill needs `takyon skills reset <name> --restore`).
-4. Do **not** add a deterministic router — the CEO discovers the method through the skills index, tool schemas, and gate errors.
+1. Create `hermes-agent-main/skills/takyon/<name>/SKILL.md` from `skills/SKILL-TEMPLATE.md` and add a semantic `contract.yaml`.
+2. Bind exact tools, paths, modes, authority, publication, receipts, and validators in `skills/HANDOFF/bindings.yaml`.
+3. Add a `business_*` tool only for a new guarded state/side-effect rail, then bind that semantic capability through HANDOFF.
+4. Add the reviewed files to `skills/release-skills.yaml`, regenerate/check `skills/approved-skills.json`, and verify native discovery in the read-only plugin; never sync production skills to `$TAKYON_HOME/skills`.
 
 ---
 

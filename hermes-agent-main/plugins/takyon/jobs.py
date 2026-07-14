@@ -49,6 +49,13 @@ _log = logging.getLogger("takyon.jobs")
 # that spends nothing returns actual_cost_cents=0 (then no settle/release moves allowance). Raising
 # signals failure: run_one releases the hold and fails/retries the job.
 Handler = Callable[["Job"], "JobRunResult"]
+BillingModeResolver = Callable[["Job", Handler], str]
+
+BILLING_MODE_JOB_RESERVATION = "job_reservation"
+BILLING_MODE_PROVIDER_BROKER = "provider_broker"
+_BILLING_MODES = frozenset(
+    {BILLING_MODE_JOB_RESERVATION, BILLING_MODE_PROVIDER_BROKER}
+)
 
 
 class JobError(RuntimeError):
@@ -225,6 +232,9 @@ class JobRunResult:
     actual_cost_cents: int = 0
     terminal_status: str = "completed"
     terminal_reason: str | None = None
+    # Explicitly confirms which authority settled model spend. A broker-billed
+    # handler is never wrapped in the queue's legacy outer reserve/settle rail.
+    billing_mode: str = BILLING_MODE_JOB_RESERVATION
 
 
 @dataclass
@@ -1196,6 +1206,7 @@ def run_one(
     heartbeat_conn_factory: Callable[[], Any] | None = None,
     min_queue_age_seconds: float | None = None,
     worker_release_sha: str | None = None,
+    billing_mode_resolver: BillingModeResolver | None = None,
 ) -> JobOutcome | None:
     """Claim one job and run it under the full contract; returns its outcome, or None if the queue is
     empty. The pipeline, each step its own transaction on the autocommit conn:
@@ -1225,6 +1236,7 @@ def run_one(
 
     claimed_at = time.time()
     estimate_cents = int((job.payload or {}).get("estimate_cents", 0) or 0)
+    outer_estimate_cents = 0
     reservation_key = f"job:{job.id}:{job.attempts}"
 
     def _emit_job_event(
@@ -1254,7 +1266,9 @@ def run_one(
                 status=status,
                 cost_microusd=max(0, int(actual_cents)) * 10_000,
                 cost_status="actual" if actual_cents else None,
-                reservation_key=reservation_key if estimate_cents > 0 else None,
+                reservation_key=(
+                    reservation_key if outer_estimate_cents > 0 else None
+                ),
                 duration_ms=int((time.time() - claimed_at) * 1000),
                 error=error,
                 payload=payload,
@@ -1274,6 +1288,37 @@ def run_one(
         )
         _emit_job_event("blocked", error="no_handler")
         return JobOutcome(job.id, job.kind, "blocked", reason="no_handler")
+
+    try:
+        billing_mode = str(
+            billing_mode_resolver(job, handler)
+            if billing_mode_resolver is not None
+            else BILLING_MODE_JOB_RESERVATION
+        ).strip()
+    except Exception as exc:
+        billing_mode = ""
+        billing_mode_error = str(exc)
+    else:
+        billing_mode_error = ""
+    if billing_mode not in _BILLING_MODES:
+        reason = billing_mode_error or f"unsupported billing mode {billing_mode!r}"
+        block(
+            conn,
+            job.id,
+            reason="billing_mode_invalid",
+            detail={"error": reason},
+            worker_id=worker_id,
+            attempt=job.attempts,
+        )
+        _emit_job_event("blocked", error=f"billing_mode_invalid: {reason}")
+        return JobOutcome(
+            job.id, job.kind, "blocked", reason="billing_mode_invalid"
+        )
+    outer_estimate_cents = (
+        estimate_cents
+        if billing_mode == BILLING_MODE_JOB_RESERVATION
+        else 0
+    )
 
     reserved = 0
 
@@ -1363,7 +1408,16 @@ def run_one(
             # The business-scoped writer lease precedes money reservation. A replacement attempt
             # waiting behind a still-draining predecessor therefore cannot hold budget or begin any
             # side effect. Non-product jobs pass through this context without serialization.
-            if estimate_cents > 0:
+            if billing_mode == BILLING_MODE_PROVIDER_BROKER:
+                # A previous attempt may have run under the legacy Hermes
+                # contract. Release its stale outer hold before the SDK makes
+                # any Safebox-authoritatively gated provider call.
+                if job.reserved_billing_entry_id:
+                    billing.release_reservation(
+                        conn, job.reserved_billing_entry_id
+                    )
+                    _set_reserved_key(conn, job.id, None)
+            if outer_estimate_cents > 0:
                 owner_user_id = _resolve_owner_user_id(conn, job.business_slug)
                 if (
                     job.reserved_billing_entry_id
@@ -1375,7 +1429,7 @@ def run_one(
                     res = billing.reserve(
                         conn,
                         owner_user_id,
-                        estimate_cents,
+                        outer_estimate_cents,
                         reservation_key,
                         business_slug=job.business_slug,
                         job_id=str(job.id),
@@ -1386,14 +1440,14 @@ def run_one(
                         conn,
                         job.id,
                         reason="budget_exhausted",
-                        detail={"estimate_cents": estimate_cents, "error": str(exc)},
+                        detail={"estimate_cents": outer_estimate_cents, "error": str(exc)},
                         worker_id=worker_id,
                         attempt=job.attempts,
                     )
                     _emit_job_event(
                         "blocked",
                         error=f"budget_exhausted: {exc}",
-                        extra={"estimate_cents": estimate_cents},
+                        extra={"estimate_cents": outer_estimate_cents},
                     )
                     _reset_lifecycle_conn()
                     return JobOutcome(
@@ -1466,6 +1520,14 @@ def run_one(
                             hb_exc,
                         )
         assert run_result is not None
+        returned_billing_mode = str(
+            run_result.billing_mode or BILLING_MODE_JOB_RESERVATION
+        ).strip()
+        if returned_billing_mode != billing_mode:
+            raise ValueError(
+                "handler billing-mode receipt mismatch: "
+                f"selected {billing_mode!r}, returned {returned_billing_mode!r}"
+            )
         returned_terminal_status = str(run_result.terminal_status or "completed").strip().lower()
         if returned_terminal_status not in {"completed", "blocked"}:
             raise ValueError(
@@ -1476,7 +1538,7 @@ def run_one(
         lifecycle_conn, close_lifecycle = _lifecycle_conn()
         release_exc: Exception | None = None
         try:
-            if estimate_cents > 0:
+            if outer_estimate_cents > 0:
                 try:
                     billing.release_reservation(lifecycle_conn, reservation_key)
                 except Exception as release_err:  # noqa: BLE001 - terminal transition outranks release hiccups
@@ -1518,7 +1580,7 @@ def run_one(
                     f" ({repaired_status})" if repaired_status else "",
                 )
                 status = repaired_status or "failed"
-            if release_exc is not None and estimate_cents > 0:
+            if release_exc is not None and outer_estimate_cents > 0:
                 try:
                     billing.release_reservation(lifecycle_conn, reservation_key)
                 except Exception as retry_exc:  # noqa: BLE001 - row is terminal; avoid wedging on cleanup
@@ -1554,8 +1616,13 @@ def run_one(
             # claim was lost, block() rejects it and the reservation is released below; no stale
             # attempt can settle spend and then requeue without its blocker. Safebox settlement is
             # necessarily a separate transaction, so state-first is the only no-double-run order.
-            if estimate_cents > 0:
+            if outer_estimate_cents > 0:
                 actual = max(0, min(int(run_result.actual_cost_cents or 0), reserved))
+            else:
+                # Provider-broker mode already charged each call inside the
+                # Safebox. Preserve the handler's aggregate as observability;
+                # do not settle it again through the outer job rail.
+                actual = max(0, int(run_result.actual_cost_cents or 0))
             settlement_detail = (
                 {
                     "billing_settlement": {
@@ -1564,7 +1631,7 @@ def run_one(
                         "actual_cents": actual,
                     }
                 }
-                if estimate_cents > 0
+                if outer_estimate_cents > 0
                 else None
             )
             block(
@@ -1576,7 +1643,7 @@ def run_one(
                 worker_id=worker_id,
                 attempt=job.attempts,
             )
-            if estimate_cents > 0:
+            if outer_estimate_cents > 0:
                 try:
                     billing.settle(lifecycle_conn, reservation_key, actual)
                 except Exception as settle_exc:  # noqa: BLE001 - ambiguous finalization stays pending
@@ -1610,9 +1677,11 @@ def run_one(
                             marker_exc,
                         )
         else:
-            if estimate_cents > 0:
+            if outer_estimate_cents > 0:
                 actual = max(0, min(int(run_result.actual_cost_cents or 0), reserved))
                 billing.settle(lifecycle_conn, reservation_key, actual)
+            else:
+                actual = max(0, int(run_result.actual_cost_cents or 0))
             complete(
                 lifecycle_conn,
                 job.id,
@@ -1623,7 +1692,7 @@ def run_one(
     except JobNotRunning:
         # Our generation was superseded before authoritative settlement/finalization. Never mutate
         # the newer row and never claim completion; release this attempt's hold idempotently.
-        if estimate_cents > 0:
+        if outer_estimate_cents > 0:
             try:
                 billing.release_reservation(lifecycle_conn, reservation_key)
             except Exception:  # noqa: BLE001 — best-effort; the sibling attempt reconciles the hold too
@@ -1660,7 +1729,7 @@ def run_one(
         returned_terminal_status,
         actual_cents=actual,
         error=terminal_reason,
-        extra={"reserved_cents": reserved},
+        extra={"reserved_cents": reserved, "billing_mode": billing_mode},
     )
     return JobOutcome(
         job.id,
@@ -1672,7 +1741,9 @@ def run_one(
     )
 
 
-def _set_reserved_key(conn, job_id: str, reservation_key: str) -> None:
+def _set_reserved_key(
+    conn, job_id: str, reservation_key: str | None
+) -> None:
     _refresh_job_lifecycle_session(conn)
     with conn.transaction():
         conn.execute(

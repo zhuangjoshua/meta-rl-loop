@@ -6,6 +6,7 @@ the transport timeout/unreachable mapping. No raw key is ever fetched here — t
 /v1/providers/* and returns the key-free result.
 """
 import urllib.error
+import uuid
 
 import pytest
 
@@ -371,6 +372,41 @@ def test_mint_operator_session_token_includes_ttl_when_given(monkeypatch):
 
     safebox.mint_operator_session_token("latexflow", "owner-1", ttl_seconds=1800)
     assert captured["payload"]["ttl_seconds"] == 1800
+
+
+def test_mint_operator_session_token_requires_envelope_receipt(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    invocation_id = str(uuid.uuid4())
+    captured = {}
+
+    def fake_remote_json(method, path, payload=None, *, timeout=10.0):
+        captured.update(payload)
+        return {
+            "token": "tok",
+            "invocation_id": invocation_id,
+            "max_total_cost_microusd": 2_000_000,
+            "max_cost_microusd": 500_000,
+        }
+
+    monkeypatch.setattr(safebox, "_remote_json", fake_remote_json)
+    assert safebox.mint_operator_session_token(
+        "latexflow",
+        "owner-1",
+        invocation_id=invocation_id,
+        max_total_cost_microusd=2_000_000,
+        max_cost_microusd=500_000,
+    ) == "tok"
+    assert captured["invocation_id"] == invocation_id
+
+    monkeypatch.setattr(safebox, "_remote_json", lambda *_a, **_k: {"token": "old"})
+    with pytest.raises(safebox.RemoteSafeboxError, match="did not bind"):
+        safebox.mint_operator_session_token(
+            "latexflow",
+            "owner-1",
+            invocation_id=invocation_id,
+            max_total_cost_microusd=2_000_000,
+            max_cost_microusd=500_000,
+        )
 
 
 def test_mint_operator_session_token_posts_root_scope_dashboard_session(monkeypatch):

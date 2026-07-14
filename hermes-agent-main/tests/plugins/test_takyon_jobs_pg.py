@@ -370,6 +370,140 @@ def test_run_one_reserves_settles_completes_and_moves_ledger(pg_conn):
     assert bal.reserved_cents == 0
 
 
+def test_provider_broker_billing_mode_skips_outer_hold_and_settlement(
+    pg_conn, monkeypatch
+):
+    slug, _uid = _provision_business(pg_conn, allowance_cents=0)
+    jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_wake",
+        idempotency_key="provider-billed",
+        payload={"estimate_cents": 500},
+    )
+    billing_calls: list[str] = []
+    monkeypatch.setattr(jobs.billing, "reserve", lambda *_a, **_k: billing_calls.append("reserve"))
+    monkeypatch.setattr(jobs.billing, "settle", lambda *_a, **_k: billing_calls.append("settle"))
+    monkeypatch.setattr(
+        jobs.billing,
+        "release_reservation",
+        lambda *_a, **_k: billing_calls.append("release"),
+    )
+
+    outcome = jobs.run_one(
+        pg_conn,
+        worker_id="sdk-worker",
+        handlers={
+            "ceo_wake": lambda _job: jobs.JobRunResult(
+                result={"cost_usd": 1.25, "provider_settled": True},
+                actual_cost_cents=125,
+                billing_mode=jobs.BILLING_MODE_PROVIDER_BROKER,
+            )
+        },
+        billing_mode_resolver=lambda _job, _handler: jobs.BILLING_MODE_PROVIDER_BROKER,
+    )
+
+    assert outcome is not None
+    assert outcome.status == "completed"
+    assert outcome.reserved_cents == 0
+    assert outcome.actual_cents == 125
+    assert billing_calls == []
+    assert jobs.list_jobs(pg_conn, slug)[0].result == {
+        "cost_usd": 1.25,
+        "provider_settled": True,
+    }
+
+
+def test_provider_broker_job_retry_never_replays_outer_money_finalizers(
+    pg_conn, monkeypatch
+):
+    slug, _uid = _provision_business(pg_conn, allowance_cents=0)
+    jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_wake",
+        idempotency_key="provider-billed-retry",
+        payload={"estimate_cents": 500},
+        max_attempts=2,
+    )
+    for name in ("reserve", "settle", "release_reservation"):
+        monkeypatch.setattr(
+            jobs.billing,
+            name,
+            lambda *_args, _name=name, **_kwargs: pytest.fail(
+                f"outer billing {_name} must not run"
+            ),
+        )
+    attempts = 0
+
+    def handler(_job):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("provider transport failed before receipt")
+        return jobs.JobRunResult(
+            result={"provider_settled": True},
+            actual_cost_cents=50,
+            billing_mode=jobs.BILLING_MODE_PROVIDER_BROKER,
+        )
+
+    first = jobs.run_one(
+        pg_conn,
+        worker_id="sdk-worker",
+        handlers={"ceo_wake": handler},
+        billing_mode_resolver=lambda _job, _handler: jobs.BILLING_MODE_PROVIDER_BROKER,
+    )
+    second = jobs.run_one(
+        pg_conn,
+        worker_id="sdk-worker",
+        handlers={"ceo_wake": handler},
+        billing_mode_resolver=lambda _job, _handler: jobs.BILLING_MODE_PROVIDER_BROKER,
+    )
+
+    assert first is not None and first.status == "queued"
+    assert second is not None and second.status == "completed"
+    assert second.actual_cents == 50
+    assert attempts == 2
+
+
+def test_legacy_job_billing_mode_keeps_outer_reserve_and_settle(pg_conn, monkeypatch):
+    slug, _uid = _provision_business(pg_conn, allowance_cents=500)
+    jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_wake",
+        idempotency_key="legacy-billed",
+        payload={"estimate_cents": 500},
+    )
+    calls: list[str] = []
+    original_reserve = jobs.billing.reserve
+    original_settle = jobs.billing.settle
+
+    def reserve(*args, **kwargs):
+        calls.append("reserve")
+        return original_reserve(*args, **kwargs)
+
+    def settle(*args, **kwargs):
+        calls.append("settle")
+        return original_settle(*args, **kwargs)
+
+    monkeypatch.setattr(jobs.billing, "reserve", reserve)
+    monkeypatch.setattr(jobs.billing, "settle", settle)
+    outcome = jobs.run_one(
+        pg_conn,
+        worker_id="hermes-worker",
+        handlers={
+            "ceo_wake": lambda _job: jobs.JobRunResult(
+                result={"ok": True}, actual_cost_cents=100
+            )
+        },
+        billing_mode_resolver=lambda _job, _handler: jobs.BILLING_MODE_JOB_RESERVATION,
+    )
+
+    assert outcome is not None and outcome.actual_cents == 100
+    assert calls == ["reserve", "settle"]
+
+
 def test_run_one_preserves_returned_block_and_settles_true_cost_without_retry(
     pg_conn, monkeypatch
 ):

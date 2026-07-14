@@ -1,11 +1,40 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 # The outer Takyon workspace owns runtime state. This keeps Hermes cron,
 # control state, and business memory in one visible place.
 export TAKYON_HOME="${TAKYON_HOME:-$ROOT/.takyon}"
+
+# Materialize and verify the immutable Claude Agent SDK dependency/skill release before
+# any CLI surface can start an agent turn.  The helper returns only quoted exports.
+PREPARE_PRIMARY_AGENT_RUNTIME="$ROOT/scripts/prepare-claude-agent-sdk-runtime.sh"
+TAKYON_PYTHON="$ROOT/hermes-agent-main/.venv/bin/python"
+[ -x "$TAKYON_PYTHON" ] || {
+  echo "Takyon Python not found: $TAKYON_PYTHON" >&2
+  exit 1
+}
+[ -x "$PREPARE_PRIMARY_AGENT_RUNTIME" ] || {
+  echo "Claude Agent SDK runtime helper not found: $PREPARE_PRIMARY_AGENT_RUNTIME" >&2
+  exit 1
+}
+eval "$(TAKYON_PYTHON="$TAKYON_PYTHON" \
+  "$PREPARE_PRIMARY_AGENT_RUNTIME" "$ROOT" "$TAKYON_HOME")"
+
+# Canonical operator policy: one DeepSeek primary agent, Safebox-gated, with bounded spend.
+export TAKYON_STRICT_MODEL_ROLES=1
+export TAKYON_MODEL=deepseek-v4-pro
+export TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro
+export ANTHROPIC_MODEL=deepseek-v4-pro
+export ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro
+export ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro
+export CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro
+export TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD=5
+export TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD=2
+export TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD=2000000
+export TAKYON_WORKER_AGENT_RUNTIME=claude-agent-sdk
 
 cd "$ROOT/hermes-agent-main"
 exec ./takyon "$@"

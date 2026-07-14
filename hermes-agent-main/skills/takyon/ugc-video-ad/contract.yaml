@@ -1,0 +1,3 @@
+schema_version: 1
+requires: [business.state.read, creative.ugc-video.generate]
+produces: [creative.ugc-video]

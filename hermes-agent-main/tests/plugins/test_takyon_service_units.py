@@ -52,25 +52,34 @@ def test_production_runtime_units_pin_stripe_live_mode():
         assert "Environment=TAKYON_STRIPE_MODE=live" in lines, unit_path
 
 
-def test_operator_units_pin_ceo_to_openai_and_worker_to_deepseek():
+def test_operator_units_pin_one_primary_sdk_agent_to_deepseek_with_spend_caps():
     required = {
         "Environment=TAKYON_STRICT_MODEL_ROLES=1",
-        "Environment=TAKYON_MODEL=gpt-5.5",
+        "Environment=TAKYON_MODEL=deepseek-v4-pro",
         "Environment=TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro",
         "Environment=ANTHROPIC_MODEL=deepseek-v4-pro",
         "Environment=ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro",
         "Environment=ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro",
         "Environment=ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro",
         "Environment=CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro",
+        "Environment=TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD=5",
+        "Environment=TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD=2",
+        "Environment=TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD=2000000",
+        "Environment=TAKYON_DISABLE_LEGACY_SKILL_SYNC=1",
     }
     for unit_path in (
         "deploy/argon-alpha-14/takyon-dashboard.service",
         "deploy/argon-alpha-14/takyon-worker.service",
-        "deploy/takyon-dev-split/takyon-dashboard-dev.service.tmpl",
-        "deploy/takyon-dev-split/takyon-worker-dev.service.tmpl",
     ):
         lines = set((ROOT / unit_path).read_text().splitlines())
         assert required <= lines, unit_path
+
+
+def test_subuser_unit_forbids_operator_skill_materialization():
+    lines = set(
+        (ROOT / "deploy/takyon-subuser/takyon-subuser.service").read_text().splitlines()
+    )
+    assert "Environment=TAKYON_DISABLE_LEGACY_SKILL_SYNC=1" in lines
 
 
 def test_runtime_units_strip_wrong_plane_and_migration_database_urls():
@@ -542,7 +551,7 @@ def test_operator_prod_script_adopts_vps_model_pins_for_mac_compute():
     assert 'if [[ -f "$ROOT/.takyon/config.yaml" ]]' not in ensure_home
     assert 'cat /opt/takyon/.takyon/config.yaml' in ensure_home
     assert "'TAKYON_STRICT_MODEL_ROLES': '1'" in fetch
-    assert "'TAKYON_MODEL': 'gpt-5.5'" in fetch
+    assert "'TAKYON_MODEL': 'deepseek-v4-pro'" in fetch
     assert "'TAKYON_CLAUDE_AGENT_MODEL': 'deepseek-v4-pro'" in fetch
     assert "'CLAUDE_CODE_SUBAGENT_MODEL': 'deepseek-v4-pro'" in fetch
 
@@ -559,10 +568,13 @@ def test_operator_vps_launcher_propagates_and_validates_exact_model_pins():
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
         "CLAUDE_CODE_SUBAGENT_MODEL",
+        "TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD",
+        "TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD",
+        "TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD",
     ):
         assert f"service_env_value {key}" in src
         assert f"export {key}=" in src
-    assert '[[ "$ceo_model" == "gpt-5.5" ]]' in src
+    assert '[[ "$ceo_model" == "deepseek-v4-pro" ]]' in src
     assert '[[ "$model_value" == "deepseek-v4-pro" ]]' in src
 
 

@@ -1,0 +1,3 @@
+schema_version: 1
+requires: [business.state.read, business.files.read, business.files.write, product.surface.configure, app.runtime.operate]
+produces: [app.runtime-contract]

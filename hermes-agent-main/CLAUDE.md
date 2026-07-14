@@ -43,15 +43,15 @@ Creative-credit payment rules:
 - Normal app AI runtime pricing should resolve exact model pricing from `agent/usage_pricing.py`, not heuristic family matching.
 - **No ungated paid capability — gate it behind usage or credits before it ships.** Never introduce a tool, skill, action, or runtime call that spends real money (provider/API, model inference, search/extract such as Tavily, media, or infra) without first metering it through a money gate. Route consumption-priced spend — model inference and per-request runtime tool calls — through the usage rail (`plugins/takyon/app_usage.py`, reserve→settle→release, priced in `agent/usage_pricing.py`; use `request_cost` for per-request providers); route fixed operator-priced creative/ad actions through the creative-credit rail (`plugins/takyon/business_credits.py`). Spendful paths must fail closed: resolve exact cost from `agent/usage_pricing.py` (unpriced = refused), reserve before the provider call, settle on success, release on failure. Do not paper over an ungated call with a downstream cost report or label — gate the call itself. If it cannot be gated yet, ship only the guarded/disabled path and record the missing gate; never expose the ungated paid path.
 
-## Hermes-Style Takyon Work
+## Agent-SDK Takyon Work
 
-Implement Takyon behavior the Hermes way: the CEO reasons through skills, skills describe operating modes, tools provide guarded state changes/side effects, and the business filesystem records durable context. Do not add local deterministic business flows, one-off worker stages, hardcoded startup sequences, or UI-only command lists when a skill, harness command file, or business-scoped tool can express the behavior.
+Implement Takyon behavior through portable native skills, reviewed HANDOFF bindings, scoped tools, and durable business state. `scripts/takyon-claude-primary-runtime.mjs` is the only model-agent runtime; the queue worker, Docker sandboxes, and build processes are execution infrastructure, not model agents.
 
 When Takyon creates or updates business artifacts, the operator should be able to see where they landed. Surface the business filesystem root and paths for outreach, website/app, product, campaign, receipt, conversation, job, and wakeup deliverables through tool results, shell progress, or concise CEO reports.
 
-Default rule: everything business-facing should be a Takyon skill discoverable through the Hermes skills index or a business-scoped tool visible through tool schemas/results. The clear exceptions are shared safety/control rails: path containment, idempotency, credential checks, budget gates, pause/kill controls, cron wake scheduling, auth/session/payment/webhook protocol, and UI rendering mechanics. Even those exceptions should publish their user-facing command metadata through a single source of truth rather than separate UI hardcoding.
+Default rule: everything business-facing should be an approved skill discoverable in the immutable SDK plugin or a business-scoped tool visible through HANDOFF-approved schemas/results. Skills own provider-agnostic methods; `skills/HANDOFF/` owns exact tools, paths, modes, authority, publication, receipts, and validators; runtime code owns checkpoints and hard gates.
 
-Slash-command UI must be source-of-truth driven. Shell palettes/help should derive from `plugins/takyon/harness/settings.json` for controls, `plugins/takyon/harness/commands/*.md` for harness skill commands, and Hermes skill discovery for Takyon skills. If a future command or skill is added, updating that canonical source must be enough for shell discovery; do not duplicate slash command names/descriptions in the UI.
+Slash-command UI must be source-of-truth driven. Shell palettes/help derive from harness metadata and the approved SDK skill manifest; do not duplicate names/descriptions in UI code.
 
 ## Takyon Shell Model
 

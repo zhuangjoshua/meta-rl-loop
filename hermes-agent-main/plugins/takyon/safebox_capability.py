@@ -25,6 +25,7 @@ import base64
 import hashlib
 import hmac
 import json
+import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
@@ -40,6 +41,8 @@ class CapabilityScope:
     app_user_id: str | None  # None for operator/platform-plane actions (no product customer)
     action: str
     max_cost_microusd: int
+    invocation_id: str | None = None
+    max_total_cost_microusd: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -88,6 +91,25 @@ def mint_capability(
         raise CapabilityError("ttl must be positive")
     if int(scope.max_cost_microusd) < 0:
         raise CapabilityError("max_cost_microusd must be >= 0")
+    has_invocation = bool(str(scope.invocation_id or "").strip())
+    has_total = scope.max_total_cost_microusd is not None
+    if has_invocation != has_total:
+        raise CapabilityError("invocation scope is incomplete")
+    if has_invocation:
+        if str(scope.action or "").strip() != "operator.session":
+            raise CapabilityError("invocation scope requires operator.session")
+        try:
+            invocation_id = str(uuid.UUID(str(scope.invocation_id)))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise CapabilityError("invocation_id must be a UUID") from exc
+        total = int(scope.max_total_cost_microusd or 0)
+        if total <= 0 or int(scope.max_cost_microusd) <= 0:
+            raise CapabilityError("invocation ceilings must be positive")
+        if int(scope.max_cost_microusd) > total:
+            raise CapabilityError("per-call ceiling exceeds invocation ceiling")
+    else:
+        invocation_id = None
+        total = None
     if not scope.takyon_user_id or not scope.action:
         raise CapabilityError("incomplete scope")
     if _scope_requires_business_slug(
@@ -103,6 +125,8 @@ def mint_capability(
         "au": scope.app_user_id,
         "act": scope.action,
         "mc": int(scope.max_cost_microusd),
+        "inv": invocation_id,
+        "mt": total,
         "aud": audience,
         "n": nonce,
         "iat": int(issued_at),
@@ -157,6 +181,14 @@ def verify_capability(
         app_user_id=(payload.get("au") if payload.get("au") is not None else None),
         action=str(payload.get("act") or ""),
         max_cost_microusd=int(payload.get("mc") or 0),
+        invocation_id=(
+            str(payload.get("inv") or "").strip()
+            if payload.get("inv") is not None
+            else None
+        ),
+        max_total_cost_microusd=(
+            int(payload.get("mt")) if payload.get("mt") is not None else None
+        ),
     )
     if not scope.takyon_user_id or not scope.action:
         raise CapabilityError("incomplete scope")
@@ -165,4 +197,22 @@ def verify_capability(
         app_user_id=scope.app_user_id,
     ) and not str(scope.business_slug or "").strip():
         raise CapabilityError("incomplete scope")
+    has_invocation = bool(str(scope.invocation_id or "").strip())
+    has_total = scope.max_total_cost_microusd is not None
+    if has_invocation != has_total:
+        raise CapabilityError("invocation scope is incomplete")
+    if has_invocation:
+        try:
+            normalized_invocation = str(uuid.UUID(str(scope.invocation_id)))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise CapabilityError("invocation_id must be a UUID") from exc
+        total = int(scope.max_total_cost_microusd or 0)
+        if (
+            normalized_invocation != scope.invocation_id
+            or str(scope.action or "").strip() != "operator.session"
+            or total <= 0
+            or int(scope.max_cost_microusd) <= 0
+            or int(scope.max_cost_microusd) > total
+        ):
+            raise CapabilityError("invalid invocation scope")
     return scope, nonce, exp

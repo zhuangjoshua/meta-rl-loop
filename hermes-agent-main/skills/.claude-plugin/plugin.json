@@ -1,0 +1,9 @@
+{
+  "name": "takyon-approved-skills",
+  "version": "1.0.0",
+  "description": "Versioned production skills approved for the Takyon operator agent",
+  "skills": [
+    "./creative",
+    "./takyon"
+  ]
+}

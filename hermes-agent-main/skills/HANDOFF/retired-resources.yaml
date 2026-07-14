@@ -1,0 +1,107 @@
+schema_version: 1
+resources:
+  - source_path: takyon/autonomous-seo-geo-operator/scripts/check-internal-links.ts
+    status: retired_skill_helper
+    replacement_capability: business.files.read
+    preserved_method: takyon/autonomous-seo-geo-operator/references/seo-checklist.md
+    reason: Validation logic remains in the portable checklist and runtime validators; no executable ships in the plugin.
+  - source_path: takyon/autonomous-seo-geo-operator/scripts/check-metadata.ts
+    status: retired_skill_helper
+    replacement_capability: business.files.read
+    preserved_method: takyon/autonomous-seo-geo-operator/references/seo-checklist.md
+    reason: Validation logic remains in the portable checklist and runtime validators; no executable ships in the plugin.
+  - source_path: takyon/autonomous-seo-geo-operator/scripts/extract-routes.ts
+    status: retired_skill_helper
+    replacement_capability: business.files.read
+    preserved_method: takyon/autonomous-seo-geo-operator/references/seo-checklist.md
+    reason: Route inspection remains part of the portable audit; no executable ships in the plugin.
+  - source_path: takyon/autonomous-seo-geo-operator/scripts/lib/fs-scan.ts
+    status: retired_skill_helper
+    replacement_capability: business.files.read
+    preserved_method: takyon/autonomous-seo-geo-operator/references/seo-checklist.md
+    reason: Filesystem scanning is supplied by guarded file tools; no executable ships in the plugin.
+  - source_path: takyon/autonomous-seo-geo-operator/scripts/validate-jsonld.ts
+    status: retired_skill_helper
+    replacement_capability: business.files.read
+    preserved_method: takyon/autonomous-seo-geo-operator/references/seo-checklist.md
+    reason: Structured-data validation remains a required method and runtime check; no executable ships in the plugin.
+  - source_path: takyon/static-ad-creative-generator/scripts/backends.py
+    status: guarded_runtime_dependency
+    replacement_capability: creative.static-ad.generate
+    preserved_method: takyon/static-ad-creative-generator/references/prompt-compiler-rules.md
+    reason: Runtime gateway dependency with legacy direct-key branches; never publish or expose as a skill executable.
+  - source_path: takyon/static-ad-creative-generator/scripts/batch_generate.py
+    status: guarded_runtime_dependency
+    replacement_capability: creative.static-ad.generate
+    preserved_method: takyon/static-ad-creative-generator/SKILL.md
+    reason: Invoked only behind the guarded creative gateway; never publish or expose as a skill executable.
+  - source_path: takyon/static-ad-creative-generator/scripts/generate_image.py
+    status: retired_direct_entrypoint
+    replacement_capability: creative.static-ad.generate
+    preserved_method: takyon/static-ad-creative-generator/SKILL.md
+    reason: Direct provider debugging is not part of the production skill contract.
+  - source_path: takyon/static-ad-creative-generator/scripts/compile_prompt.py
+    status: retired_skill_helper
+    replacement_capability: creative.static-ad.generate
+    preserved_method: takyon/static-ad-creative-generator/references/prompt-compiler-rules.md
+    reason: Prompt compilation remains in the portable method and guarded generation capability.
+  - source_path: takyon/static-ad-creative-generator/scripts/qa_check.py
+    status: retired_skill_helper
+    replacement_capability: creative.static-ad.generate
+    preserved_method: takyon/static-ad-creative-generator/references/qa-rubric.md
+    reason: QA logic remains in the portable rubric and guarded generation capability.
+  - source_path: takyon/static-ad-creative-generator/scripts/validate_spec.py
+    status: retired_skill_helper
+    replacement_capability: creative.static-ad.generate
+    preserved_method: takyon/static-ad-creative-generator/templates/ad-spec.schema.json
+    reason: Specification validation remains represented by the published schema and guarded capability.
+  - source_path: takyon/ugc-video-ad/scripts/build_ad.py
+    status: guarded_runtime_dependency
+    replacement_capability: creative.ugc-video.generate
+    preserved_method: takyon/ugc-video-ad/SKILL.md
+    reason: Runtime gateway dependency with legacy direct-key arguments; never publish or expose as a skill executable.
+  - source_path: takyon/ugc-video-ad/scripts/pipeline.py
+    status: guarded_runtime_dependency
+    replacement_capability: creative.ugc-video.generate
+    preserved_method: takyon/ugc-video-ad/references/realism-framework.md
+    reason: Runtime render dependency with legacy direct-provider branches; never publish or expose as a skill executable.
+  - source_path: takyon/ugc-video-ad/scripts/postpass.sh
+    status: guarded_runtime_dependency
+    replacement_capability: creative.ugc-video.generate
+    preserved_method: takyon/ugc-video-ad/references/editing-and-stitching.md
+    reason: Runtime media post-processing dependency; not an agent-callable skill resource.
+  - source_path: takyon/takyon-lightreel-seedance-fal-ugc/scripts/query_lightreel.js
+    status: retired_direct_entrypoint
+    replacement_capability: creative.ugc-workflow.compose
+    preserved_method: takyon/takyon-lightreel-seedance-fal-ugc/SKILL.md
+    reason: Live paid discovery has no guarded capability and remains fail-closed; direct HTTP is forbidden.
+  - source_path: takyon/takyon-lightreel-seedance-fal-ugc/scripts/run_workflow.js
+    status: retired_direct_entrypoint
+    replacement_capability: creative.ugc-workflow.compose
+    preserved_method: takyon/takyon-lightreel-seedance-fal-ugc/SKILL.md
+    reason: Orchestrates excluded helpers and cannot run inside the production SDK plugin.
+  - source_path: takyon/takyon-lightreel-seedance-fal-ugc/scripts/env.js
+    status: retired_direct_entrypoint
+    replacement_capability: creative.ugc-workflow.compose
+    preserved_method: takyon/takyon-lightreel-seedance-fal-ugc/SKILL.md
+    reason: Ambient credential loading is forbidden in portable skills.
+  - source_path: takyon/takyon-lightreel-seedance-fal-ugc/scripts/build_fal_payload.js
+    status: retired_skill_helper
+    replacement_capability: creative.ugc-workflow.compose
+    preserved_method: takyon/takyon-lightreel-seedance-fal-ugc/SKILL.md
+    reason: Payload construction is specified portably and adapted by HANDOFF; no executable ships in the plugin.
+  - source_path: takyon/takyon-lightreel-seedance-fal-ugc/scripts/build_lightreel_prompt.js
+    status: retired_skill_helper
+    replacement_capability: creative.ugc-workflow.compose
+    preserved_method: takyon/takyon-lightreel-seedance-fal-ugc/SKILL.md
+    reason: Research-prompt construction is preserved in the portable method.
+  - source_path: takyon/takyon-lightreel-seedance-fal-ugc/scripts/lib/paths.js
+    status: retired_skill_helper
+    replacement_capability: creative.ugc-workflow.compose
+    preserved_method: takyon/takyon-lightreel-seedance-fal-ugc/SKILL.md
+    reason: Runtime path selection belongs to HANDOFF and is intentionally absent from the plugin.
+  - source_path: takyon/takyon-lightreel-seedance-fal-ugc/scripts/seedancify.js
+    status: retired_skill_helper
+    replacement_capability: creative.ugc-workflow.compose
+    preserved_method: takyon/takyon-lightreel-seedance-fal-ugc/SKILL.md
+    reason: Seedance prompt transformation is preserved in the portable method.

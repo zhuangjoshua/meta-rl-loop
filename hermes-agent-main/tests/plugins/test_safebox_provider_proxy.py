@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 
 import pytest
 from starlette.testclient import TestClient
@@ -107,6 +108,26 @@ def _session_cap(*, max_cost_microusd=5_000_000, ttl=3600, nonce="sess-1"):
         nonce=nonce,
         issued_at=int(time.time()),
         ttl_seconds=ttl,
+    )
+
+
+def _invocation_cap(*, invocation_id: str, max_cost_microusd=5_000_000):
+    scope = CapabilityScope(
+        takyon_user_id=_OPERATOR,
+        business_slug="acme",
+        app_user_id=None,
+        action=safebox_app._OPERATOR_SESSION_AUDIENCE,
+        max_cost_microusd=max_cost_microusd,
+        invocation_id=invocation_id,
+        max_total_cost_microusd=max_cost_microusd,
+    )
+    return mint_capability(
+        scope,
+        signing_key=_SIGNING_KEY,
+        audience=safebox_app._OPERATOR_SESSION_AUDIENCE,
+        nonce="sdk-invocation",
+        issued_at=int(time.time()),
+        ttl_seconds=3600,
     )
 
 
@@ -226,6 +247,84 @@ def _releases():
 
 
 # ══ Anthropic (streaming-capable, money-gated) ════════════════════════════════════════════════════
+def test_anthropic_reserve_prices_full_static_context_and_requested_output(
+    monkeypatch,
+):
+    from plugins.takyon import ai_provider
+
+    priced = {}
+
+    def billed(model, input_tokens, output_tokens, **_kwargs):
+        priced.update(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        return 123, 456
+
+    monkeypatch.setattr(ai_provider, "billed_microusd_cost", billed)
+    estimate = safebox_provider_proxy._anthropic_estimate_microusd(
+        {
+            "model": "deepseek-v4-pro",
+            "messages": [{"role": "user", "content": "short"}],
+            # Exceeds anthropic_payload's local default clamp, proving the
+            # reserve covers the actual wire request rather than that clamp.
+            "max_tokens": 200_000,
+        }
+    )
+
+    assert estimate == 456
+    assert priced == {
+        "model": "deepseek-v4-pro",
+        "input_tokens": 1_000_000,
+        "output_tokens": 200_000,
+    }
+
+
+def test_openai_reserve_prices_full_static_context_and_requested_output(monkeypatch):
+    from plugins.takyon import ai_provider
+
+    priced = {}
+
+    def billed(model, input_tokens, output_tokens, **_kwargs):
+        priced.update(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        return 321, 654
+
+    monkeypatch.setattr(ai_provider, "openai_billed_microusd_cost", billed)
+    estimate = safebox_provider_proxy._openai_responses_estimate_microusd(
+        {"model": "gpt-5.4", "input": "short", "max_output_tokens": 12_345}
+    )
+
+    assert estimate == 654
+    assert priced == {
+        "model": "gpt-5.4",
+        "input_tokens": 1_050_000,
+        "output_tokens": 12_345,
+    }
+
+
+def test_unknown_static_context_fails_before_pricing(monkeypatch):
+    from plugins.takyon import ai_provider
+
+    monkeypatch.setattr(
+        ai_provider,
+        "billed_microusd_cost",
+        lambda *_args, **_kwargs: pytest.fail("unknown context must not be priced"),
+    )
+    with pytest.raises(ValueError, match="static_context_unknown"):
+        safebox_provider_proxy._anthropic_estimate_microusd(
+            {
+                "model": "unlisted-future-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 100,
+            }
+        )
+
+
 def test_anthropic_wrong_token_is_401_before_any_reserve(client, monkeypatch):
     monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)
     resp = client.post(
@@ -244,6 +343,34 @@ def test_anthropic_missing_token_is_401(client, monkeypatch):
         json={"model": "claude-sonnet-4-6", "messages": [{"role": "user", "content": "hi"}]},
     )
     assert resp.status_code == 401
+
+
+def test_sdk_invocation_rejects_non_pinned_model_before_reserve_or_key(
+    client, monkeypatch
+):
+    monkeypatch.setattr(
+        safebox_provider_proxy,
+        "_anthropic_estimate_microusd",
+        lambda _payload: pytest.fail("model pin must run before pricing"),
+    )
+    monkeypatch.setattr(
+        safebox_provider_proxy,
+        "_anthropic_key",
+        lambda: pytest.fail("model pin must run before key resolution"),
+    )
+    response = client.post(
+        "/v1/messages",
+        headers=_cap_headers(_invocation_cap(invocation_id=str(uuid.uuid4()))),
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.headers["x-should-retry"] == "false"
+    assert response.json()["detail"] == "operator_sdk_model_not_allowed"
+    assert _reserves() == []
 
 
 def test_anthropic_out_of_budget_is_402_before_key_or_upstream(client, monkeypatch):
@@ -686,6 +813,67 @@ def test_session_capability_is_reusable_across_more_than_one_call(client, monkey
         )
         assert resp.status_code == 200
     assert len(_reserves()) == 3 and len(_settles()) == 3 and _releases() == []
+
+
+def test_sdk_exact_request_replay_is_refused_before_second_reserve_or_upstream(
+    client, monkeypatch
+):
+    claims: dict[str, dict] = {}
+
+    class _Envelope:
+        def claim(self, auth, estimate_microusd, *, call_id=None):
+            assert auth.invocation_id
+            assert call_id
+            if call_id in claims:
+                return {**claims[call_id], "replayed": True}
+            claim = {
+                "invocation_id": auth.invocation_id,
+                "call_id": call_id,
+                "estimate_microusd": int(estimate_microusd),
+                "status": "held",
+                "actual_microusd": None,
+                "replayed": False,
+            }
+            claims[call_id] = claim
+            return dict(claim)
+
+        def settle(self, claim, actual_microusd):
+            claims[claim["call_id"]].update(
+                status="settled", actual_microusd=int(actual_microusd)
+            )
+
+        def release(self, claim):
+            claims[claim["call_id"]].update(status="released")
+
+    monkeypatch.setattr(safebox_provider_proxy, "_SdkInvocationEnvelope", _Envelope)
+    monkeypatch.setattr(
+        safebox_provider_proxy, "_anthropic_estimate_microusd", lambda _payload: 5000
+    )
+    monkeypatch.setattr(
+        safebox_provider_proxy,
+        "_anthropic_actual_microusd_from_response",
+        lambda _payload, _response: 1800,
+    )
+    monkeypatch.setattr(safebox_provider_proxy, "_deepseek_key", lambda: _REAL_KEY)
+    _patch_httpx(monkeypatch)
+    _FakeClient.response = _FakeResponse(200, {"id": "msg_sdk", "usage": {}})
+    cap = _invocation_cap(invocation_id=str(uuid.uuid4()))
+    payload = {
+        "model": "deepseek-v4-pro",
+        "messages": [{"role": "user", "content": "ship it"}],
+    }
+
+    first = client.post("/v1/messages", headers=_cap_headers(cap), json=payload)
+    replay = client.post("/v1/messages", headers=_cap_headers(cap), json=payload)
+
+    assert first.status_code == 200
+    assert replay.status_code == 409
+    assert replay.headers["x-should-retry"] == "false"
+    assert replay.json()["detail"]["error"] == "operator_sdk_invocation_call_replay"
+    assert len(claims) == 1
+    assert len(_reserves()) == 1
+    assert len(_settles()) == 1
+    assert len(_FakeClient.sent) == 1
 
 
 def test_per_action_anthropic_capability_is_accepted_and_metered(client, monkeypatch):

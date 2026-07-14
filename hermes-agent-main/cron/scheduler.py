@@ -17,8 +17,9 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 try:
@@ -50,12 +51,134 @@ class CronPromptInjectionBlocked(Exception):
     injection scanner. Caught in run_job so the operator sees a clean
     "job blocked" delivery instead of the scheduler crashing.
 
-    Assembled-prompt scanning (including loaded skill content) plugs the
-    gap from #3968: create-time scanning only covers the user-supplied
-    prompt field; skill content loaded at runtime was never scanned, so a
-    malicious skill could carry an injection payload that reached the
-    non-interactive (auto-approve) cron agent.
+    Assembled-prompt scanning covers the user prompt plus script and prior-job
+    context before either reaches the unattended SDK turn. Approved skill
+    bodies are no longer copied into this prompt; the immutable published
+    plugin and compiled HANDOFF policy own their loading and enforcement.
     """
+
+
+class CronSkillPolicyBlocked(Exception):
+    """An explicitly requested cron skill is absent from the approved wake policy."""
+
+
+class CronSdkRoutingPolicyBlocked(RuntimeError):
+    """A persisted cron routing assertion conflicts with the primary SDK policy."""
+
+
+_CRON_PRIMARY_SDK_MODEL = "deepseek-v4-pro"
+_CRON_PRIMARY_SDK_PROVIDER = "deepseek"
+_CRON_SDK_ENABLED_TOOLSETS = (
+    "takyon",
+    "takyon-authority",
+    "web",
+    "skills",
+    "todo",
+)
+_CRON_SDK_DISABLED_TOOLSETS = (
+    "cronjob",
+    "messaging",
+    "clarify",
+    "memory",
+    "session_search",
+    "terminal",
+    "file",
+    "browser",
+    "code_execution",
+)
+
+
+def _load_approved_cron_manifest() -> dict:
+    """Load the same approved manifest the SDK will enforce for this turn."""
+
+    configured = str(os.getenv("TAKYON_CLAUDE_SKILLS_MANIFEST") or "").strip()
+    manifest_path = (
+        Path(configured).expanduser().resolve()
+        if configured
+        else Path(__file__).resolve().parents[1] / "skills" / "approved-skills.json"
+    )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise CronSkillPolicyBlocked(
+            f"approved cron skill manifest is unreadable: {manifest_path}"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise CronSkillPolicyBlocked("approved cron skill manifest must be an object")
+    plugin = manifest.get("plugin")
+    policy = manifest.get("mode_tool_policy")
+    wake = policy.get("wake") if isinstance(policy, dict) else None
+    if (
+        not isinstance(plugin, dict)
+        or not str(plugin.get("name") or "").strip()
+        or not isinstance(manifest.get("skills"), list)
+        or not isinstance(wake, dict)
+        or not isinstance(wake.get("allowed_skills"), list)
+        or not isinstance(wake.get("allowed_tools"), list)
+        or not isinstance(wake.get("baseline_tools"), list)
+    ):
+        raise CronSkillPolicyBlocked(
+            "approved cron skill manifest omits the compiled wake HANDOFF policy"
+        )
+    return manifest
+
+
+def _resolve_approved_cron_skills(skills: list[str]) -> list[str]:
+    """Resolve legacy identifiers to native published skills allowed on wakes."""
+
+    if not skills:
+        return []
+    manifest = _load_approved_cron_manifest()
+    plugin_name = str((manifest.get("plugin") or {}).get("name") or "").strip()
+    wake_policy = (manifest.get("mode_tool_policy") or {}).get("wake") or {}
+    allowed = {
+        str(value or "").strip()
+        for value in wake_policy.get("allowed_skills", [])
+        if str(value or "").strip()
+    }
+    index: dict[str, dict] = {}
+    for item in manifest.get("skills", []):
+        if not isinstance(item, dict):
+            continue
+        canonical = str(item.get("name") or "").strip()
+        if not canonical:
+            continue
+        identifiers = {
+            canonical,
+            Path(str(item.get("source_path") or "")).name,
+            *(
+                str(value or "").strip()
+                for value in item.get("legacy_names", [])
+                if str(value or "").strip()
+            ),
+        }
+        for identifier in identifiers:
+            index[identifier.lower()] = item
+
+    resolved: list[str] = []
+    for requested in skills:
+        clean = str(requested or "").strip().lstrip("/")
+        if clean.lower().startswith(plugin_name.lower() + ":"):
+            clean = clean.split(":", 1)[1]
+        item = index.get(clean.lower())
+        canonical = str((item or {}).get("name") or "").strip()
+        modes = {
+            str(value or "").strip().lower()
+            for value in (item or {}).get("allowed_modes", [])
+        }
+        if (
+            not canonical
+            or canonical not in allowed
+            or "wake" not in modes
+            or not str((item or {}).get("content_digest") or "").startswith("sha256:")
+        ):
+            raise CronSkillPolicyBlocked(
+                f"cron skill {requested!r} is not approved for wake mode"
+            )
+        qualified = f"{plugin_name}:{canonical}"
+        if qualified not in resolved:
+            resolved.append(qualified)
+    return resolved
 
 
 def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
@@ -67,8 +190,8 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
     2. Per-platform ``takyon tools`` config for the ``cron`` platform.
        Mirrors gateway behavior (``_get_platform_tools(cfg, platform_key)``)
        so users can gate cron toolsets globally without recreating every job.
-    3. ``None`` on any lookup failure — AIAgent loads the full default set
-       (legacy behavior before this change, preserved as the safety net).
+    3. ``None`` on any lookup failure — the compiled wake HANDOFF policy is
+       used without an additional legacy toolset restriction.
 
     _DEFAULT_OFF_TOOLSETS ({moa, homeassistant, rl}) are removed by
     ``_get_platform_tools`` for unconfigured platforms, so fresh installs
@@ -87,6 +210,158 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
             exc,
         )
         return None
+
+
+def _cron_sdk_invocation_allowed_tools(job: dict, cfg: dict) -> list[str] | None:
+    """Translate a legacy cron toolset restriction under the wake HANDOFF ceiling."""
+
+    requested_toolsets = _resolve_cron_enabled_toolsets(job, cfg)
+    if requested_toolsets is None:
+        return None
+    from plugins.takyon.claude_sdk_runtime import sdk_tool_definitions
+
+    requested_names = {
+        str(definition.get("name") or "").strip()
+        for definition in sdk_tool_definitions(
+            enabled_toolsets=requested_toolsets,
+            disabled_toolsets=_CRON_SDK_DISABLED_TOOLSETS,
+        )
+        if str(definition.get("name") or "").strip()
+    }
+    manifest = _load_approved_cron_manifest()
+    wake = (manifest.get("mode_tool_policy") or {}).get("wake") or {}
+    allowed = {
+        str(value or "").strip()
+        for value in wake.get("allowed_tools", [])
+        if str(value or "").strip()
+    }
+    baseline = {
+        str(value or "").strip()
+        for value in wake.get("baseline_tools", [])
+        if str(value or "").strip()
+    }
+    # Baseline tools come from the higher-level HANDOFF policy and cannot be
+    # removed by a legacy job record. The per-job list may only narrow the
+    # optional portion of that policy.
+    return sorted(baseline | (requested_names & allowed) | {"skill_read_resource"})
+
+
+def _cron_sdk_budget_usd() -> float:
+    """Use the explicit primary-agent ceiling; absence is a deployment error."""
+
+    raw = str(os.getenv("TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD") or "").strip()
+    try:
+        value = float(raw or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value <= 0 or value > 100:
+        raise RuntimeError(
+            "Claude Agent SDK cron turns require "
+            "TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD between 0 and 100"
+        )
+    return value
+
+
+def _validate_cron_sdk_routing_policy(job: dict) -> None:
+    """Treat legacy routing fields as assertions against the fixed SDK lane.
+
+    Empty fields inherit the production policy.  Configured values may only
+    restate that policy; they never override it or enable fallback routing.
+    """
+
+    conflicts: list[str] = []
+    configured_model = str(job.get("model") or "").strip()
+    if configured_model and configured_model != _CRON_PRIMARY_SDK_MODEL:
+        conflicts.append(
+            f"model={configured_model!r} conflicts with required "
+            f"{_CRON_PRIMARY_SDK_MODEL!r}"
+        )
+
+    configured_provider = str(job.get("provider") or "").strip()
+    if configured_provider and configured_provider != _CRON_PRIMARY_SDK_PROVIDER:
+        conflicts.append(
+            f"provider={configured_provider!r} conflicts with required "
+            f"{_CRON_PRIMARY_SDK_PROVIDER!r}"
+        )
+
+    configured_base_url = str(job.get("base_url") or "").strip().rstrip("/")
+    if configured_base_url:
+        from plugins.takyon import safebox
+
+        effective_base_url = str(
+            safebox.provider_proxy_base_url() or ""
+        ).strip().rstrip("/")
+        if not effective_base_url:
+            conflicts.append(
+                "base_url is configured but the required Safebox provider proxy "
+                "is unavailable"
+            )
+        elif configured_base_url != effective_base_url:
+            conflicts.append(
+                f"base_url={configured_base_url!r} conflicts with required "
+                f"Safebox proxy {effective_base_url!r}"
+            )
+
+    if conflicts:
+        raise CronSdkRoutingPolicyBlocked(
+            "primary SDK routing policy blocked cron job: "
+            + "; ".join(conflicts)
+            + "; no model/provider fallback is permitted"
+        )
+
+
+def _cron_occurrence_identity(job: dict) -> str:
+    """Return one stable identity for this scheduled occurrence/retry group."""
+
+    occurrence = str(job.get("next_run_at") or "").strip()
+    if occurrence:
+        return occurrence
+    occurrence = str(job.get("_sdk_occurrence_id") or "").strip()
+    if not occurrence:
+        occurrence = str(uuid.uuid4())
+        # Direct/manual callers may retry the same in-memory occurrence even
+        # when no schedule timestamp exists. Due jobs always carry their
+        # persisted pre-advance next_run_at timestamp.
+        job["_sdk_occurrence_id"] = occurrence
+    return occurrence
+
+
+def _cron_sdk_epoch(job: dict) -> str:
+    """Stable spend envelope for one occurrence, unique across occurrences."""
+
+    occurrence = _cron_occurrence_identity(job)
+    return f"cron:{job.get('id') or 'unknown'}:{occurrence}"
+
+
+def _cron_business_owner_user_id(business: str) -> str:
+    """Resolve the authoritative owner from the durable business row."""
+
+    from plugins.takyon.core import TakyonError, TakyonStore
+
+    slug = str(business or "").strip()
+    if not slug:
+        raise TakyonError(
+            "unscoped LLM cron job refused: attach an exact business before running"
+        )
+    store = TakyonStore()
+    with store._connect() as conn:
+        record = store._ensure_business(conn, slug)
+    owner = str(record.get("owner_user_id") or "").strip()
+    if not owner:
+        raise TakyonError(f"business:{slug} has no authoritative owner_user_id")
+    return owner
+
+
+def _cron_operator_user_id(job: dict, business: str) -> str:
+    if business:
+        return _cron_business_owner_user_id(business)
+    owner = str(job.get("operator_user_id") or "").strip()
+    try:
+        return str(uuid.UUID(owner))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError(
+            "root-scoped LLM cron job has no authenticated operator identity"
+        ) from exc
 
 # Valid delivery platforms — used to validate user-supplied platform names
 # in cron delivery targets, preventing env var enumeration via crafted names.
@@ -156,7 +431,7 @@ def _job_profile_context(job_id: str, profile: Optional[str]):
     an individual job can opt into a different runtime profile. While active,
     the scheduler's test/override hook and a context-local Takyon home override
     both point at the resolved profile directory so _get_takyon_home(),
-    .env/config loading, script resolution, AIAgent construction, and downstream
+    .env/config loading, script resolution, SDK construction, and downstream
     get_takyon_home() callers agree on the same home.
 
     Some existing provider/config paths still load profile .env values through
@@ -953,7 +1228,7 @@ def _parse_wake_gate(script_output: str) -> bool:
 
 
 def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
-    """Build the effective prompt for a cron job, optionally loading one or more skills first.
+    """Build the effective prompt and native approved-skill invocations for a cron job.
 
     Args:
         job: The cron job dict.
@@ -1055,68 +1330,36 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         skills = [skills]
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
-    if not skill_names:
+    approved_skills = _resolve_approved_cron_skills(skill_names)
+    if not approved_skills:
         return _scan_assembled_cron_prompt(prompt, job)
 
-    from tools.skills_tool import skill_view
-    from tools.skill_usage import bump_use
-
-    parts = []
-    skipped: list[str] = []
-    for skill_name in skill_names:
-        try:
-            loaded = json.loads(skill_view(skill_name))
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("Cron job '%s': skill '%s' returned invalid JSON, skipping", job.get("name", job.get("id")), skill_name)
-            skipped.append(skill_name)
-            continue
-        if not loaded.get("success"):
-            error = loaded.get("error") or f"Failed to load skill '{skill_name}'"
-            logger.warning("Cron job '%s': skill not found, skipping — %s", job.get("name", job.get("id")), error)
-            skipped.append(skill_name)
-            continue
-
-        # Bump usage so the curator sees this skill as actively used.
-        try:
-            bump_use(skill_name)
-        except Exception:
-            logger.debug("Cron job: failed to bump skill usage for '%s'", skill_name, exc_info=True)
-
-        content = str(loaded.get("content") or "").strip()
-        if parts:
-            parts.append("")
+    parts = [
+        "[IMPORTANT: Invoke each approved native skill below through the Skill tool "
+        "before executing the scheduled instruction. Do not emulate, inline, or load "
+        "a mutable filesystem copy of a skill.]",
+        "",
+        *(f"- `{skill_name}`" for skill_name in approved_skills),
+    ]
+    if prompt:
         parts.extend(
             [
-                f'[IMPORTANT: The user has invoked the "{skill_name}" skill, indicating they want you to follow its instructions. The full skill content is loaded below.]',
                 "",
-                content,
+                "The user provided this scheduled instruction alongside the skill invocation:",
+                prompt,
             ]
         )
-
-    if skipped:
-        notice = (
-            f"[IMPORTANT: The following skill(s) were listed for this job but could not be found "
-            f"and were skipped: {', '.join(skipped)}. "
-            f"Start your response with a brief notice so the user is aware, e.g.: "
-            f"'⚠️ Skill(s) not found and skipped: {', '.join(skipped)}']"
-        )
-        parts.insert(0, notice)
-
-    if prompt:
-        parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])
     return _scan_assembled_cron_prompt("\n".join(parts), job)
 
 
 def _scan_assembled_cron_prompt(assembled: str, job: dict) -> str:
-    """Scan the fully-assembled cron prompt (including skill content) for
+    """Scan the fully assembled scheduled instruction and collected context for
     injection patterns. Raises ``CronPromptInjectionBlocked`` when a match
     fires so ``run_job`` can surface a clear refusal to the operator.
 
-    Plugs the #3968 gap: ``_scan_cron_prompt`` runs on the user-supplied
-    prompt at create/update, but skill content is loaded from disk at
-    runtime and was never scanned. Since cron runs non-interactively
-    (auto-approves tool calls), a malicious skill carrying an injection
-    payload bypassed every gate.
+    Approved skills are selected and read only by the immutable SDK plugin;
+    this scanner therefore covers the remaining mutable cron inputs rather
+    than copying a skill body into an unattended prompt.
     """
     from tools.cronjob_tools import _scan_cron_prompt
 
@@ -1153,12 +1396,11 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     # no_agent short-circuit — the script IS the job, no LLM involvement.
     # ---------------------------------------------------------------
     # This mirrors the classic "run a bash script on a timer, send its
-    # stdout to telegram" watchdog pattern. The agent path is skipped
-    # entirely: no AIAgent, no prompt, no tool loop, no token spend.
+    # stdout to telegram" watchdog pattern. The model path is skipped
+    # entirely: no SDK subprocess, no prompt, no tool loop, no token spend.
     #
-    # We check this BEFORE importing run_agent / constructing SessionDB so
-    # a pure-script tick never pays for the agent machinery it isn't going
-    # to use. Keep this block self-contained.
+    # Keep this block before every SDK/session import so a pure-script tick
+    # never pays for model machinery it does not use.
     #
     # Semantics:
     #   - script stdout (trimmed) → delivered verbatim as the final message
@@ -1252,22 +1494,8 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         )
         return True, doc, output, None
 
-    # ---------------------------------------------------------------
-    # Default (LLM) path — import and construct the agent machinery now
-    # that we know we actually need it. Doing these imports here instead of
-    # at module top keeps no_agent ticks from paying for AIAgent / SessionDB
-    # construction costs.
-    # ---------------------------------------------------------------
-    from run_agent import AIAgent
-
-    # Initialize SQLite session store so cron job messages are persisted
-    # and discoverable via session_search (same pattern as gateway/run.py).
-    _session_db = None
-    try:
-        from takyon_state import SessionDB
-        _session_db = SessionDB()
-    except Exception as e:
-        logger.debug("Job '%s': SQLite session store not available: %s", job.get("id", "?"), e)
+    # The model path is the scoped primary Claude Agent SDK. Script-only
+    # no_agent jobs returned above and remain independent of the SDK runtime.
 
     # Wake-gate: if this job has a pre-check script, run it BEFORE building
     # the prompt so a ``{"wakeAgent": false}`` response can short-circuit
@@ -1293,11 +1521,9 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
     try:
         prompt = _build_job_prompt(job, prerun_script=prerun_script)
-    except CronPromptInjectionBlocked as block_exc:
-        # Assembled prompt (user prompt + loaded skill content) tripped the
-        # injection scanner. Refuse to run the agent this tick and surface
-        # a clear failure to the operator so they see WHY the scheduled job
-        # didn't run and can audit the offending skill.
+    except (CronPromptInjectionBlocked, CronSkillPolicyBlocked) as block_exc:
+        # Mutable prompt/context or an unapproved explicit skill failed the
+        # unattended-run policy before any model process or spend authority.
         logger.warning(
             "Job '%s' (ID: %s): blocked by prompt-injection scanner — %s",
             job_name, job_id, block_exc,
@@ -1307,61 +1533,26 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             f"**Job ID:** {job_id}\n"
             f"**Run Time:** {_takyon_now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"**Status:** BLOCKED\n\n"
-            "The assembled prompt (user prompt + loaded skill content) tripped "
-            "the cron injection scanner and the agent was NOT run.\n\n"
-            f"**Scanner result:** {block_exc}\n\n"
-            "Audit the skill(s) attached to this job for prompt-injection "
-            "payloads or invisible-unicode markers. If the skill is legitimate "
-            "and the match is a false positive, rephrase the content to avoid "
-            "the threat pattern (`tools/cronjob_tools.py::_CRON_THREAT_PATTERNS`)."
+            "The scheduled instruction or its explicit skill selection failed "
+            "the cron policy and the model was NOT run.\n\n"
+            f"**Policy result:** {block_exc}\n"
         )
         return False, blocked_doc, "", str(block_exc)
     if prompt is None:
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return True, "", SILENT_MARKER, None
-    origin = _resolve_origin(job)
-    _cron_session_id = f"cron_{job_id}_{_takyon_now().strftime('%Y%m%d_%H%M%S')}"
+    _cron_session_id = ""
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
 
-    agent = None
-
-    # Mark this as a cron session so the approval system can apply cron_mode.
-    # This env var is process-wide and persists for the lifetime of the
-    # scheduler process — every job this process runs is a cron job.
+    # Preserve the legacy marker for non-model cron delivery/tool consumers.
     os.environ["TAKYON_CRON_SESSION"] = "1"
 
-    # Use ContextVars for per-job session/delivery state so parallel jobs
-    # don't clobber each other's targets (os.environ is process-global).
+    # Delivery routing is context-local. Model/tool identity is bound only
+    # after the business owner and canonical workspace have been resolved.
     from gateway.session_context import set_session_vars, clear_session_vars, _VAR_MAP
-
-    # Cron execution is an internal scheduler context, not a live inbound
-    # gateway message. Do not seed TAKYON_SESSION_* contextvars from the
-    # stored ``origin`` (which is delivery routing metadata, not a sender
-    # identity). Several tool consumers branch on these vars during job
-    # execution and would otherwise behave as if a real user from the
-    # origin chat was driving the agent:
-    #   - tools/terminal_tool.py: background-process notification routing
-    #     (notify_on_complete / watch_patterns) reads TAKYON_SESSION_PLATFORM
-    #     and TAKYON_SESSION_CHAT_ID to populate watcher_platform / chat_id,
-    #     which would route completion notifications to the origin chat
-    #     instead of via TAKYON_CRON_AUTO_DELIVER_* below.
-    #   - tools/tts_tool.py: picks Opus vs MP3 based on
-    #     TAKYON_SESSION_PLATFORM == "telegram".
-    #   - tools/skills_tool.py + agent/prompt_builder.py: per-platform
-    #     skill-disable lists and the system-prompt cache key both consume
-    #     TAKYON_SESSION_PLATFORM.
-    #   - tools/send_message_tool.py: mirror source labelling and the
-    #     send_message gate read TAKYON_SESSION_PLATFORM.
-    # Cron output delivery itself reads job["origin"] directly via
-    # _resolve_origin(job) and the TAKYON_CRON_AUTO_DELIVER_* vars set
-    # below, so clearing TAKYON_SESSION_* here does not affect delivery.
-    _ctx_tokens = set_session_vars(
-        platform="",
-        chat_id="",
-        chat_name="",
-    )
+    _ctx_tokens = []
     _cron_delivery_vars = (
         "TAKYON_CRON_AUTO_DELIVER_PLATFORM",
         "TAKYON_CRON_AUTO_DELIVER_CHAT_ID",
@@ -1370,30 +1561,9 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     for _var_name in _cron_delivery_vars:
         _VAR_MAP[_var_name].set("")
 
-    # Per-job working directory.  When set (and validated at create/update
-    # time), we point TERMINAL_CWD at it so:
-    #   - build_context_files_prompt() picks up AGENTS.md / CLAUDE.md /
-    #     .cursorrules from the job's project dir, AND
-    #   - the terminal, file, and code-exec tools run commands from there.
-    #
-    # tick() serializes jobs that mutate process-global runtime state (workdir
-    # and/or profile jobs) outside the parallel pool, so mutating
-    # os.environ["TERMINAL_CWD"] here is safe for those jobs. For workdir-less
-    # jobs we leave TERMINAL_CWD untouched — preserves the original behaviour
-    # (skip_context_files=True, tools use whatever cwd the scheduler has).
+    # LLM cron may never escape its business workspace. A legacy workdir is
+    # accepted only when it resolves to that exact canonical root below.
     _job_workdir = (job.get("workdir") or "").strip() or None
-    if _job_workdir and not Path(_job_workdir).is_dir():
-        # Directory was removed between create-time validation and now.  Log
-        # and drop back to old behaviour rather than crashing the job.
-        logger.warning(
-            "Job '%s': configured workdir %r no longer exists — running without it",
-            job_id, _job_workdir,
-        )
-        _job_workdir = None
-    _prior_terminal_cwd = os.environ.get("TERMINAL_CWD", "_UNSET_")
-    if _job_workdir:
-        os.environ["TERMINAL_CWD"] = _job_workdir
-        logger.info("Job '%s': using workdir %s", job_id, _job_workdir)
 
     try:
         # Re-read .env and config.yaml fresh every run so provider/key
@@ -1414,9 +1584,8 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 else str(delivery_target["thread_id"])
             )
 
-        model = job.get("model") or os.getenv("TAKYON_MODEL") or ""
-
-        # Load config.yaml for model, reasoning, prefill, toolsets, provider routing
+        # Load only bounded turn/tool policy from config. Provider/model/base
+        # overrides are retired on the primary SDK path.
         _cfg = {}
         try:
             import yaml
@@ -1425,12 +1594,6 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 with open(_cfg_path, encoding="utf-8") as _f:
                     _cfg = yaml.safe_load(_f) or {}
                 _cfg = _expand_env_vars(_cfg)
-                _model_cfg = _cfg.get("model", {})
-                if not job.get("model"):
-                    if isinstance(_model_cfg, str):
-                        model = _model_cfg
-                    elif isinstance(_model_cfg, dict):
-                        model = _model_cfg.get("default", model)
         except Exception as e:
             logger.warning("Job '%s': failed to load config.yaml, using defaults: %s", job_id, e)
 
@@ -1443,150 +1606,59 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         except Exception:
             pass
 
-        # Reasoning config from config.yaml
-        from takyon_constants import parse_reasoning_effort
-        effort = str(_cfg.get("agent", {}).get("reasoning_effort", "")).strip()
-        reasoning_config = parse_reasoning_effort(effort)
-
-        # Prefill messages from env or config.yaml
-        prefill_messages = None
-        prefill_file = os.getenv("TAKYON_PREFILL_MESSAGES_FILE", "") or _cfg.get("prefill_messages_file", "")
-        if prefill_file:
-            pfpath = Path(prefill_file).expanduser()
-            if not pfpath.is_absolute():
-                pfpath = _get_takyon_home() / pfpath
-            if pfpath.exists():
-                try:
-                    with open(pfpath, "r", encoding="utf-8") as _pf:
-                        prefill_messages = json.load(_pf)
-                    if not isinstance(prefill_messages, list):
-                        prefill_messages = None
-                except Exception as e:
-                    logger.warning("Job '%s': failed to parse prefill messages file '%s': %s", job_id, pfpath, e)
-                    prefill_messages = None
-
-        # Max iterations
-        max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 90
-
-        # Provider routing
-        pr = _cfg.get("provider_routing", {})
-
-        from takyon_cli.runtime_provider import (
-            resolve_runtime_provider,
-            format_runtime_provider_error,
+        effort = str(_cfg.get("agent", {}).get("reasoning_effort", "high")).lower()
+        if effort not in {"low", "medium", "high"}:
+            effort = "high"
+        max_iterations = int(
+            _cfg.get("agent", {}).get("max_turns")
+            or _cfg.get("max_turns")
+            or 90
         )
-        from takyon_cli.auth import AuthError
-        try:
-            # Do not inject TAKYON_INFERENCE_PROVIDER here. resolve_runtime_provider()
-            # already prefers persisted config over stale shell/env overrides when
-            # no explicit provider is requested. Passing the env var here short-
-            # circuits that precedence and can resurrect old providers (for
-            # example DeepSeek) for cron jobs that do not pin provider/model.
-            runtime_kwargs = {
-                "requested": job.get("provider"),
-            }
-            if job.get("base_url"):
-                runtime_kwargs["explicit_base_url"] = job.get("base_url")
-            runtime = resolve_runtime_provider(**runtime_kwargs)
-        except AuthError as auth_exc:
-            # Primary provider auth failed — try fallback chain before giving up.
-            logger.warning("Job '%s': primary auth failed (%s), trying fallback", job_id, auth_exc)
-            fb = _cfg.get("fallback_providers") or _cfg.get("fallback_model")
-            fb_list = (fb if isinstance(fb, list) else [fb]) if fb else []
-            runtime = None
-            for entry in fb_list:
-                if not isinstance(entry, dict):
-                    continue
-                try:
-                    fb_kwargs = {"requested": entry.get("provider")}
-                    if entry.get("base_url"):
-                        fb_kwargs["explicit_base_url"] = entry["base_url"]
-                    if entry.get("api_key"):
-                        fb_kwargs["explicit_api_key"] = entry["api_key"]
-                    runtime = resolve_runtime_provider(**fb_kwargs)
-                    logger.info("Job '%s': fallback resolved to %s", job_id, runtime.get("provider"))
-                    break
-                except Exception as fb_exc:
-                    logger.debug("Job '%s': fallback %s failed: %s", job_id, entry.get("provider"), fb_exc)
-            if runtime is None:
-                raise RuntimeError(format_runtime_provider_error(auth_exc)) from auth_exc
-        except Exception as exc:
-            message = format_runtime_provider_error(exc)
-            raise RuntimeError(message) from exc
 
-        fallback_model = _cfg.get("fallback_providers") or _cfg.get("fallback_model") or None
-        credential_pool = None
-        runtime_provider = str(runtime.get("provider") or "").strip().lower()
-        if runtime_provider:
-            try:
-                from agent.credential_pool import load_pool
-                pool = load_pool(runtime_provider)
-                if pool.has_credentials():
-                    credential_pool = pool
-                    logger.info(
-                        "Job '%s': loaded credential pool for provider %s with %d entries",
-                        job_id,
-                        runtime_provider,
-                        len(pool.entries()),
-                    )
-            except Exception as e:
-                logger.debug("Job '%s': failed to load credential pool for %s: %s", job_id, runtime_provider, e)
-
-        # Initialize MCP servers so configured mcp_servers are available to
-        # the agent's tool registry before AIAgent is constructed. Without
-        # this, cron jobs never saw any MCP tools — only the gateway / CLI
-        # paths called discover_mcp_tools() at startup. Idempotent: subsequent
-        # ticks short-circuit on already-connected servers inside
-        # register_mcp_servers(). Non-fatal on failure: a broken MCP server
-        # shouldn't kill an otherwise-working cron job. See #4219.
-        try:
-            from tools.mcp_tool import discover_mcp_tools
-            _mcp_tools = discover_mcp_tools()
-            if _mcp_tools:
-                logger.info(
-                    "Job '%s': %d MCP tool(s) available",
-                    job_id, len(_mcp_tools),
-                )
-        except Exception as _mcp_exc:
-            logger.warning(
-                "Job '%s': MCP initialization failed (non-fatal): %s",
-                job_id, _mcp_exc,
+        # Persisted routing fields are assertions only. Validate them before
+        # tenant/session lookup or any SDK capability/spend work.
+        _validate_cron_sdk_routing_policy(job)
+        if any(job.get(field) for field in ("model", "provider", "base_url")):
+            logger.info(
+                "Job '%s': configured routing matches the fixed primary SDK policy",
+                job_id,
             )
 
-        from plugins.takyon.operator_gateway import build_operator_gateway_agent
-
-        agent = build_operator_gateway_agent(
-            runtime=runtime,
-            model=model,
-            operator_user_id="",
-            business_slug=str(job.get("business") or ""),
-            agent_kwargs={
-                "max_iterations": max_iterations,
-                "reasoning_config": reasoning_config,
-                "prefill_messages": prefill_messages,
-                "fallback_model": fallback_model,
-                "providers_allowed": pr.get("only"),
-                "providers_ignored": pr.get("ignore"),
-                "providers_order": pr.get("order"),
-                "provider_sort": pr.get("sort"),
-                "openrouter_min_coding_score": (_cfg.get("openrouter") or {}).get("min_coding_score"),
-                "enabled_toolsets": _resolve_cron_enabled_toolsets(job, _cfg),
-                "disabled_toolsets": ["cronjob", "messaging", "clarify"],
-                "quiet_mode": True,
-                # Cron jobs should always inherit the user's SOUL.md identity from
-                # TAKYON_HOME. When a workdir is configured, also inject project
-                # context files (AGENTS.md / CLAUDE.md / .cursorrules) from there.
-                # Without a workdir, keep cwd context discovery disabled.
-                "skip_context_files": not bool(_job_workdir),
-                "load_soul_identity": True,
-                "skip_memory": True,
-                "platform": "cron",
-                "session_id": _cron_session_id,
-                "session_db": _session_db,
-            },
+        business = str(job.get("business") or "").strip()
+        owner_user_id = _cron_operator_user_id(job, business)
+        from plugins.takyon.claude_sdk_runtime import (
+            SDK_GLOBAL_OPERATOR_TOOLS,
+            primary_sdk_session_project_key,
+            run_primary_sdk_subprocess,
+            stable_sdk_session_id,
         )
-        
-        # Run the agent with an *inactivity*-based timeout: the job can run
+        from plugins.takyon.claude_sdk_sessions import PostgresClaudeSdkSessionStore
+        from plugins.takyon.operator_gateway import compose_primary_agent_system_prompt
+        from plugins.takyon.turn_runtime import _business_workspace_execution_context
+
+        occurrence_identity = _cron_occurrence_identity(job)
+        _cron_session_id = stable_sdk_session_id(
+            f"cron:{business}:{job_id}:{occurrence_identity}"
+        )
+        session_store = PostgresClaudeSdkSessionStore(
+            operator_user_id=owner_user_id,
+            business_slug=business,
+        )
+        session_key = {
+            "projectKey": primary_sdk_session_project_key(
+                operator_user_id=owner_user_id,
+                business=business,
+            ),
+            "sessionId": _cron_session_id,
+        }
+        resume_session = session_store.load(session_key) is not None
+        invocation_allowed_tools = (
+            _cron_sdk_invocation_allowed_tools(job, _cfg)
+            if business
+            else sorted(SDK_GLOBAL_OPERATOR_TOOLS)
+        )
+
+        # Run the SDK with an inactivity-based timeout: the job can run
         # for hours if it's actively calling tools / receiving stream tokens,
         # but a hung API call or stuck tool with no activity for the configured
         # duration is caught and killed.  Default 600s (10 min inactivity);
@@ -1606,102 +1678,101 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 _cron_timeout = 600.0
         else:
             _cron_timeout = 600.0
-        _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
-        _POLL_INTERVAL = 5.0
-        _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        # Preserve scheduler-scoped ContextVar state (for example skill-declared
-        # env passthrough registrations) when the cron run hops into the worker
-        # thread used for inactivity timeout monitoring.
-        _cron_context = contextvars.copy_context()
-        _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
-        _inactivity_timeout = False
-        try:
-            if _cron_inactivity_limit is None:
-                # Unlimited — just wait for the result.
-                result = _cron_future.result()
-            else:
-                result = None
-                while True:
-                    done, _ = concurrent.futures.wait(
-                        {_cron_future}, timeout=_POLL_INTERVAL,
+        def _sdk_progress(event: dict) -> None:
+            if not isinstance(event, dict):
+                return
+            kind = str(event.get("kind") or "runtime")
+            status = str(event.get("status") or "running")
+            detail = str(event.get("detail") or "").strip()
+            if kind in {"skill", "session", "provider", "turn"}:
+                logger.info(
+                    "Job '%s' SDK %s.%s%s",
+                    job_id,
+                    kind,
+                    status,
+                    f": {detail}" if detail else "",
+                )
+
+        invocation_epoch = _cron_sdk_epoch(job)
+        global_workspace = (
+            _get_takyon_home()
+            / "runtime"
+            / "operator-workspaces"
+            / owner_user_id
+        )
+        if not business:
+            global_workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+            global_workspace.chmod(0o700)
+        workspace_context = (
+            _business_workspace_execution_context(
+                business,
+                operator_user_id=owner_user_id,
+                sync_on_exception=True,
+            )
+            if business
+            else nullcontext(global_workspace)
+        )
+        with workspace_context as workspace_home:
+            workspace = Path(workspace_home).resolve()
+            if business and _job_workdir and Path(_job_workdir).expanduser().resolve() != workspace:
+                raise RuntimeError(
+                    "scoped SDK cron workdir must equal the canonical business workspace"
+                )
+            if not business and _job_workdir:
+                requested_workdir = Path(_job_workdir).expanduser().resolve()
+                if not requested_workdir.is_dir():
+                    raise RuntimeError("root-scoped SDK cron workdir does not exist")
+                workspace = requested_workdir
+            _ctx_tokens = set_session_vars(
+                platform="cron",
+                chat_id="",
+                chat_name="",
+                user_id=owner_user_id,
+                session_key=f"cron:{job_id}",
+                workspace_root=str(workspace),
+                business_slug=business,
+                task_kind="ceo_wake" if business else "cron",
+            )
+            result = run_primary_sdk_subprocess(
+                business=business,
+                operator_user_id=owner_user_id,
+                system_prompt=compose_primary_agent_system_prompt(
+                    (
+                        "Execute this unattended scheduled business wake inside the exact "
+                        "bound business. Return only the final report for scheduler delivery; "
+                        "never use messaging tools or attempt delivery yourself."
+                        if business
+                        else "Execute this root-scoped operator schedule with only the exposed "
+                        "read, research, and planning capabilities. Do not mutate a business, "
+                        "use messaging tools, or attempt delivery yourself."
                     )
-                    if done:
-                        result = _cron_future.result()
-                        break
-                    # Agent still running — check inactivity.
-                    _idle_secs = 0.0
-                    if hasattr(agent, "get_activity_summary"):
-                        try:
-                            _act = agent.get_activity_summary()
-                            _idle_secs = _act.get("seconds_since_activity", 0.0)
-                        except Exception:
-                            pass
-                    if _idle_secs >= _cron_inactivity_limit:
-                        _inactivity_timeout = True
-                        break
-        except Exception:
-            _cron_pool.shutdown(wait=False, cancel_futures=True)
-            raise
-        finally:
-            _cron_pool.shutdown(wait=False, cancel_futures=True)
-
-        if _inactivity_timeout:
-            # Build diagnostic summary from the agent's activity tracker.
-            _activity = {}
-            if hasattr(agent, "get_activity_summary"):
-                try:
-                    _activity = agent.get_activity_summary()
-                except Exception:
-                    pass
-            _last_desc = _activity.get("last_activity_desc", "unknown")
-            _secs_ago = _activity.get("seconds_since_activity", 0)
-            _cur_tool = _activity.get("current_tool")
-            _iter_n = _activity.get("api_call_count", 0)
-            _iter_max = _activity.get("max_iterations", 0)
-
-            logger.error(
-                "Job '%s' idle for %.0fs (inactivity limit %.0fs) "
-                "| last_activity=%s | iteration=%s/%s | tool=%s",
-                job_name, _secs_ago, _cron_inactivity_limit,
-                _last_desc, _iter_n, _iter_max,
-                _cur_tool or "none",
-            )
-            if hasattr(agent, "interrupt"):
-                agent.interrupt("Cron job timed out (inactivity)")
-            raise TimeoutError(
-                f"Cron job '{job_name}' idle for "
-                f"{int(_secs_ago)}s (limit {int(_cron_inactivity_limit)}s) "
-                f"— last activity: {_last_desc}"
+                ),
+                user_prompt=prompt,
+                enabled_toolsets=_CRON_SDK_ENABLED_TOOLSETS,
+                disabled_toolsets=_CRON_SDK_DISABLED_TOOLSETS,
+                invocation_allowed_tools=invocation_allowed_tools,
+                workspace_root=str(workspace),
+                session_id=_cron_session_id,
+                resume_session=resume_session,
+                session_store=session_store,
+                task_id=invocation_epoch,
+                mode="wake" if business else "interactive",
+                epoch=invocation_epoch,
+                max_turns=max_iterations,
+                max_budget_usd=_cron_sdk_budget_usd(),
+                effort=effort,
+                inactivity_limit=max(0.0, _cron_timeout),
+                progress_callback=_sdk_progress,
             )
 
-        # Guard against non-dict returns from run_conversation under error conditions
         if not isinstance(result, dict):
             raise RuntimeError(
-                f"agent.run_conversation returned {type(result).__name__} instead of dict: {result!r}"
+                f"primary SDK returned {type(result).__name__} instead of dict"
             )
-
-        # If the agent itself reported failure (e.g. all retries exhausted on
-        # API errors, model abort, mid-run interrupt), do not silently mark the
-        # job as successful. run_agent populates `failed=True`/`completed=False`
-        # on these paths and may put the error into `final_response`, which
-        # would otherwise be delivered as if it were the agent's reply and the
-        # job's `last_status` set to "ok". Raise so the except handler below
-        # builds the proper failure tuple. (issue #17855)
-        if result.get("failed") is True or result.get("completed") is False:
-            _err_text = (
-                result.get("error")
-                or (result.get("final_response") or "").strip()
-                or "agent reported failure"
-            )
-            raise RuntimeError(_err_text)
-
-        final_response = result.get("final_response", "") or ""
-        # Strip leaked placeholder text that upstream may inject on empty completions.
-        if final_response.strip() == "(No response generated)":
+        final_response = str(result.get("summary") or "").strip()
+        if final_response == "(No response generated)":
             final_response = ""
-        # Use a separate variable for log display; keep final_response clean
-        # for delivery logic (empty response = no delivery).
-        logged_response = final_response if final_response else "(No response generated)"
+        logged_response = final_response or "(No response generated)"
         
         output = f"""# Cron Job: {job_name}
 
@@ -1721,6 +1792,26 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         logger.info("Job '%s' completed successfully", job_name)
         return True, output, final_response, None
         
+    except CronSdkRoutingPolicyBlocked as block_exc:
+        error_msg = str(block_exc)
+        logger.warning("Job '%s' blocked: %s", job_name, error_msg)
+        output = f"""# Cron Job: {job_name} (BLOCKED)
+
+**Job ID:** {job_id}
+**Run Time:** {_takyon_now().strftime('%Y-%m-%d %H:%M:%S')}
+**Schedule:** {job.get('schedule_display', 'N/A')}
+**Status:** BLOCKED
+
+## Prompt
+
+{prompt}
+
+## Policy Result
+
+{error_msg}
+"""
+        return False, output, "", error_msg
+
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
         logger.exception("Job '%s' failed: %s", job_name, error_msg)
@@ -1744,45 +1835,9 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         return False, output, "", error_msg
 
     finally:
-        # Restore TERMINAL_CWD to whatever it was before this job ran.  We
-        # only ever mutate it when the job has a workdir; see the setup block
-        # at the top of run_job for the serialization guarantee.
-        if _job_workdir:
-            if _prior_terminal_cwd == "_UNSET_":
-                os.environ.pop("TERMINAL_CWD", None)
-            else:
-                os.environ["TERMINAL_CWD"] = _prior_terminal_cwd
-        # Clean up ContextVar session/delivery state for this job.
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
-        if _session_db:
-            try:
-                _session_db.end_session(_cron_session_id, "cron_complete")
-            except (Exception, KeyboardInterrupt) as e:
-                logger.debug("Job '%s': failed to end session: %s", job_id, e)
-            try:
-                _session_db.close()
-            except (Exception, KeyboardInterrupt) as e:
-                logger.debug("Job '%s': failed to close SQLite session store: %s", job_id, e)
-        # Release subprocesses, terminal sandboxes, browser daemons, and the
-        # main OpenAI/httpx client held by this ephemeral cron agent. Without
-        # this, a gateway that ticks cron every N minutes leaks fds per job
-        # until it hits EMFILE (#10200 / "too many open files").
-        try:
-            if agent is not None:
-                agent.close()
-        except (Exception, KeyboardInterrupt) as e:
-            logger.debug("Job '%s': failed to close agent resources: %s", job_id, e)
-        # Each cron run spins up a short-lived worker thread whose event loop
-        # dies as soon as the ``ThreadPoolExecutor`` shuts down. Any async
-        # httpx clients cached under that loop are now unusable — reap them
-        # so their transports don't accumulate in the process-global cache.
-        try:
-            from agent.auxiliary_client import cleanup_stale_async_clients
-            cleanup_stale_async_clients()
-        except Exception as e:
-            logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
 
 
 def tick(verbose: bool = True, adapters=None, loop=None) -> int:

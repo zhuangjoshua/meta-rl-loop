@@ -1,0 +1,3 @@
+schema_version: 1
+requires: [business.state.read, business.files.read, metrics.business.read, business.files.write]
+produces: [metrics.business-summary]

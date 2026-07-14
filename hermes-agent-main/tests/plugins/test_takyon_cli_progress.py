@@ -307,7 +307,7 @@ def test_runtime_progress_activity_age_resets_on_output(monkeypatch):
     assert progress.seconds_since_activity() < 1.0
 
 
-def test_run_agent_keeps_reasoning_internal(monkeypatch):
+def test_run_agent_streams_exact_sdk_deltas_without_reprinting_final(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 
     class FakeProgress:
@@ -343,69 +343,127 @@ def test_run_agent_keeps_reasoning_internal(monkeypatch):
     class FakeStream:
         def __init__(self, *, progress, store, business_slug):
             captured["progress"] = progress
+            captured.setdefault("stream_deltas", [])
+            captured.setdefault("completed_messages", [])
 
-        def hermes_turn(self, *_args, **_kwargs):
-            pass
+        def hermes_turn(self, text, **_kwargs):
+            captured["completed_messages"].append(text)
 
-        def stream_delta(self, *_args, **_kwargs):
-            pass
+        def stream_delta(self, delta):
+            captured["stream_deltas"].append(delta)
+            captured["progress"].streamed_chars += len(delta)
 
         def finish_stream(self):
             pass
 
-    class FakeAgent:
-        def __init__(self):
-            self.session_estimated_cost_usd = 0.0
-            self.session_cost_status = "ok"
-            self._memory_nudge_interval = 0
-            self._skill_nudge_interval = 0
-            self.activity_callback = None
-            self.suppress_status_output = False
+    class FakeSessionStore:
+        def __init__(self, *, operator_user_id, business_slug):
+            captured["session_scope"] = (operator_user_id, business_slug)
 
-        def run_conversation(self, _prompt, stream_callback=None):
-            captured["stream_callback"] = stream_callback
-            assert captured["agent_kwargs"]["reasoning_callback"] is None
-            return {"final_response": "Done"}
+        def load(self, _key):
+            return None
 
-    def fake_builder(*, runtime, model, operator_user_id, business_slug, agent_kwargs):
-        captured["runtime"] = runtime
-        captured["agent_kwargs"] = agent_kwargs
-        return FakeAgent()
+    def fake_sdk(**kwargs):
+        captured["sdk_kwargs"] = kwargs
+        captured.setdefault("sdk_calls", []).append(kwargs)
+        kwargs["progress_callback"](
+            {
+                "kind": "assistant",
+                "status": "delta",
+                "detail": " exact ",
+            }
+        )
+        kwargs["progress_callback"](
+            {
+                "kind": "assistant",
+                "status": "delta",
+                "detail": "\nresponse ",
+            }
+        )
+        kwargs["progress_callback"](
+            {
+                "kind": "assistant",
+                "status": "output",
+                "detail": " exact \nresponse ",
+            }
+        )
+        return {
+            "summary": "exact \nresponse",
+            "model": "deepseek-v4-pro",
+            "actual_cost_cents": 2,
+            "skill_receipt": {"approved": ["takyon-approved-skills:test"]},
+        }
 
     monkeypatch.setattr(cli, "load_takyon_env", lambda: None)
     monkeypatch.setattr(cli, "_load_ceo_prompt", lambda: "ceo")
     monkeypatch.setattr(cli, "TakyonStore", lambda: _FakeStore())
-    monkeypatch.setattr(cli, "_read_model_config", lambda _store: {"provider": "anthropic"})
-    monkeypatch.setattr(cli, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
+    monkeypatch.setattr(cli, "_read_model_config", lambda _store: {})
     monkeypatch.setattr(cli, "_config_bool", lambda value, default=False: default if value in {None, ""} else bool(value))
-    monkeypatch.setattr(cli, "_resolved_operator_user_id", lambda _value=None: "")
+    monkeypatch.setattr(
+        cli,
+        "_resolved_operator_user_id",
+        lambda _value=None: "00000000-0000-4000-8000-000000000001",
+    )
     monkeypatch.setattr(cli, "_ShellProgress", FakeProgress)
     monkeypatch.setattr(cli, "_ShellRuntimeStream", FakeStream)
-    monkeypatch.setattr(cli, "_business_workspace_execution_context", lambda *_args, **_kwargs: contextlib.nullcontext(None))
+    monkeypatch.setattr(
+        cli,
+        "_business_workspace_execution_context",
+        lambda *_args, **_kwargs: contextlib.nullcontext(tmp_path),
+    )
     monkeypatch.setattr(cli, "_silence_process_stdio", lambda: contextlib.nullcontext())
     monkeypatch.setattr(cli, "_AgentLogTail", lambda enabled=False: contextlib.nullcontext())
+    monkeypatch.setenv("TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD", "3")
     monkeypatch.setattr(
-        "takyon_cli.runtime_provider.resolve_runtime_provider",
-        lambda requested=None, target_model=None: {"provider": "anthropic", "api_mode": "anthropic_messages"},
+        "plugins.takyon.claude_sdk_sessions.PostgresClaudeSdkSessionStore",
+        FakeSessionStore,
     )
-    monkeypatch.setattr("plugins.takyon.operator_gateway.build_operator_gateway_agent", fake_builder)
-
-    response, _meta = cli._run_agent_with_meta(
-        "ship it",
-        model="",
-        max_turns=3,
-        show_activity=False,
-        show_indicator=True,
-        current_business="demo",
+    monkeypatch.setattr(
+        "plugins.takyon.claude_sdk_runtime.run_primary_sdk_subprocess",
+        fake_sdk,
     )
 
-    assert response == "Done"
-    assert captured["agent_kwargs"]["reasoning_config"] == {"enabled": True, "effort": "medium"}
+    def run_turn(message):
+        return cli._run_agent_with_meta(
+            message,
+            model="",
+            max_turns=3,
+            show_activity=False,
+            show_indicator=True,
+            current_business="demo",
+            sdk_session_id="cli-test-session",
+        )
+
+    response, _meta = run_turn("ship it")
+    second_response, _second_meta = run_turn("continue")
+
+    assert response == ""
+    assert second_response == ""
+    assert captured["stream_deltas"] == [
+        " exact ",
+        "\nresponse ",
+        " exact ",
+        "\nresponse ",
+    ]
+    assert captured["completed_messages"] == []
+    assert captured["sdk_kwargs"]["mode"] == "interactive"
+    assert captured["sdk_kwargs"]["effort"] == "medium"
+    assert captured["sdk_kwargs"]["max_budget_usd"] == 3
+    assert captured["session_scope"] == (
+        "00000000-0000-4000-8000-000000000001",
+        "demo",
+    )
     assert captured["progress"].tool_progress_calls == []
+    first_call, second_call = captured["sdk_calls"]
+    assert first_call["session_id"] == second_call["session_id"]
+    assert first_call["epoch"].startswith("interactive:")
+    assert second_call["epoch"].startswith("interactive:")
+    assert first_call["epoch"] != second_call["epoch"]
 
 
 def test_worker_run_ceo_turn_keeps_reasoning_internal(monkeypatch):
     captured: dict[str, object] = {}
+    chats: list[str] = []
 
     class FakeProgress:
         def __init__(self):
@@ -449,12 +507,16 @@ def test_worker_run_ceo_turn_keeps_reasoning_internal(monkeypatch):
     def fake_builder(*, runtime, model, operator_user_id, business_slug, agent_kwargs):
         captured["runtime"] = runtime
         captured["agent_kwargs"] = agent_kwargs
-        return FakeAgent()
+        agent = FakeAgent()
+        captured["agent"] = agent
+        return agent
 
     monkeypatch.setattr(turn_runtime, "_read_model_config", lambda _store: {"provider": "anthropic"})
     monkeypatch.setattr(turn_runtime, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-1")
-    monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda _slug, _text: None)
+    monkeypatch.setattr(
+        worker, "_record_ceo_turn_chat", lambda _slug, text: chats.append(text)
+    )
     monkeypatch.setattr("plugins.takyon.core.load_takyon_env", lambda: None)
     monkeypatch.setattr("plugins.takyon.core.TakyonStore", lambda: _FakeStore())
     monkeypatch.setattr(
@@ -472,6 +534,7 @@ def test_worker_run_ceo_turn_keeps_reasoning_internal(monkeypatch):
         max_turns=3,
         inactivity_limit=0,
         progress=progress,
+        record_final_chat=False,
     )
 
     assert response == "Done"
@@ -479,6 +542,9 @@ def test_worker_run_ceo_turn_keeps_reasoning_internal(monkeypatch):
     assert cost_status == "ok"
     assert turn_completed is True
     assert captured["agent_kwargs"]["reasoning_config"] == {"enabled": True, "effort": "medium"}
+    assert captured["stream_callback"] is None
+    assert captured["agent"].interim_assistant_callback is None
+    assert chats == []
     assert progress.tool_progress_calls == []
 
 

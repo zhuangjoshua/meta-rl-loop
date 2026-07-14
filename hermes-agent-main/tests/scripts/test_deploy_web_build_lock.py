@@ -382,6 +382,7 @@ def test_outer_repository_wins_over_nested_runtime_git_metadata(tmp_path):
     assert result.read_text().strip().split("|")[3] == revision_two
 
 
+@pytest.mark.live_system_guard_bypass
 def test_interrupt_terminates_promotion_process_group(tmp_path):
     runtime_one, _runtime_two, _revision_one, _revision_two = _make_revision_worktrees(
         tmp_path
@@ -414,6 +415,7 @@ def test_interrupt_terminates_promotion_process_group(tmp_path):
     _wait_for_pid_exit(descendant_pid)
 
 
+@pytest.mark.live_system_guard_bypass
 def test_interrupt_terminates_npm_build_process_group(tmp_path):
     runtime_one, _runtime_two, _revision_one, _revision_two = _make_revision_worktrees(
         tmp_path
@@ -445,6 +447,7 @@ def test_interrupt_terminates_npm_build_process_group(tmp_path):
     _wait_for_pid_exit(descendant_pid)
 
 
+@pytest.mark.live_system_guard_bypass
 def test_interrupted_waiter_cannot_release_owners_promotion_lock(tmp_path):
     runtime_one, runtime_two, _revision_one, _revision_two = _make_revision_worktrees(tmp_path)
     fake_bin, consumer = _make_fake_commands(tmp_path)
@@ -705,6 +708,7 @@ def test_subuser_remote_activation_shell_is_syntax_valid(tmp_path):
         "takyon_prepare_runtime_rollback() { :; }\n"
         "takyon_begin_runtime_activation() { :; }\n"
         "takyon_activate_staged_runtime() { :; }\n"
+        "verify_subuser_runtime_surface() { :; }\n"
         "remote_service_candidate=/tmp/takyon-subuser.service\n"
         "remote_service_backup=/tmp/takyon-subuser.backup.service\n"
         "remote_unit_activation_marker=/tmp/takyon-subuser.unit-installed\n"
@@ -722,24 +726,96 @@ def test_subuser_remote_activation_shell_is_syntax_valid(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_bundled_skills_change_only_inside_quiesced_rollback_window():
+def test_deploys_replace_mutable_skills_with_immutable_operator_plugin_only():
     operator = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
     preflight = (ROOT / "deploy/argon-alpha-14/preflight-staged-runtime.sh").read_text()
     subuser = (ROOT / "deploy/takyon-subuser/deploy-runtime.sh").read_text()
 
-    assert 'TAKYON_HOME="$TAKYON_SKILLS_PREFLIGHT_HOME"' in preflight
-    assert 'TAKYON_HOME="$TAKYON_REMOTE_HOME" HOME=/opt/takyon' not in preflight
-    assert operator.index("TAKYON_STOP_CORE_SERVICES=1") < operator.index(
-        "TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1 '$TAKYON_REMOTE_RUNTIME/.venv/bin/python'"
+    assert "build_approved_skills_manifest.py" in preflight
+    assert "TAKYON_CLAUDE_SKILLS_PLUGIN=\"$sdk_release/plugin\"" in preflight
+    assert "TAKYON_SKILLS_PREFLIGHT_HOME" not in preflight
+    assert "TAKYON_FORCE_RESTORE_BUNDLED_SKILLS" not in operator
+    activation = operator[operator.index("operator_runtime_activation_started=1") :]
+    assert activation.index("mv -Tf '$remote_sdk_current.next' '$remote_sdk_current'") < activation.index(
+        "rm -rf '$TAKYON_REMOTE_HOME/skills'"
     )
-    assert operator.index("cp -a '$TAKYON_REMOTE_HOME/skills' '$remote_skills_backup'") < operator.index(
-        "TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1 '$TAKYON_REMOTE_RUNTIME/.venv/bin/python'"
+    assert activation.index("rm -rf '$TAKYON_REMOTE_HOME/skills'") < activation.index(
+        "systemctl restart takyon-dashboard.service"
     )
     assert "rm -rf '$TAKYON_REMOTE_HOME/skills'" in operator
 
-    assert "TAKYON_HOME='$remote_skills_preflight_home'" in subuser
-    assert subuser.index("systemctl stop '$TAKYON_REMOTE_SERVICE_NAME'") < subuser.index(
-        "PYTHONPATH='$TAKYON_REMOTE_RUNTIME' '$TAKYON_REMOTE_RUNTIME/.venv/bin/python'"
+    assert "remote_skills_preflight_home" not in subuser
+    removal = "rm -rf '$TAKYON_REMOTE_HOME/skills' '$TAKYON_REMOTE_HOME/claude-agent-sdk' '$TAKYON_REMOTE_HOME/runtime/claude-agent-sdk'"
+    subuser_activation = subuser[subuser.index("activate_subuser_host() {") :]
+    assert removal in subuser_activation
+    assert subuser_activation.index(removal) < subuser_activation.index(
+        "systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'"
     )
-    assert "cp -a '$TAKYON_REMOTE_HOME/skills' '$remote_skills_backup'" in subuser
-    assert "rm -rf '$TAKYON_REMOTE_HOME/skills'" in subuser
+    assert '"$TAKYON_DEPLOY_SOURCE_REVISION" subuser' in subuser
+    assert 'verify_subuser_runtime_surface "$TAKYON_REMOTE_STAGED_RUNTIME" 0' in subuser
+    assert 'verify_subuser_runtime_surface "$TAKYON_REMOTE_RUNTIME" 1' in subuser
+    assert "rm -rf '$TAKYON_REMOTE_RUNTIME/node_modules/@anthropic-ai'/claude-agent-sdk*" in subuser
+
+    release = (ROOT / "deploy/shared/runtime-release.sh").read_text()
+    for forbidden in (
+        "--exclude '/.claude/'",
+        "--exclude '/skills/'",
+        "--exclude '/plugins/takyon/bootstrap_phases.py'",
+        "--exclude '/plugins/takyon/claude_sdk_runtime.py'",
+        "--exclude '/plugins/takyon/claude_sdk_sessions.py'",
+        "--exclude '/scripts/build_approved_skills_manifest.py'",
+        "--exclude '/scripts/takyon-claude-agent-task.mjs'",
+        "--exclude '/scripts/takyon-claude-primary-entrypoint.mjs'",
+        "--exclude '/scripts/takyon-claude-primary-runtime.mjs'",
+    ):
+        assert forbidden in release
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "under_home", "symlink"),
+    [
+        ("skills", False, False),
+        (".claude", False, False),
+        ("plugins/takyon/claude_sdk_runtime.py", False, False),
+        ("plugins/takyon/__pycache__/claude_sdk_runtime.cpython-312.pyc", False, False),
+        ("scripts/takyon-claude-primary-runtime.mjs", False, False),
+        ("node_modules/@anthropic-ai/claude-agent-sdk-linux-x64", False, False),
+        ("node_modules/.bin/claude", False, True),
+        ("skills", True, False),
+        ("claude-agent-sdk", True, False),
+        ("runtime/claude-agent-sdk", True, False),
+    ],
+)
+def test_subuser_runtime_surface_verifier_rejects_operator_material(
+    tmp_path, relative_path, under_home, symlink
+):
+    runtime = tmp_path / "runtime"
+    home = tmp_path / "home"
+    runtime.mkdir()
+    home.mkdir()
+    verifier = ROOT / "deploy/shared/verify-subuser-runtime-surface.py"
+    clean = subprocess.run(
+        ["python3", str(verifier), str(runtime), str(home), "1"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert clean.returncode == 0, clean.stderr
+
+    candidate = (home if under_home else runtime) / relative_path
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    if symlink:
+        candidate.symlink_to("missing-target")
+    elif candidate.suffix:
+        candidate.write_text("forbidden\n", encoding="utf-8")
+    else:
+        candidate.mkdir()
+
+    rejected = subprocess.run(
+        ["python3", str(verifier), str(runtime), str(home), "1"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert "forbidden operator runtime material" in rejected.stderr

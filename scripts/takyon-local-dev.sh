@@ -20,6 +20,7 @@ SKIP_CREATE_FOLLOWUP="${TAKYON_LOCAL_DEV_SKIP_CREATE_FOLLOWUP:-0}"
 CREATE_FOLLOWUP_MAX_TURNS="${TAKYON_LOCAL_DEV_CREATE_FOLLOWUP_MAX_TURNS:-12}"
 CREATE_FOLLOWUP_PROMPT="${TAKYON_LOCAL_DEV_CREATE_FOLLOWUP_PROMPT:-Immediately load and execute takyon-product-workflow in this same run. Do not stop after takyon-build-product. If the current source is still a starter shell, generic access/account UI, or / redirects instead of showing a real product-specific landing page, repair that bootstrap defect first and then continue into the real in-app product workflow. Do not stop at workflow_pending, starter access shell, or placeholder product state; keep going until there is a real landing page and a real in-app product workflow, or return one exact blocker.}"
 SUPABASE_AUTH_HELPER="$ROOT/deploy/shared/supabase-auth-env.sh"
+PREPARE_PRIMARY_AGENT_RUNTIME="$ROOT/scripts/prepare-claude-agent-sdk-runtime.sh"
 
 find_python() {
   local candidate
@@ -67,6 +68,29 @@ require_python() {
   echo "  $ROOT/hermes-agent-main/.venv/bin/python" >&2
   echo "  $ROOT/hermes-agent-main/venv/bin/python" >&2
   exit 1
+}
+
+prepare_primary_agent_runtime() {
+  require_python
+  [[ -x "$PREPARE_PRIMARY_AGENT_RUNTIME" ]] || {
+    echo "Missing primary Agent SDK runtime helper: $PREPARE_PRIMARY_AGENT_RUNTIME" >&2
+    exit 1
+  }
+  # shellcheck disable=SC1090
+  eval "$(TAKYON_PYTHON="$PYTHON_BIN" \
+    "$PREPARE_PRIMARY_AGENT_RUNTIME" "$ROOT" "$OPERATOR_HOME")"
+  export TAKYON_STRICT_MODEL_ROLES=1
+  export TAKYON_MODEL=deepseek-v4-pro
+  export TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro
+  export ANTHROPIC_MODEL=deepseek-v4-pro
+  export ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro
+  export ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro
+  export CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro
+  export TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD=5
+  export TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD=2
+  export TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD=2000000
+  export TAKYON_WORKER_AGENT_RUNTIME=claude-agent-sdk
 }
 
 validate_local_supabase_auth() {
@@ -339,6 +363,7 @@ start_safebox() {
 takyon_env() {
   ensure_layout
   start_safebox
+  prepare_primary_agent_runtime
 
   env \
     TAKYON_HOME="$OPERATOR_HOME" \
@@ -352,6 +377,7 @@ takyon_env() {
 run_takyon() {
   ensure_layout
   start_safebox
+  prepare_primary_agent_runtime
 
   exec env \
     TAKYON_HOME="$OPERATOR_HOME" \

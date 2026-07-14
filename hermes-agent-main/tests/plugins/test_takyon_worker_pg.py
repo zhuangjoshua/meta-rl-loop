@@ -277,6 +277,45 @@ def test_operator_drain_tick_skips_safebox_only_usage_reconciler(monkeypatch):
     }
 
 
+def test_operator_drain_tick_runs_bounded_global_sdk_retention_on_cadence(
+    monkeypatch,
+):
+    from plugins.takyon import claude_sdk_sessions
+
+    class _RoleConn:
+        def execute(self, sql, params=()):
+            if "session_user::text" in sql and "current_user::text" in sql:
+                return self
+            raise AssertionError(f"unexpected SQL on fake operator conn: {sql}")
+
+        def fetchone(self):
+            return {
+                "session_user": "takyon_operator_runtime",
+                "current_user": "takyon_operator_runtime",
+            }
+
+    seen: list[object] = []
+
+    def _prune(conn, **_kwargs):
+        seen.append(conn)
+        return 2
+
+    monkeypatch.setattr(worker.jobs, "requeue_stale", lambda *_a, **_kw: 0)
+    monkeypatch.setattr(worker.jobs, "run_one", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        claude_sdk_sessions,
+        "prune_expired_sdk_sessions_global",
+        _prune,
+    )
+    monkeypatch.setattr(worker, "_SDK_SESSION_RETENTION_NEXT_SWEEP_AT", 0.0)
+    conn = _RoleConn()
+
+    worker.drain_tick(conn, worker_id="operator-worker", handlers={}, dispatch=False)
+    worker.drain_tick(conn, worker_id="operator-worker", handlers={}, dispatch=False)
+
+    assert seen == [conn]
+
+
 def test_drain_tick_defaults_stale_reclaim_to_15_minutes(monkeypatch):
     class _RoleConn:
         def execute(self, sql, params=()):
@@ -2087,6 +2126,125 @@ class _BootstrapStubStore:
         return {"ok": True}
 
 
+def _install_bootstrap_phase_store_stub(monkeypatch) -> None:
+    """Keep handler-focused tests independent of the Postgres phase-store integration.
+
+    The durable state machine has dedicated database/unit coverage.  These older handler tests
+    exercise settlement, child draining, wake scheduling, and the final product done-gate, so this
+    in-memory fixture models one bounded final-product phase and lets that gate decide whether a
+    continuation is required.
+    """
+    from plugins.takyon import bootstrap_phases
+
+    class _PhaseStore:
+        def __init__(self, *, operator_user_id, business_slug, **_kwargs):
+            self.operator_user_id = str(operator_user_id)
+            self.business_slug = str(business_slug)
+            self.job_id = ""
+            self.sdk_session_id = ""
+            self.immutable_inputs: dict[str, Any] = {}
+            self.phase_idempotency = {
+                "final_workflow_build_publish": {
+                    "contract": "test:final-contract",
+                    "publish": "test:final-publish",
+                    "operator_update": "test:final-update",
+                }
+            }
+            self.current_phase: str | None = "final_workflow_build_publish"
+            self.completed_phases: tuple[str, ...] = ()
+            self.phase_evidence: dict[str, Any] = {}
+            self.phase_receipts: dict[str, Any] = {
+                "final_workflow_build_publish": [
+                    {
+                        "tool": "__primary_agent_runtime__",
+                        "status": "completed",
+                        "skills_invoked": [
+                            "design-taste-frontend",
+                            "takyon-app-runtime",
+                            "takyon-product",
+                        ],
+                    }
+                ]
+            }
+            self.phase_attempts: dict[str, Any] = {}
+            self.status = "running"
+            self._verify_after_turn = False
+
+        def _run(self):
+            return bootstrap_phases.BootstrapPhaseRun(
+                job_id=self.job_id,
+                sdk_session_id=self.sdk_session_id,
+                owner_user_id=self.operator_user_id,
+                business_slug=self.business_slug,
+                immutable_inputs=dict(self.immutable_inputs),
+                phase_idempotency=dict(self.phase_idempotency),
+                current_phase=self.current_phase,
+                completed_phases=self.completed_phases,
+                phase_evidence=dict(self.phase_evidence),
+                phase_receipts=dict(self.phase_receipts),
+                phase_attempts=dict(self.phase_attempts),
+                status=self.status,
+            )
+
+        def initialize_or_load(
+            self,
+            *,
+            job_id,
+            sdk_session_id,
+            immutable_inputs,
+            **_kwargs,
+        ):
+            self.job_id = str(job_id)
+            self.sdk_session_id = str(sdk_session_id)
+            self.immutable_inputs = dict(immutable_inputs)
+            return self._run()
+
+        def load(self, _job_id):
+            return self._run()
+
+        def start_phase(self, _job_id, phase, *, job_attempt):
+            assert phase == self.current_phase
+            self.phase_attempts[phase] = {
+                "calls": int(self.phase_attempts.get(phase, {}).get("calls") or 0) + 1,
+                "last_job_attempt": int(job_attempt),
+            }
+            self._verify_after_turn = True
+            return self._run()
+
+        def reconcile_first_incomplete(self, _job_id, _verifier):
+            if self.current_phase is None or not self._verify_after_turn:
+                return self._run()
+            self._verify_after_turn = False
+            workflow_requested = bool(self.immutable_inputs.get("workflow_requested"))
+            if worker._bootstrap_has_durable_live_product(
+                None,
+                self.business_slug,
+                workflow_requested=workflow_requested,
+            ):
+                phase = self.current_phase
+                self.completed_phases = (phase,)
+                self.phase_evidence[phase] = {
+                    "verified": True,
+                    "source": "handler-test-final-product-gate",
+                    "details": {},
+                }
+                self.current_phase = None
+                self.status = "completed"
+            return self._run()
+
+        def record_runtime_completion(self, *_args, **_kwargs):
+            return None
+
+        def record_tool_receipt(self, *_args, **_kwargs):
+            return None
+
+        def record_operator_update_receipt(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(bootstrap_phases, "PostgresBootstrapPhaseStore", _PhaseStore)
+    monkeypatch.setattr(worker, "_post_bootstrap_phase_operator_update", lambda *_a, **_k: None)
+
+
 def _install_bootstrap_handler_stubs(
     monkeypatch,
     *,
@@ -2100,7 +2258,6 @@ def _install_bootstrap_handler_stubs(
     workspace, agent, or network. Returns the dict capturing what the handler did."""
     import contextlib
 
-    from plugins.takyon import cli as takyon_cli
     import gateway.session_context as session_context
 
     captured: dict[str, Any] = {"events": [], "refresh_calls": 0}
@@ -2120,10 +2277,9 @@ def _install_bootstrap_handler_stubs(
 
     monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
     monkeypatch.setattr(
-        takyon_cli,
-        "_ceo_bootstrap_turn_config",
+        turn_runtime,
+        "_ceo_bootstrap_phase_runtime_config",
         lambda *a, **k: {
-            "user_prompt": "Bootstrap business now.",
             "ephemeral_system_prompt": "CEO prompt",
             "enabled_toolsets": ["takyon", "takyon-authority", "skills"],
         },
@@ -2167,8 +2323,16 @@ def _install_bootstrap_handler_stubs(
 
     monkeypatch.setattr(worker, "_record_runtime_event", _capture_event)
     monkeypatch.setattr(worker, "_bootstrap_human_review_blocker", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        worker,
+        "_read_bootstrap_human_review_blocker_pinned",
+        lambda store, slug, **kwargs: worker._bootstrap_human_review_blocker(
+            store, slug, **kwargs
+        ),
+    )
     monkeypatch.setattr(worker, "_bootstrap_delegated_children", lambda *_a, **_k: [])
     monkeypatch.setattr(worker, "_product_publish_blocker_after", lambda *_a, **_k: ("", ""))
+    _install_bootstrap_phase_store_stub(monkeypatch)
     captured["store"] = store
     return captured
 
@@ -2176,10 +2340,10 @@ def _install_bootstrap_handler_stubs(
 def test_ceo_bootstrap_handler_binds_owner_before_loading_summary(monkeypatch):
     import contextlib
 
-    from plugins.takyon import cli as takyon_cli
     import gateway.session_context as session_context
 
     seen: dict[str, Any] = {}
+    operator_user_id = "00000000-0000-4000-8000-000000000123"
 
     class _FakeStore:
         def __init__(self, *args, **kwargs):
@@ -2189,7 +2353,7 @@ def test_ceo_bootstrap_handler_binds_owner_before_loading_summary(monkeypatch):
         def read(self, *, scope, query, include=None, limit=None):
             assert scope == "business:acme"
             assert query == "summary"
-            if self.operator_user_id != "user-123":
+            if self.operator_user_id != operator_user_id:
                 raise AssertionError("summary read before owner binding")
             return {"business": {"name": "Acme", "goal": "do the thing"}}
 
@@ -2206,13 +2370,12 @@ def test_ceo_bootstrap_handler_binds_owner_before_loading_summary(monkeypatch):
 
     monkeypatch.setattr(core, "TakyonStore", _FakeStore)
     monkeypatch.setattr(core, "_bound_operator_task_context", _fake_bound_op)
-    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: operator_user_id)
     monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
     monkeypatch.setattr(
-        takyon_cli,
-        "_ceo_bootstrap_turn_config",
+        turn_runtime,
+        "_ceo_bootstrap_phase_runtime_config",
         lambda *a, **k: {
-            "user_prompt": "Bootstrap business now.",
             "ephemeral_system_prompt": "CEO prompt",
             "enabled_toolsets": ["takyon", "web", "skills"],
         },
@@ -2233,15 +2396,19 @@ def test_ceo_bootstrap_handler_binds_owner_before_loading_summary(monkeypatch):
         lambda *_a, **_k: {"publish": {"status": "published"}},
     )
     monkeypatch.setattr(worker, "_bootstrap_human_review_blocker", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        worker, "_read_bootstrap_human_review_blocker_pinned", lambda *_a, **_k: {}
+    )
     monkeypatch.setattr(worker, "_bootstrap_delegated_children", lambda *_a, **_k: [])
     monkeypatch.setattr(worker, "_product_publish_blocker_after", lambda *_a, **_k: ("", ""))
+    _install_bootstrap_phase_store_stub(monkeypatch)
 
     result = worker.ceo_bootstrap_handler(
         SimpleNamespace(id="job-1", business_slug="acme", payload={})
     )
 
     assert result.result["business_slug"] == "acme"
-    assert seen["store_operator_user_id"] == "user-123"
+    assert seen["store_operator_user_id"] == operator_user_id
 
 
 def test_bootstrap_completed_and_published_job_completes_not_requeued(monkeypatch):
@@ -2403,9 +2570,9 @@ def test_bootstrap_incomplete_workflow_continues_in_same_job_and_preserves_ident
 
     assert isinstance(result, jobs.JobRunResult)
     assert len(prompts) == 2
-    assert "SAME in-progress bootstrap" in prompts[1]
-    assert "Preserve the canonical business/product name" in prompts[1]
-    assert "do not restart, rebrand, or redo completed work" in prompts[1]
+    assert "Continue the same fresh-business launch for business:acme" in prompts[1]
+    assert "Canonical business name: Acme" in prompts[1]
+    assert "Do not redo earlier phases" in prompts[1]
 
 
 def test_bootstrap_landing_only_natural_stop_continues_until_final_product_pass(monkeypatch):
@@ -2439,7 +2606,7 @@ def test_bootstrap_landing_only_natural_stop_continues_until_final_product_pass(
 
     assert isinstance(result, jobs.JobRunResult)
     assert len(prompts) == 2
-    assert "remaining product phase" in prompts[1]
+    assert "Current code-owned phase: final_workflow_build_publish" in prompts[1]
 
 
 def test_bootstrap_published_workflow_without_x_completes_in_first_turn(monkeypatch):
@@ -2552,7 +2719,9 @@ def test_bootstrap_passes_bounded_runtime_and_final_product_probe(monkeypatch):
     )
 
     assert isinstance(result, jobs.JobRunResult)
-    assert captured_turn["wall_clock_limit"] == worker._DEFAULT_BOOTSTRAP_WALL_TIMEOUT
+    assert captured_turn["wall_clock_limit"] == pytest.approx(
+        worker._DEFAULT_BOOTSTRAP_WALL_TIMEOUT, abs=0.1
+    )
     assert captured_turn["completion_grace_seconds"] == worker._DEFAULT_BOOTSTRAP_POST_PUBLISH_GRACE
     assert captured_turn["completion_probe"]() is True
     assert captured_turn["external_activity_probe"]() is True
@@ -2691,7 +2860,7 @@ def test_bootstrap_capped_before_publish_still_requeues(monkeypatch):
 
     with pytest.raises(RuntimeError) as exc:
         worker.ceo_bootstrap_handler(job)
-    assert "iteration budget" in str(exc.value)
+    assert "did not produce its authoritative done predicate" in str(exc.value)
 
 
 def test_bootstrap_failure_cancels_and_drains_delegated_child_before_outer_requeue(monkeypatch):

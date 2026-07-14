@@ -28,10 +28,16 @@ from .core import (
 _CEO_PROMPT_PATH = Path(__file__).parent / "prompts" / "ceo.md"
 
 
-_DEFAULT_BOOTSTRAP_MAX_TURNS = 30
+_DEFAULT_BOOTSTRAP_MAX_TURNS = 90
 
 
-_WORKFLOW_BOOTSTRAP_MAX_TURNS = 60
+_WORKFLOW_BOOTSTRAP_MAX_TURNS = 140
+
+
+_DEFAULT_BOOTSTRAP_MAX_BUDGET_USD = 30.0
+
+
+_WORKFLOW_BOOTSTRAP_MAX_BUDGET_USD = 50.0
 
 
 _BOOTSTRAP_PRODUCT_BASE_DOMAIN = "coscale.app"
@@ -102,7 +108,10 @@ def _bootstrap_goal_requests_product_workflow(goal: str) -> bool:
 
 # Extra bootstrap turns a mobile_app business needs on top of the web cap: the iOS app-source
 # build pass + the store-signed publish + one triage round of the repair loop.
-_MOBILE_BOOTSTRAP_EXTRA_TURNS = 14
+_MOBILE_BOOTSTRAP_EXTRA_TURNS = 40
+
+
+_MOBILE_BOOTSTRAP_EXTRA_BUDGET_USD = 25.0
 
 
 def _bootstrap_turn_cap_for_goal(goal: str, archetype: str = "") -> int:
@@ -114,6 +123,17 @@ def _bootstrap_turn_cap_for_goal(goal: str, archetype: str = "") -> int:
     if str(archetype or "").strip().lower() == "mobile_app":
         cap += _MOBILE_BOOTSTRAP_EXTRA_TURNS
     return cap
+
+
+def _bootstrap_budget_for_goal(goal: str, archetype: str = "") -> float:
+    budget = (
+        _WORKFLOW_BOOTSTRAP_MAX_BUDGET_USD
+        if _bootstrap_goal_requests_product_workflow(goal)
+        else _DEFAULT_BOOTSTRAP_MAX_BUDGET_USD
+    )
+    if str(archetype or "").strip().lower() == "mobile_app":
+        budget += _MOBILE_BOOTSTRAP_EXTRA_BUDGET_USD
+    return budget
 
 
 def _bootstrap_public_site_url(slug: str) -> str:
@@ -221,28 +241,29 @@ def _business_bootstrap_instruction(
         "Fresh create. Business state is empty.",
         "- Do NOT call business_read_business, business_read_file, or business_list_files before acting.",
         "- Do NOT call todo or update task lists at any point.",
-        "- Do NOT call skills_list.",
+        "- All approved native skills are already available. Invoke only the skills named for the current step; do not install, copy, or enumerate skill folders.",
         (
-            "- Load a skill only at the step that uses it, with one skill_view right before use: "
-            "takyon-brand-logo at 2b"
-            + (", takyon-mobile-app at step 3" if mobile_app else "")
-            + ". Do not preload skills up front; do not load takyon-market-research, takyon-x, or "
-            "takyon-distribution during bootstrap, "
-            "and do not load any other skill."
+            "- Invoke native skills only when their step begins: takyon-product for the product build, "
+            "design-taste-frontend for landing-page craft, takyon-app-runtime for runtime verification, "
+            "and takyon-brand-logo at 2b"
+            + (", plus takyon-mobile-app at step 3" if mobile_app else "")
+            + ". Bootstrap policy forbids takyon-market-research, takyon-x, takyon-distribution, "
+            "takyon-business-metrics, advertising, and UGC skills. Those remain installed but are for "
+            "later interactive or wake work."
         ),
         "- After completing each step, move to the next immediately.",
         "- Treat the canonical business name above as the owner/account name. If it is an internal slug (digits, test suffixes, or machine separators), choose ONE short human product display name in step 1 from the idea, record it in the surface contract, and use it consistently. Never expose or title-case the routing slug as public branding. Do not invent a second competing brand.",
         "- Consumer voice: this bootstrap turn is shown live to the customer on the build screen and product chat. Write every visible sentence as a warm, high-level, business-focused update describing the BUSINESS work (defining the offer, designing the product, and putting it online) — never the runtime plumbing.",
         "- Curated update channel: the customer sees ONLY the curated update you post with business_post_operator_update, never your raw assistant reasoning. Keep ALL planning, deliberation, tool choreography, and chain-of-thought internal. At the very start of this turn, call business_post_operator_update with a warm headline, a 1-2 sentence summary, and a milestones plan covering the steps below — e.g. {title: \"Define the offer\", category: RESEARCH, status: running}, {title: \"Design and build the product\", category: PRODUCT, status: queued}. Re-post the update (flipping each milestone's status) as you complete the brief, the product build, and when anything blocks. The milestones become the customer's Tasks cards; do not narrate low-level tool calls yourself.",
         "- Never surface raw internal platform/tool/runtime strings in the visible reply. Do not quote TAKYON_* flags, docker path diagnostics, workspace-mode errors, or similar internals; summarize blockers in normal operator language instead.",
-        "- Forbidden in any customer-visible sentence: \"bootstrap\", \"site worker\", \"scaffold\"/\"scaffolding\", \"upsert\"/\"upserted\", \"provision\"/\"provisioned\", \"app account\", \"workspace exists\"/\"workspace ready\" (say \"your company space\" instead), \"runtime\", \"surface contract\", \"app shell\", \"kit\", any tool name (business_upsert_*, business_claude_agent_task, etc.), and verbatim tool/web-access limitations like \"publicly cached\".",
+        "- Forbidden in any customer-visible sentence: \"bootstrap\", \"site worker\", \"scaffold\"/\"scaffolding\", \"upsert\"/\"upserted\", \"provision\"/\"provisioned\", \"app account\", \"workspace exists\"/\"workspace ready\" (say \"your company space\" instead), \"runtime\", \"surface contract\", \"app shell\", \"kit\", any internal tool name, and verbatim tool/web-access limitations like \"publicly cached\".",
         "- If a web or tool capability is limited, say it plainly to the customer, e.g. \"I'm working from the sources I can reach right now\", without naming the mechanism.",
         "- These forbidden terms apply only to the VISIBLE reply shown to the customer. The internal directives in this instruction (which deliberately use words like bootstrap, surface contract, scaffold, upsert, and tool names to steer you) are not customer-visible and stay as written.",
         "",
         "## Steps",
         "",
         "### 1. Minimal landing brief (from the idea alone — NO web research yet)",
-        "Goal: get the customer a real, branded landing page live FAST. Derive the landing brief from the BUSINESS IDEA ALONE. The complete pinned Taste implementation skill owns the first public landing in one continuous worker call — do NOT do any web research before the first landing publishes.",
+        "Goal: get the customer a real, branded landing page live FAST. Derive the landing brief from the BUSINESS IDEA ALONE. Invoke the approved Taste skill and apply it directly in this primary agent session — do NOT do any web research before the first landing publishes.",
         "Do NOT load takyon-market-research in this step, and do NOT call web_search, web_extract, web_tools, business_web_search, Tavily, or any other live-evidence/market-research tool during bootstrap. Research and distribution run later through the existing scheduled CEO wake rail.",
         "From the idea (and the canonical business name and goal above), reason out and pin down: ONE short human product display name (never the routing slug), a one-line tagline, the core value proposition, who the customer is (ICP / audience), the core problem the product solves, the offer, the brand tone, and one positioning angle. This is straightforward derivation from the idea, not research — no sources are required for a truthful, branded landing.",
         "If the goal names subscription cancellation timing or refund policy, treat those as AppKit/backend constraints only. Do not turn them into strategy, landing, pricing, or profile copy; the canonical account control may describe them only from the typed backend policy or the exact cancellation action result.",
@@ -256,19 +277,19 @@ def _business_bootstrap_instruction(
         "- source_path: product/site",
         "- runtime_features: auth, account, profile, checkout",
         "- routes: / (landing page), /app (sign-in + subscription gate), and /app/profile (account page)",
-        "- If `Explicit product workflow requested: yes`, do NOT try to declare `generate` directly here. The product worker must implement the workflow as real `product/site/actions/<name>.ts` files and UI calls; the refresh pass derives the actions/generate rails from the source.",
+        "- If `Explicit product workflow requested: yes`, do NOT try to declare `generate` directly here. Implement the workflow as real `product/site/actions/<name>.ts` files and UI calls; the refresh pass derives the actions/generate rails from the source.",
         "",
         "This seeds the COMPLETE app kit up front (landing, the /app access shell, the /app/profile account page, support, and the shared auth/checkout/account rails). The two build passes below only change WHEN each screen is customized and published; they never change the final fileset. The end state must be the same complete app kit as a single-pass build.",
         "",
-        "If the app shell is monthly paid, call business_upsert_app_plan for the canonical `monthly` plan before the site worker runs so the existing checkout rail has a real plan object to use.",
+        "If the app shell is monthly paid, call business_upsert_app_plan for the canonical `monthly` plan before editing the product source so the existing checkout rail has a real plan object to use.",
         "- Use an explicitly requested monthly price when one is already known.",
         "- Set `included_ai_budget_microusd` together with `price_cents`.",
         "- If pricing is not settled yet, keep the canonical starter monthly plan instead of leaving checkout planless.",
         "",
         "#### 2a. Build and publish the landing page (the customer's first paint)",
-        "This pass is the customer's FIRST paint — nothing is live before it publishes, so start it immediately after the surface contract (and plan, if paid) are pinned. Build the full, polished, custom landing so the site looks bespoke, not templated. Call business_claude_agent_task with:",
-        "- workspace: product/site",
-        "- instruction: Use the pinned Vite scaffold as the runtime base and preserve shared wiring through `src/lib/takyon.ts` and `src/lib/hooks.ts`. Invoke the native `design-taste-frontend` skill and let it own design decisions in this same worker session. Safebox-gated image generation is available when original imagery improves the product; images, DESIGN.md, screenshots, and visual audits are optional and never publication conditions.",
+        "This pass is the customer's FIRST paint — nothing is live before it publishes, so start it immediately after the surface contract (and plan, if paid) are pinned. Build the full, polished, custom landing so the site looks bespoke, not templated.",
+        "- Invoke native `takyon-product`, then `design-taste-frontend`, and apply them directly in this session.",
+        "- Inspect the seeded `product/site` source through the scoped business file capabilities. Use the pinned Vite scaffold as the base and preserve shared wiring through `src/lib/takyon.ts` and `src/lib/hooks.ts`. Safebox-gated site-image generation is available when original imagery improves the product; images, DESIGN.md, screenshots, and visual audits are optional and never publication conditions.",
         "- Scope this pass to the landing route `/` plus its brand direction: customize `src/screens/landing.tsx` and let the native skill decide how `src/tokens.css` should support the design. Do NOT edit `src/screens/app-layout.tsx`, `src/screens/app-home.tsx`, or `src/screens/profile.tsx` in this pass — those are customized in 2b.",
         "- Preserve and render the canonical `PublicSiteHeader` from `src/components/site-navigation.tsx`; do not replace it with a page-specific nav. The signed-out banner must stay visibly separated from the page and show distinct Log in and Sign up actions, never Subscribe/Open app or a price-first CTA. Signed-in visitors are redirected to `/app` by the shared landing behavior.",
         "- Never author subscription cancellation timing, renewal/end dates, grace-period, or refund/no-refund copy in the landing or pricing content, even when the business goal names that policy. Keep it as a backend constraint and preserve the canonical AppKit account control, which derives customer-visible truth from backend policy/action results.",
@@ -281,16 +302,12 @@ def _business_bootstrap_instruction(
             if animations
             else []
         ),
-        "- refresh_surface: true",
-        "- max_turns: 60",
-        "- effort: medium",
-        "- timeout_ms: 900000 — one total deadline. On the first API retry or any unchanged deterministic failure, stop and return the exact blocker; do not start another worker. Reattaching with the same idempotency_key only observes this durable call.",
-        "- Do not pass a model. The coding-worker model is deployment-pinned for the entire run, and the runtime refuses per-call model changes.",
+        "- Make the required source edits with scoped business patch/write capabilities, then call business_refresh_product_surface once with a fresh idempotency key to build, validate, publish, and serve this landing.",
+        "- The primary model, turn ceiling, spend ceiling, and wall deadline are deployment policy. Do not try to change them or start another model task. On an API error or unchanged deterministic failure, stop and return the exact blocker.",
         "",
-        "This 2a pass with `refresh_surface: true` PUBLISHES AND SERVES the landing immediately on its own: the worker's `surface_refresh.publish.status` should come back `published` and the live site at the customer host serves the new landing right away, with the still-seeded real `/app` access shell shipping behind sign-in until 2b refines it. The landing does NOT wait for 2b to be served — confirm `surface_refresh.publish.status == \"published\"` and a real `public_url` in this pass's structured result before continuing.",
+        "This 2a refresh PUBLISHES AND SERVES the landing immediately: `surface_refresh.publish.status` must be `published` and the structured result must contain a real `public_url`. The live host serves the landing while the still-seeded real `/app` access shell remains behind sign-in until 2b refines it.",
         "",
-        "Inspect the structured result from this first business_claude_agent_task. Trust only its exact success/blocker and surface_refresh publish status. If the landing build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there; do not continue to Search Console, the logo, or the rest of the app kit.",
-        "A `detached: true` result (status `queued` or `running`) is not a failure. Reattach with the same workspace, instruction, and idempotency_key only to observe the same run. Any explicit API retry, error, or unchanged deterministic failure is terminal for this bootstrap attempt.",
+        "Inspect the structured refresh result. Trust only its exact success/blocker and publish status. If the landing build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there; do not continue to Search Console, the logo, or the rest of the app kit. A queued/running deterministic build is observed through its existing receipt; never start a second overlapping build.",
         "",
         "#### 2a.1. Register Search Console (immediately after the landing publishes)",
         "As soon as 2a reports `surface_refresh.publish.status == \"published\"` for the landing, register the live site with Google Search Console — do this BEFORE 2b so the single fast idempotent call is front-loaded onto the already-live landing instead of being pushed past the budget by the heavier 2b pass.",
@@ -300,14 +317,14 @@ def _business_bootstrap_instruction(
         "#### 2b. Add the real logo, then finish the /app access shell + profile",
         "Once the landing page has published in 2a:",
         "",
-        "First — BEFORE any other creative-credit spend (ads, UGC) — generate the real brand logo. This step is REQUIRED: do NOT spend a creative credit on anything else until the logo is generated. The fresh business's starter creative credits are reserved for the logo first. Load takyon-brand-logo (skill_view) and follow its procedure: assemble `business_context` ({name, category, tone}) from the research you wrote in research/strategy.md (do not invent brand voice), then call business_generate_logo with the business, a fresh idempotency_key, that business_context, and `republish: false`. The tool publishes /brand-logo.png plus a real PNG favicon into the workspace and live asset path; `republish: false` skips the tool's own chained site rebuild because the 2b app-shell build below publishes the whole site minutes later and carries the favicon/header forward — one publish instead of two. business_generate_logo is live-only and creative-credit gated: ONLY if it returns an explicit insufficient-credits or unconfigured-provider blocker do you record that exact blocker in research/strategy.md, leave the seeded monogram placeholder, and continue with the rest of 2b — in every other case you MUST generate the logo here before proceeding. Do not fabricate a logo and do not stop the whole build for it.",
+        "First — BEFORE any other creative-credit spend (ads, UGC) — generate the real brand logo. This step is REQUIRED: do NOT spend a creative credit on anything else until the logo is generated. The fresh business's starter creative credits are reserved for the logo first. Invoke native takyon-brand-logo and follow its procedure: assemble `business_context` ({name, category, tone}) from research/strategy.md (do not invent brand voice), then call business_generate_logo with the business, a fresh idempotency_key, that business_context, and `republish: false`. The tool publishes /brand-logo.png plus a real PNG favicon into the workspace and live asset path; `republish: false` skips its own chained site rebuild because the final product refresh below carries the favicon/header forward. ONLY if it returns an explicit insufficient-credits or unconfigured-provider blocker do you record that exact blocker in research/strategy.md, leave the seeded monogram placeholder, and continue — otherwise generate the logo before proceeding. Do not fabricate a logo and do not stop the whole build for an allowed logo blocker.",
         "",
-        "Then finish the access shell and account page in a SECOND business_claude_agent_task with:",
-        "- Immediately BEFORE this second task, call business_upsert_app_surface_contract again with the same display_name, source_path, runtime_features, and routes, plus bootstrap_final_product_pass: true. The runtime snapshots the current landing build; bootstrap cannot complete until this second task publishes a different final build. Do not set this flag during 2a.",
+        "Then finish the access shell and account page as a second bounded implementation phase in this SAME primary session:",
+        "- Immediately BEFORE editing, call business_upsert_app_surface_contract again with the same display_name, source_path, runtime_features, and routes, plus bootstrap_final_product_pass: true. The runtime snapshots the current landing build; bootstrap cannot complete until this phase publishes a different final build. Do not set this flag during 2a.",
         "- If `Explicit product workflow requested: yes`, include workflow_completion_required: true in that same upsert so the requested scope is explicit. Implement the real action/records/generate wiring; a build-clean timed-out partial may publish marked incomplete and must not be retried automatically.",
-        "- workspace: product/site",
-        "- instruction: Use the pinned Vite scaffold, invoke the native `design-taste-frontend` skill, and inspect the existing product before editing. Honor the skill's own scope boundary: preserve useful landing-page direction, but do not apply marketing-page layout rules to the multi-step `/app` product UI. The available image tool is optional. Keep shared runtime wiring through `src/lib/takyon.ts` and `src/lib/hooks.ts`.",
-        "- instruction addendum: for `/app` and `/app/profile`, keep subscription/account truth on the shared AppKit hooks in `src/lib/hooks.ts`. Treat the account rail as `user` plus `entitlements[]`, and do not hand-roll gates from legacy fields like `has_active_subscription`, nested `subscription.status`, or ad hoc `client.account()` parsing.",
+        "- Invoke native takyon-product and takyon-app-runtime for this phase. The Taste skill remains available, but honor its scope boundary: preserve useful landing-page direction without applying marketing-page layouts to the multi-step `/app` product UI.",
+        "- Re-inspect the existing `product/site` files before editing. Keep shared runtime wiring through `src/lib/takyon.ts` and `src/lib/hooks.ts`.",
+        "- For `/app` and `/app/profile`, keep subscription/account truth on the shared AppKit hooks in `src/lib/hooks.ts`. Treat the account rail as `user` plus `entitlements[]`, and do not hand-roll gates from legacy fields like `has_active_subscription`, nested `subscription.status`, or ad hoc `client.account()` parsing.",
         "- Scope this pass to the access shell and account page on the EXISTING seeded auth + checkout rails:",
         "  - Keep the canonical `src/screens/app-layout.tsx` unchanged: it already owns loading stability, auth, checkout, full-width layout, and direct entitled access. Build the real product directly in `src/screens/app-home.tsx`; never add another welcome/enter/Open app screen.",
         "  - Make `/app/profile` the truthful account/subscription page in `src/screens/profile.tsx` on the existing account + profile rails.",
@@ -316,7 +333,7 @@ def _business_bootstrap_instruction(
         "- Do not spend bootstrap time editing `src/screens/support.tsx` unless explicitly asked.",
         "- Keep the shared Vite route skeleton intact unless a small route-level correction is required for correctness.",
         "- If `Explicit product workflow requested: no`, stop once `/`, `/app`, and `/app/profile` are truthful and publishable.",
-        "- If `Explicit product workflow requested: yes`, do NOT stop at the access shell. In this SAME second business_claude_agent_task, extend `/app` into the requested real signed-in subscribed customer workflow while keeping the landing, checkout, and profile/account rails intact.",
+        "- If `Explicit product workflow requested: yes`, do NOT stop at the access shell. In this SAME phase, extend `/app` into the requested real signed-in subscribed customer workflow while keeping the landing, checkout, and profile/account rails intact.",
         "- For that workflow-required path, implement the backend behavior as one or more real `product/site/actions/<name>.ts` files that default-export async `(payload, ctx) => result` and call `ctx.generate(...)` for AI output.",
         "- For that workflow-required path, call the action from `/app` through the shared `useDecodedActionRunner(name, taggedDecoder)` hook. Do not call legacy `useActionRunner`, `invokeAction`, or `createActionRunner` directly, use provider SDKs, provider env vars, direct provider URLs, mock outputs, fixtures, static canned AI responses, browser-only fake generation, localStorage as authority, or unsupported server routes.",
         "- Define one explicit normalized JSON result schema for every action consumed by `/app`. Use that same field shape and types in the generation prompt, action-boundary validator/normalizer and return value, TypeScript decoder, renderer, `saveRecord({ data })` payload, and the `record.data` decoder/renderer used after list/read reopen. Do not maintain separate producer, UI, or persisted shapes; do not coerce arrays to strings or strings to arrays. Either pass `value => decodeActionResult(value, valueDecoder)`, where valueDecoder returns the normalized value or null/throws, or pass a named `DecodedActionResult<T>` decoder that explicitly validates and returns both `ok: false` and `ok: true` outcomes. Raw casts and unconditional `ok: true` returns are invalid. AppKit always renders a global `invalid_result` alert; also render the runner error contextually.",
@@ -326,9 +343,9 @@ def _business_bootstrap_instruction(
         "",
         "This must NOT look like a generic starter kit, membership template, or placeholder SaaS shell.",
         'Do not leave generic copy such as "membership pricing", "what is included", "simple pricing", "offer", or similar starter text anywhere customer-visible.',
-        "Keep Hermes/Takyon runtime rails for auth, account, profile, and checkout intact.",
+        "Keep the canonical Takyon backend rails for auth, account, profile, and checkout intact.",
         "But replace generic starter copy, generic starter sections, and generic starter-shell presentation with product-specific content and UI on the first pass.",
-        "Keep /app present and wired through the existing Hermes app kit runtime rails for sign-in, subscription, account, and profile access.",
+        "Keep /app present and wired through the existing Takyon app rails for sign-in, subscription, account, and profile access.",
         "If `Explicit product workflow requested: no`, do NOT build a bespoke product application, custom backend workflow, domain-specific dashboard, fake coach/product tabs, sample domain data, charts, or invented in-app flows in this pass.",
         "If `Explicit product workflow requested: yes`, the requested signed-in workflow is REQUIRED in this pass, but do not expand past that one real workflow into extra tabs, speculative dashboards, unsupported backend capabilities, or fake data.",
         "",
@@ -353,16 +370,14 @@ def _business_bootstrap_instruction(
         "- Prefer upgrading the existing auth/account/profile shell over creating a new app architecture.",
         "",
         "Constraints:",
-        "- Keep auth, account, profile, and checkout wired to Hermes/Takyon rails.",
+        "- Keep auth, account, profile, and checkout wired to canonical Takyon rails.",
         "- Do not expose runtime-internal wording to customers.",
         "- Do not invent unsupported backend capabilities.",
         "- The result should be publishable and product-specific on the first pass.",
-        "- Always pass `refresh_surface: true`.",
-        "- If `Explicit product workflow requested: no`, also pass `max_turns: 30`, `effort: low`, and `timeout_ms: 600000` — this pass restyles the two seeded access/account screens on EXISTING rails (no new architecture, no new routes), so the tight budget is sufficient and materially faster. Any internal recovery remains inside this call's one absolute deadline and must not create an overlapping worker.",
-        "- Do NOT pass `wait_ms` — run this build to completion here. A fired/deferred build pays a full workspace re-materialize + cold sandbox start + a separate publish pass.",
-        "- If `Explicit product workflow requested: yes`, this SAME second pass owns the real workflow build, so also pass `effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`. These are the established product-workflow limits and are intentionally separate from the Taste landing's medium/60/900 bounds. For `model`: PASS NOTHING — the deployment-pinned coding-worker model must remain unchanged for the whole run.",
+        "- After source edits, call business_refresh_product_surface with a fresh idempotency key and run it to its structured terminal build/publish result. Do not start an overlapping refresh.",
+        "- The deployment-owned model, effort, turn budget, spend ceiling, and timeout apply to this entire primary session and cannot be overridden here.",
         "",
-        "Inspect the structured result from business_claude_agent_task, trusting only its exact success/blocker and surface_refresh publish status. If the product build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there. Do not paraphrase a different platform diagnosis. A `detached: true` result is NOT a blocker — re-call with the SAME arguments and idempotency_key only to observe and collect this same durable call; it must not create another attempt.",
+        "Inspect the structured refresh result, trusting only its exact success/blocker and publish status. If the product build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there. Do not paraphrase a different platform diagnosis. A queued/running build is observed through its existing receipt and idempotency key; it must not create another attempt.",
         "",
         "#### 2c. Workflow verification gate, when explicitly requested",
         "If `Explicit product workflow requested: no`, skip this step.",
@@ -377,9 +392,9 @@ def _business_bootstrap_instruction(
             [
                 "",
                 "### 3. iOS app build + first store-signed build (this business is archetype mobile_app)",
-                "This business's deliverable includes a REAL iOS app, not only the web surface. Load takyon-mobile-app (skill_view) right before this step and follow its Procedure.",
-                "Build the app source first: call business_claude_agent_task with workspace product/app. The platform seeds the pinned Expo scaffold into that workspace automatically and injects the mobile worker contract + build gates by code — instruct the worker to turn the seeded scaffold into this business's real app (screens, flows, copy, theme) from research/strategy.md and the offer, and to finish only on its injected green gates (npm ci + tsc + expo config).",
-                "Then cut the first store-signed build: call business_publish_mobile_release with lane preview and a FRESH idempotency_key. The result's build_id + logs_url are the receipt; record them in metrics/ and reflect the milestone in the curated operator update.",
+                "This business's deliverable includes a REAL iOS app, not only the web surface. Invoke native takyon-mobile-app right before this step and follow its Procedure.",
+                "Build the app source directly in this primary session: inspect the seeded `product/app` workspace through scoped business file capabilities and turn the pinned Expo base into this business's real app (screens, flows, copy, theme) from research/strategy.md and the offer. Finish only when the deterministic npm install, typecheck, and Expo configuration gates are green.",
+                "Then cut the first store-signed build: call business_publish_mobile_release with lane preview and a FRESH idempotency_key. The result's build_id + logs_url and the tool's durable receipt are the evidence; reflect the milestone in the curated operator update without creating a separate metrics file during bootstrap.",
                 "If the publish result is a blocker (compliance gate, credits, eas_builder_unconfigured), record the exact gate token in research/strategy.md and stop this step honestly. If the build triggers but later reports errored (check with business_read_store_status passing the build_id), run the takyon-mobile-app skill's Build-Failure Triage loop — maximum 3 total build attempts, each with a fresh idempotency_key.",
                 "Customer-visible milestone: include an 'iOS app build' milestone (category PRODUCT) in the business_post_operator_update plan; describe it as building and packaging their mobile app — never name EAS, TestFlight internals, or tool names in customer-visible sentences.",
             ]
@@ -389,7 +404,7 @@ def _business_bootstrap_instruction(
         "",
         "## Constraints",
         "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
-        "If a product feature is not wired to Hermes/Takyon rails, keep the customer surface normal and unavailable.",
+        "If a product feature is not wired to canonical Takyon backend rails, keep the customer surface normal and unavailable.",
         "Do not invent product workflow, extra tabs, or speculative routes unless the operator explicitly asked. If the operator explicitly asked for one, build and verify it in step 2c before completion.",
         "Missing credentials, budget authority, or provider gates are blockers; hard-fail instead of creating fake receipts.",
         "If any business_* tool says the business does not exist, stop immediately and report a platform provisioning failure.",
@@ -432,11 +447,23 @@ def _ceo_bootstrap_turn_config(
             animations=animations,
             archetype=archetype,
         ),
+        **_ceo_bootstrap_phase_runtime_config(goal, archetype=archetype),
+    }
+
+
+def _ceo_bootstrap_phase_runtime_config(
+    goal: str,
+    *,
+    archetype: str = "",
+) -> dict[str, Any]:
+    """Deployment/runtime policy shared by code-owned bootstrap phase queries."""
+
+    return {
         "ephemeral_system_prompt": _ceo_prompt_for_bootstrap(),
         # Same CEO toolset as the interactive/cron turns: ``takyon-authority`` carries the spendful
         # business methods this first-business turn legitimately drives (e.g. app-plan/access-shell
         # provisioning). They stay quarantined in their own toolset (never folded into ``takyon``) so
-        # they cannot leak into generic Hermes/sub-agent/product-runtime contexts; the tools are
+        # they cannot leak into generic or product-runtime contexts; the tools are
         # fail-closed money gates and worker-only operations self-guard against session-bound calls.
         "enabled_toolsets": ["takyon", "takyon-authority", "skills"],
         "disabled_toolsets": [
@@ -454,6 +481,9 @@ def _ceo_bootstrap_turn_config(
         "skip_memory": True,
         "skip_context_files": True,
         "max_turns": _bootstrap_turn_cap_for_goal(goal, archetype=archetype),
+        "max_budget_usd": _bootstrap_budget_for_goal(goal, archetype=archetype),
+        "effort": "high",
+        "agent_mode": "bootstrap",
     }
 
 

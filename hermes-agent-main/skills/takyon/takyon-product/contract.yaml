@@ -1,0 +1,3 @@
+schema_version: 1
+requires: [business.state.read, business.files.read, product.source.edit, product.surface.configure, product.surface.publish, product.runtime.verify, creative.site-image.generate]
+produces: [product.surface]

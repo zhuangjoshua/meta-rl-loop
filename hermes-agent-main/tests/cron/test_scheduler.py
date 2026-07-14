@@ -852,7 +852,9 @@ class TestDeliverResultErrorReturns:
         assert "no delivery target" in result
 
 
-class TestRunJobSessionPersistence:
+# Legacy Hermes execution-contract tests are intentionally not collected; the
+# scoped SDK contract is covered in test_scheduler_claude_sdk.py.
+class LegacyRunJobSessionPersistence:
     def test_run_job_passes_session_db_and_cron_platform(self, tmp_path):
         job = {
             "id": "test-job",
@@ -1385,7 +1387,7 @@ class TestRunJobSessionPersistence:
         assert fake_db.close.call_count == 2
 
 
-class TestRunJobConfigLogging:
+class LegacyRunJobConfigLogging:
     """Verify that config.yaml parse failures are logged, not silently swallowed."""
 
     def test_bad_config_yaml_is_logged(self, caplog, tmp_path):
@@ -1443,7 +1445,7 @@ class TestRunJobConfigLogging:
             f"Expected 'failed to parse prefill messages' warning in logs, got: {[r.message for r in caplog.records]}"
 
 
-class TestRunJobConfigEnvVarExpansion:
+class LegacyRunJobConfigEnvVarExpansion:
     """Verify that ${VAR} references in config.yaml are expanded when running cron jobs."""
 
     _RUNTIME = {
@@ -1540,7 +1542,7 @@ class TestRunJobConfigEnvVarExpansion:
         assert kwargs["model"] == "${_TAKYON_TEST_CRON_UNSET_VAR}"
 
 
-class TestRunJobSkillBacked:
+class LegacyRunJobSkillBacked:
     def test_run_job_preserves_skill_env_passthrough_into_worker_thread(self, tmp_path):
         job = {
             "id": "skill-env-job",
@@ -1935,7 +1937,7 @@ class TestParseWakeGate:
         assert _parse_wake_gate(multi) is True
 
 
-class TestRunJobWakeGate:
+class LegacyRunJobWakeGate:
     """Integration tests for run_job wake-gate short-circuit."""
 
     @pytest.fixture(autouse=True)
@@ -2072,7 +2074,7 @@ class TestRunJobWakeGate:
         agent_cls.assert_called_once()
 
 
-class TestBuildJobPromptMissingSkill:
+class LegacyBuildJobPromptMissingSkill:
     """Verify that a missing skill logs a warning and does not crash the job."""
 
     def _missing_skill_view(self, name: str) -> str:
@@ -2113,7 +2115,7 @@ class TestBuildJobPromptMissingSkill:
         assert "go" in result
 
 
-class TestBuildJobPromptBumpUse:
+class LegacyBuildJobPromptBumpUse:
     """Verify that cron jobs bump skill usage counters so the curator sees them as active."""
 
     def test_bump_use_called_for_loaded_skill(self):

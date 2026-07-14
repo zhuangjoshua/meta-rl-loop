@@ -97,10 +97,15 @@ remote_docker_broker_backup="$TAKYON_REMOTE_RELEASE_META/backups/takyon-docker-b
 remote_operator_cli_backup="$TAKYON_REMOTE_RELEASE_META/backups/takyon-op"
 remote_release_files_marker="$TAKYON_REMOTE_RELEASE_META/release-files-installed"
 remote_operator_cli_existed_marker="$TAKYON_REMOTE_RELEASE_META/operator-cli-existed"
-remote_skills_preflight_home="$TAKYON_REMOTE_RELEASE_META/skills-preflight-home"
 remote_skills_backup="$TAKYON_REMOTE_RELEASE_META/backups/home-skills"
 remote_skills_existed_marker="$TAKYON_REMOTE_RELEASE_META/home-skills-existed"
 remote_skills_activation_marker="$TAKYON_REMOTE_RELEASE_META/home-skills-installed"
+remote_sdk_root="$TAKYON_REMOTE_HOME/runtime/claude-agent-sdk"
+remote_sdk_release="$TAKYON_REMOTE_HOME/runtime/claude-agent-sdk/releases/$TAKYON_DEPLOY_SOURCE_REVISION"
+remote_sdk_current="$TAKYON_REMOTE_HOME/runtime/claude-agent-sdk/current"
+remote_sdk_current_backup="$TAKYON_REMOTE_RELEASE_META/backups/claude-sdk-current-target"
+remote_sdk_current_existed_marker="$TAKYON_REMOTE_RELEASE_META/claude-sdk-current-existed"
+remote_sdk_activation_marker="$TAKYON_REMOTE_RELEASE_META/claude-sdk-current-activated"
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
   echo "runtime directory not found: $RUNTIME_DIR" >&2
@@ -239,6 +244,15 @@ restore_operator_services_on_failure() {
       if [[ "$operator_rollback_ready" == "1" ]] \
         && ! ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
         "set -euo pipefail
+        if [[ -f '$remote_sdk_activation_marker' ]]; then
+          rm -f '$remote_sdk_current'
+          if [[ -f '$remote_sdk_current_existed_marker' ]]; then
+            previous_target=\"\$(cat '$remote_sdk_current_backup')\"
+            test -n \"\$previous_target\"
+            ln -s \"\$previous_target\" '$remote_sdk_current.rollback'
+            mv -Tf '$remote_sdk_current.rollback' '$remote_sdk_current'
+          fi
+        fi
         if [[ -f '$remote_skills_activation_marker' ]]; then
           rm -rf '$TAKYON_REMOTE_HOME/skills'
           if [[ -f '$remote_skills_existed_marker' ]]; then
@@ -640,7 +654,8 @@ preflight_remote_staged_runtime() {
       TAKYON_WORKER_UNIT_CANDIDATE='$remote_worker_candidate' \
       TAKYON_DOCKER_BROKER_UNIT_CANDIDATE='$remote_docker_broker_candidate' \
       TAKYON_OPERATOR_CLI_CANDIDATE='$remote_operator_cli_candidate' \
-      TAKYON_SKILLS_PREFLIGHT_HOME='$remote_skills_preflight_home' \
+      TAKYON_CLAUDE_RELEASE_ROOT='$remote_sdk_root' \
+      TAKYON_DEPLOY_SOURCE_REVISION='$TAKYON_DEPLOY_SOURCE_REVISION' \
       TAKYON_REMOTE_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
       TAKYON_DENO_VERSION='$TAKYON_DENO_VERSION' \
       TAKYON_CLAUDE_AGENT_DOCKER_IMAGE='$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE' \
@@ -649,13 +664,20 @@ preflight_remote_staged_runtime() {
 
 OPERATOR_SERVICE_ENV_PINS=(
   TAKYON_STRICT_MODEL_ROLES=1
-  TAKYON_MODEL=gpt-5.5
+  TAKYON_MODEL=deepseek-v4-pro
   TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro
   ANTHROPIC_MODEL=deepseek-v4-pro
   ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro
   ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro
   ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro
   CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro
+  TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD=5
+  TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD=2
+  TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD=2000000
+  TAKYON_CLAUDE_SKILLS_PLUGIN=/opt/takyon/.takyon/runtime/claude-agent-sdk/current/plugin
+  TAKYON_CLAUDE_SKILLS_MANIFEST=/opt/takyon/.takyon/runtime/claude-agent-sdk/current/plugin/approved-skills.json
+  TAKYON_CLAUDE_NODE_RUNTIME=/opt/takyon/.takyon/runtime/claude-agent-sdk/current/node-runtime
+  TAKYON_DISABLE_LEGACY_SKILL_SYNC=1
 )
 
 wait_for_remote_service_env() {
@@ -832,6 +854,17 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
     cp -p /usr/local/bin/takyon-op '$remote_operator_cli_backup'
     touch '$remote_operator_cli_existed_marker'
   fi
+  test -d '$remote_sdk_release/plugin'
+  test -d '$remote_sdk_release/node-runtime'
+  install -d -m 0755 '$remote_sdk_root'
+  if [[ -e '$remote_sdk_current' && ! -L '$remote_sdk_current' ]]; then
+    echo 'refusing to replace non-symlink Claude SDK current path' >&2
+    exit 1
+  fi
+  if [[ -L '$remote_sdk_current' ]]; then
+    readlink '$remote_sdk_current' > '$remote_sdk_current_backup'
+    touch '$remote_sdk_current_existed_marker'
+  fi
   if [[ -L '$TAKYON_REMOTE_HOME/skills' ]]; then
     echo 'refusing to replace symlinked operator skills tree' >&2
     exit 1
@@ -849,16 +882,12 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
 takyon_activate_staged_runtime "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" "$TAKYON_DEPLOY_SOURCE_REVISION"
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
-  env PYTHONPATH='$TAKYON_REMOTE_RUNTIME' TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/opt/takyon \
-    TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1 '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
-from tools.skills_sync import sync_skills
-
-result = sync_skills(quiet=False)
-if not result.get('total_bundled'):
-    raise SystemExit('activated runtime contains no bundled skills')
-if result.get('user_modified'):
-    raise SystemExit(f\"bundled skill sync left user-modified entries behind: {result['user_modified']}\")
-PY"
+  ln -s 'releases/$TAKYON_DEPLOY_SOURCE_REVISION' '$remote_sdk_current.next'
+  mv -Tf '$remote_sdk_current.next' '$remote_sdk_current'
+  touch '$remote_sdk_activation_marker'
+  rm -rf '$TAKYON_REMOTE_HOME/skills'
+  test -r '$remote_sdk_current/plugin/approved-skills.json'
+  test -r '$remote_sdk_current/node-runtime/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs'"
 
 if [[ "$TAKYON_FINALIZE_STRIPE_LIVE" == "1" ]]; then
   TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
@@ -964,9 +993,15 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
 wait_for_remote_service_env \
   takyon-worker.service \
   - \
-  "${OPERATOR_SERVICE_ENV_PINS[@]}"
+  "${OPERATOR_SERVICE_ENV_PINS[@]}" \
+  TAKYON_WORKER_AGENT_RUNTIME=claude-agent-sdk
 
 operator_runtime_activation_started=0
 operator_services_activated=1
 takyon_finalize_runtime_release "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY"
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "set -euo pipefail
+  find '$remote_sdk_root/releases' -mindepth 1 -maxdepth 1 -type d \
+    ! -name '$TAKYON_DEPLOY_SOURCE_REVISION' -exec rm -rf {} +
+  test ! -e '$TAKYON_REMOTE_HOME/skills'"
 worker_release_fence_activated=0

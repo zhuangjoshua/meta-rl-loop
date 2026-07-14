@@ -9,6 +9,7 @@ SERVICE_FILE="$ROOT_DIR/deploy/takyon-subuser/takyon-subuser.service"
 ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
 VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh"
 REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/remove-stripe-authority-env.py"
+VERIFY_SUBUSER_RUNTIME_SURFACE_SCRIPT="$ROOT_DIR/deploy/shared/verify-subuser-runtime-surface.py"
 WEB_BUILD_SCRIPT="$ROOT_DIR/deploy/shared/build-web-locked.sh"
 RUNTIME_RELEASE_SCRIPT="$ROOT_DIR/deploy/shared/runtime-release.sh"
 VERIFY_SUPABASE_AUTH_SCRIPT="$RUNTIME_DIR/scripts/verify-supabase-auth-runtime.py"
@@ -285,6 +286,11 @@ if [[ ! -f "$REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$VERIFY_SUBUSER_RUNTIME_SURFACE_SCRIPT" ]]; then
+  echo "sub-user runtime surface verifier not found: $VERIFY_SUBUSER_RUNTIME_SURFACE_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -f "$WEB_BUILD_SCRIPT" ]]; then
   echo "web build helper not found: $WEB_BUILD_SCRIPT" >&2
   exit 1
@@ -310,10 +316,17 @@ fi
 remote_service_candidate="$TAKYON_REMOTE_RELEASE_META/candidates/takyon-subuser.service"
 remote_service_backup="$TAKYON_REMOTE_RELEASE_META/backups/takyon-subuser.service"
 remote_unit_activation_marker="$TAKYON_REMOTE_RELEASE_META/unit-installed"
-remote_skills_preflight_home="$TAKYON_REMOTE_RELEASE_META/skills-preflight-home"
 remote_skills_backup="$TAKYON_REMOTE_RELEASE_META/backups/home-skills"
 remote_skills_existed_marker="$TAKYON_REMOTE_RELEASE_META/home-skills-existed"
 remote_skills_activation_marker="$TAKYON_REMOTE_RELEASE_META/home-skills-installed"
+
+verify_subuser_runtime_surface() {
+  local runtime_root="$1"
+  local verify_home="${2:-0}"
+  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+    "python3 - '$runtime_root' '$TAKYON_REMOTE_HOME' '$verify_home'" \
+    < "$VERIFY_SUBUSER_RUNTIME_SURFACE_SCRIPT"
+}
 
 rollback_subuser_host() {
   ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
@@ -388,16 +401,21 @@ activate_subuser_host() {
   takyon_activate_staged_runtime "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" "$TAKYON_DEPLOY_SOURCE_REVISION"
   ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
     "set -euo pipefail
-    env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/opt/takyon TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1 \
-      PYTHONPATH='$TAKYON_REMOTE_RUNTIME' '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
-from tools.skills_sync import sync_skills
-
-result = sync_skills(quiet=False)
-if not result.get('total_bundled'):
-    raise SystemExit('activated runtime contains no bundled skills')
-if result.get('user_modified'):
-    raise SystemExit(f\"bundled skill sync left user-modified entries behind: {result['user_modified']}\")
-PY
+    rm -rf '$TAKYON_REMOTE_HOME/skills' '$TAKYON_REMOTE_HOME/claude-agent-sdk' '$TAKYON_REMOTE_HOME/runtime/claude-agent-sdk'
+    rm -rf '$TAKYON_REMOTE_RUNTIME/node_modules/@anthropic-ai'/claude-agent-sdk*
+    rm -f '$TAKYON_REMOTE_RUNTIME/node_modules/.bin'/claude*
+    rm -f '$TAKYON_REMOTE_RUNTIME/plugins/takyon'/claude_sdk_runtime*.pyc
+    rm -f '$TAKYON_REMOTE_RUNTIME/plugins/takyon'/claude_sdk_sessions*.pyc
+    rm -f '$TAKYON_REMOTE_RUNTIME/plugins/takyon'/bootstrap_phases*.pyc
+    rm -f '$TAKYON_REMOTE_RUNTIME/plugins/takyon/__pycache__'/claude_sdk_runtime*.pyc
+    rm -f '$TAKYON_REMOTE_RUNTIME/plugins/takyon/__pycache__'/claude_sdk_sessions*.pyc
+    rm -f '$TAKYON_REMOTE_RUNTIME/plugins/takyon/__pycache__'/bootstrap_phases*.pyc
+    rm -f '$TAKYON_REMOTE_RUNTIME/scripts'/build_approved_skills_manifest*.pyc
+    rm -f '$TAKYON_REMOTE_RUNTIME/scripts/__pycache__'/build_approved_skills_manifest*.pyc
+    "
+  verify_subuser_runtime_surface "$TAKYON_REMOTE_RUNTIME" 1
+  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+    "set -euo pipefail
     systemctl daemon-reload
     systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'
     systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME'
@@ -424,6 +442,7 @@ case "$TAKYON_SUBUSER_DEPLOY_PHASE" in
     exit 0
     ;;
   verify)
+    verify_subuser_runtime_surface "$TAKYON_REMOTE_RUNTIME" 1
     ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
       "set -euo pipefail
       systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME'
@@ -477,7 +496,9 @@ cleanup_incomplete_subuser_stage() {
 trap cleanup_incomplete_subuser_stage EXIT
 
 takyon_stage_runtime_release \
-  "$DEPLOY_RUNTIME_DIR" "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" "$TAKYON_DEPLOY_SOURCE_REVISION"
+  "$DEPLOY_RUNTIME_DIR" "$TAKYON_VPS_HOST" "$TAKYON_VPS_KEY" "$TAKYON_DEPLOY_SOURCE_REVISION" subuser
+
+verify_subuser_runtime_surface "$TAKYON_REMOTE_STAGED_RUNTIME" 0
 
 scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$SERVICE_FILE" \
@@ -527,17 +548,6 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   test \"\$(deno --version | awk 'NR==1 {print \$2}')\" = '$TAKYON_DENO_VERSION'
   command -v systemd-run >/dev/null 2>&1
   PYTHONPATH='$TAKYON_REMOTE_STAGED_RUNTIME' python3 -m compileall -q '$TAKYON_REMOTE_STAGED_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_STAGED_RUNTIME/takyon_cli' '$TAKYON_REMOTE_STAGED_RUNTIME/tui_gateway'
-  rm -rf '$remote_skills_preflight_home'
-  env TAKYON_HOME='$remote_skills_preflight_home' HOME=/opt/takyon TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1 \
-    PYTHONPATH='$TAKYON_REMOTE_STAGED_RUNTIME' '$TAKYON_REMOTE_STAGED_RUNTIME/.venv/bin/python' - <<'PY'
-from tools.skills_sync import sync_skills
-
-result = sync_skills(quiet=False)
-if not result.get('total_bundled'):
-    raise SystemExit('staged runtime contains no bundled skills')
-if result.get('user_modified'):
-    raise SystemExit(f\"bundled skill sync left user-modified entries behind: {result['user_modified']}\")
-PY
   env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/root PYTHONUNBUFFERED=1 TAKYON_HOST_ROLE=subuser TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
     PYTHONPATH='$TAKYON_REMOTE_STAGED_RUNTIME' '$TAKYON_REMOTE_STAGED_RUNTIME/.venv/bin/python' '$TAKYON_REMOTE_STAGED_RUNTIME/scripts/verify-supabase-auth-runtime.py'
   # Stage-only: every replica must receive and validate the exact artifact before the parent

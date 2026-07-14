@@ -43,6 +43,21 @@ def _env_flag(name: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def should_sync_legacy_skills() -> bool:
+    """Return whether mutable TAKYON_HOME skill seeding is allowed.
+
+    Production Claude Agent SDK runtimes consume the immutable, deploy-pinned
+    plugin directly.  Sub-user and Safebox hosts must never materialize the
+    operator skill bundle.
+    """
+    if _env_flag("TAKYON_DISABLE_LEGACY_SKILL_SYNC"):
+        return False
+    host_role = os.getenv("TAKYON_HOST_ROLE", "").strip().lower()
+    if host_role in {"subuser", "safebox"}:
+        return False
+    return not bool(os.getenv("TAKYON_CLAUDE_SKILLS_PLUGIN", "").strip())
+
+
 def _get_bundled_dir() -> Path:
     """Locate the bundled skills/ directory.
 
@@ -241,12 +256,16 @@ def sync_skills(quiet: bool = False) -> dict:
         dict with keys: copied (list), updated (list), skipped (int),
                         user_modified (list), cleaned (list), total_bundled (int)
     """
+    empty_result = {
+        "copied": [], "updated": [], "skipped": 0,
+        "user_modified": [], "cleaned": [], "total_bundled": 0,
+    }
+    if not should_sync_legacy_skills():
+        return empty_result
+
     bundled_dir = _get_bundled_dir()
     if not bundled_dir.exists():
-        return {
-            "copied": [], "updated": [], "skipped": 0,
-            "user_modified": [], "cleaned": [], "total_bundled": 0,
-        }
+        return empty_result
 
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _read_manifest()

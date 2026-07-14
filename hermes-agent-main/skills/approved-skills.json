@@ -1,0 +1,1788 @@
+{
+  "schema_version": 1,
+  "generated_from": "release-skills.yaml",
+  "plugin": {
+    "name": "takyon-approved-skills",
+    "version": "1.0.0"
+  },
+  "discovery_roots": [
+    "creative",
+    "takyon"
+  ],
+  "capability_tools": {
+    "app.customer.admin": [
+      "business_act_on_app_connection",
+      "business_delete_app_record",
+      "business_disable_app_directory_entry",
+      "business_grant_app_entitlement",
+      "business_list_app_connections",
+      "business_list_app_directory_entries",
+      "business_list_app_records",
+      "business_read_app_account",
+      "business_read_app_directory_entry",
+      "business_read_app_profile",
+      "business_read_app_record",
+      "business_record_app_usage",
+      "business_record_stripe_webhook",
+      "business_upsert_app_customer",
+      "business_upsert_app_directory_entry",
+      "business_upsert_app_profile",
+      "business_upsert_app_record",
+      "business_upsert_conversation_thread"
+    ],
+    "app.runtime.operate": [
+      "business_check_runtime_capabilities",
+      "business_create_app_checkout",
+      "business_invoke_app_action",
+      "business_list_app_media",
+      "business_send_app_email",
+      "business_supabase_login",
+      "business_upsert_app_plan"
+    ],
+    "budget.channel.manage": [
+      "business_read_channel_credit_budgets",
+      "business_set_channel_credit_budgets"
+    ],
+    "business.files.read": [
+      "business_list_files",
+      "business_read_file"
+    ],
+    "business.files.write": [
+      "business_patch_file",
+      "business_write_file"
+    ],
+    "business.memory.write": [
+      "business_record_memory"
+    ],
+    "business.state.read": [
+      "business_read_business"
+    ],
+    "commerce.shopify.operate": [
+      "business_connect_shopify",
+      "business_shopify_create_product",
+      "business_shopify_read_orders"
+    ],
+    "conversation.manage": [
+      "business_record_conversation_message",
+      "business_update_conversation_message_status"
+    ],
+    "conversation.read": [
+      "business_list_conversation_messages",
+      "business_read_conversation_thread"
+    ],
+    "creative.logo.generate": [
+      "business_generate_logo"
+    ],
+    "creative.site-image.generate": [
+      "business_generate_site_image"
+    ],
+    "creative.static-ad.generate": [
+      "business_static_ad_generate"
+    ],
+    "creative.ugc-video.generate": [
+      "business_ugc_ad_generate",
+      "business_ugc_ad_write"
+    ],
+    "creative.ugc-workflow.compose": [
+      "business_list_files",
+      "business_patch_file",
+      "business_read_file",
+      "business_write_file"
+    ],
+    "distribution.coordinate": [
+      "business_create_workspace",
+      "business_enqueue_job",
+      "business_publish_test_outreach"
+    ],
+    "meta.ads.operate": [
+      "business_meta_ad_control",
+      "business_meta_ad_evaluate",
+      "business_meta_ad_insights_sync",
+      "business_meta_ad_launch",
+      "business_meta_pixel_ensure",
+      "business_meta_pixel_verify"
+    ],
+    "metrics.business.read": [
+      "business_calculate_pulse",
+      "business_read_app_analytics"
+    ],
+    "mobile.store.read": [
+      "business_read_store_status"
+    ],
+    "mobile.store.release": [
+      "business_publish_mobile_release"
+    ],
+    "operator.business.admin": [
+      "business_decide_operator_approval",
+      "business_delete_business",
+      "business_gc",
+      "business_list_businesses",
+      "business_set_control",
+      "business_set_identity",
+      "business_set_mode",
+      "business_set_money_shape",
+      "business_set_work_focus",
+      "business_upgrade_businesses",
+      "business_upsert_business"
+    ],
+    "operator.credentials.request": [
+      "business_request_credential"
+    ],
+    "operator.lifecycle.record": [
+      "business_open_state_of_mind",
+      "business_post_operator_update",
+      "business_record_agent",
+      "business_record_episode",
+      "business_record_event",
+      "business_record_learning",
+      "business_record_pulse",
+      "business_schedule_ceo_wakeup"
+    ],
+    "operator.todo.manage": [
+      "todo"
+    ],
+    "product.runtime.verify": [
+      "business_check_runtime_capabilities",
+      "business_invoke_app_action"
+    ],
+    "product.source.edit": [
+      "business_list_files",
+      "business_patch_file",
+      "business_read_file",
+      "business_write_file"
+    ],
+    "product.surface.configure": [
+      "business_upsert_app_plan",
+      "business_upsert_app_surface_contract"
+    ],
+    "product.surface.publish": [
+      "business_refresh_product_surface"
+    ],
+    "reddit.ads.operate": [
+      "business_reddit_ad_control",
+      "business_reddit_ad_insights_sync",
+      "business_reddit_ad_launch"
+    ],
+    "reddit.channel.publish": [
+      "business_reddit_publish_outreach"
+    ],
+    "seo.evidence.read": [
+      "business_seo_query_data"
+    ],
+    "seo.property.manage": [
+      "business_register_search_console",
+      "business_seo_add_property"
+    ],
+    "web.evidence.search": [
+      "web_extract",
+      "web_search"
+    ],
+    "x.channel.operate": [
+      "business_x_publish_outreach",
+      "business_x_search"
+    ],
+    "x.metrics.read": [
+      "business_x_metrics_sync"
+    ]
+  },
+  "artifact_bindings": {
+    "app.runtime-contract": {
+      "paths": [
+        "product/surface.md"
+      ],
+      "publish": false,
+      "receipt": "runtime_verification_receipt"
+    },
+    "creative.brand-logo": {
+      "paths": [
+        "product/brand/logos"
+      ],
+      "publish": true,
+      "receipt": "creative_receipt"
+    },
+    "creative.static-ads": {
+      "paths": [
+        "product/static-ads"
+      ],
+      "publish": true,
+      "receipt": "creative_receipt"
+    },
+    "creative.ugc-video": {
+      "paths": [
+        "product/ugc-ads"
+      ],
+      "publish": true,
+      "receipt": "creative_receipt"
+    },
+    "creative.ugc-workflow": {
+      "paths": [
+        "product/lightreel-seedance-fal-ugc-workflow.md"
+      ],
+      "publish": false,
+      "receipt": "artifact_digest"
+    },
+    "design.contract": {
+      "paths": [
+        "product/site/DESIGN.md"
+      ],
+      "publish": false,
+      "receipt": "artifact_digest"
+    },
+    "design.web-images": {
+      "paths": [
+        "product/site/public/generated"
+      ],
+      "publish": true,
+      "receipt": "creative_receipt"
+    },
+    "distribution.campaign": {
+      "paths": [
+        "distribution/surface.md",
+        "distribution/campaign",
+        "distribution/local-published"
+      ],
+      "publish": false,
+      "receipt": "action_receipt"
+    },
+    "distribution.meta-ads": {
+      "paths": [
+        "distribution/meta-ads",
+        "metrics/meta-ads",
+        "metrics/meta-pixel"
+      ],
+      "publish": true,
+      "receipt": "provider_action_receipt"
+    },
+    "distribution.reddit-ads": {
+      "paths": [
+        "product/public-assets",
+        "distribution/reddit-ads",
+        "metrics/reddit-ads"
+      ],
+      "publish": true,
+      "receipt": "provider_action_receipt"
+    },
+    "distribution.x": {
+      "paths": [
+        "distribution/voice/x.md",
+        "distribution/campaign",
+        "distribution/local-published",
+        "metrics/conversations"
+      ],
+      "publish": true,
+      "receipt": "provider_action_receipt"
+    },
+    "metrics.business-summary": {
+      "paths": [
+        "metrics/summary.md",
+        "metrics/summary.json",
+        "metrics/wake-history.md"
+      ],
+      "publish": false,
+      "receipt": "artifact_digest"
+    },
+    "metrics.seo-report": {
+      "paths": [
+        "metrics/seo"
+      ],
+      "publish": false,
+      "receipt": "artifact_digest"
+    },
+    "product.mobile-app": {
+      "paths": [
+        "product/surface.md",
+        "product/app"
+      ],
+      "publish": true,
+      "receipt": "mobile_release_receipt"
+    },
+    "product.surface": {
+      "paths": [
+        "product/surface.md",
+        "product/site"
+      ],
+      "publish": true,
+      "receipt": "publication_receipt"
+    },
+    "research.market": {
+      "paths": [
+        "research/market.md",
+        "research/sources.jsonl",
+        "metrics/research-summary.json"
+      ],
+      "publish": false,
+      "receipt": "artifact_digest"
+    }
+  },
+  "mode_tool_policy": {
+    "bootstrap": {
+      "allowed_skills": [
+        "design-taste-frontend",
+        "takyon-app-runtime",
+        "takyon-brand-logo",
+        "takyon-mobile-app",
+        "takyon-product",
+        "taste-imagegen-web"
+      ],
+      "allowed_capabilities": [
+        "app.runtime.operate",
+        "business.files.read",
+        "business.files.write",
+        "business.state.read",
+        "creative.logo.generate",
+        "creative.site-image.generate",
+        "mobile.store.read",
+        "mobile.store.release",
+        "product.runtime.verify",
+        "product.source.edit",
+        "product.surface.configure",
+        "product.surface.publish"
+      ],
+      "allowed_tools": [
+        "business_check_runtime_capabilities",
+        "business_connect_shopify",
+        "business_create_app_checkout",
+        "business_generate_logo",
+        "business_generate_site_image",
+        "business_invoke_app_action",
+        "business_list_app_media",
+        "business_list_files",
+        "business_open_state_of_mind",
+        "business_patch_file",
+        "business_post_operator_update",
+        "business_publish_mobile_release",
+        "business_read_business",
+        "business_read_file",
+        "business_read_store_status",
+        "business_record_agent",
+        "business_record_episode",
+        "business_record_event",
+        "business_record_learning",
+        "business_record_pulse",
+        "business_refresh_product_surface",
+        "business_register_search_console",
+        "business_schedule_ceo_wakeup",
+        "business_send_app_email",
+        "business_seo_add_property",
+        "business_set_identity",
+        "business_set_money_shape",
+        "business_set_work_focus",
+        "business_shopify_create_product",
+        "business_shopify_read_orders",
+        "business_supabase_login",
+        "business_upsert_app_plan",
+        "business_upsert_app_surface_contract",
+        "business_upsert_business",
+        "business_write_file",
+        "todo"
+      ],
+      "baseline_tools": [
+        "business_read_business",
+        "business_connect_shopify",
+        "business_open_state_of_mind",
+        "business_post_operator_update",
+        "business_record_agent",
+        "business_record_episode",
+        "business_record_event",
+        "business_record_learning",
+        "business_record_pulse",
+        "business_register_search_console",
+        "business_schedule_ceo_wakeup",
+        "business_seo_add_property",
+        "business_set_identity",
+        "business_set_money_shape",
+        "business_set_work_focus",
+        "business_shopify_create_product",
+        "business_shopify_read_orders",
+        "business_upsert_business",
+        "todo"
+      ],
+      "denied_capabilities": [
+        "web.evidence.search",
+        "seo.evidence.read",
+        "business.memory.write",
+        "metrics.business.read",
+        "distribution.coordinate",
+        "x.channel.operate",
+        "conversation.manage",
+        "conversation.read",
+        "creative.static-ad.generate",
+        "creative.ugc-video.generate",
+        "creative.ugc-workflow.compose",
+        "meta.ads.operate",
+        "reddit.ads.operate"
+      ],
+      "denied_tools": [
+        "web_search",
+        "web_extract",
+        "business_record_memory",
+        "business_seo_query_data",
+        "business_calculate_pulse",
+        "business_read_app_analytics",
+        "business_create_workspace",
+        "business_publish_test_outreach",
+        "business_enqueue_job",
+        "business_x_publish_outreach",
+        "business_x_search",
+        "business_record_conversation_message",
+        "business_update_conversation_message_status",
+        "business_list_conversation_messages",
+        "business_read_conversation_thread",
+        "business_static_ad_generate",
+        "business_ugc_ad_generate",
+        "business_meta_ad_launch",
+        "business_meta_ad_control",
+        "business_meta_ad_insights_sync",
+        "business_meta_ad_evaluate",
+        "business_meta_pixel_verify",
+        "business_meta_pixel_ensure",
+        "business_reddit_ad_launch",
+        "business_reddit_ad_control",
+        "business_reddit_ad_insights_sync"
+      ],
+      "denied_write_paths": [
+        "metrics",
+        "distribution",
+        "product/static-ads",
+        "product/ugc-ads",
+        "product/lightreel-seedance-fal-ugc-workflow.md",
+        "product/lightreel-seedance-fal-ugc-run"
+      ]
+    },
+    "interactive": {
+      "allowed_skills": [
+        "design-taste-frontend",
+        "surface-refresh-audit",
+        "takyon-app-runtime",
+        "takyon-autonomous-seo-geo-operator",
+        "takyon-brand-logo",
+        "takyon-business-metrics",
+        "takyon-distribution",
+        "takyon-lightreel-seedance-fal-ugc",
+        "takyon-market-research",
+        "takyon-meta-ads-v2",
+        "takyon-mobile-app",
+        "takyon-product",
+        "takyon-reddit-ads",
+        "takyon-static-ad-creative-generator",
+        "takyon-x",
+        "taste-imagegen-web",
+        "ugc-video-ad"
+      ],
+      "allowed_capabilities": [
+        "app.runtime.operate",
+        "business.files.read",
+        "business.files.write",
+        "business.memory.write",
+        "business.state.read",
+        "conversation.manage",
+        "conversation.read",
+        "creative.logo.generate",
+        "creative.site-image.generate",
+        "creative.static-ad.generate",
+        "creative.ugc-video.generate",
+        "creative.ugc-workflow.compose",
+        "distribution.coordinate",
+        "meta.ads.operate",
+        "metrics.business.read",
+        "mobile.store.read",
+        "mobile.store.release",
+        "product.runtime.verify",
+        "product.source.edit",
+        "product.surface.configure",
+        "product.surface.publish",
+        "reddit.ads.operate",
+        "seo.evidence.read",
+        "web.evidence.search",
+        "x.channel.operate"
+      ],
+      "allowed_tools": [
+        "business_act_on_app_connection",
+        "business_calculate_pulse",
+        "business_check_runtime_capabilities",
+        "business_connect_shopify",
+        "business_create_app_checkout",
+        "business_create_workspace",
+        "business_disable_app_directory_entry",
+        "business_enqueue_job",
+        "business_gc",
+        "business_generate_logo",
+        "business_generate_site_image",
+        "business_invoke_app_action",
+        "business_list_app_connections",
+        "business_list_app_directory_entries",
+        "business_list_app_media",
+        "business_list_app_records",
+        "business_list_businesses",
+        "business_list_conversation_messages",
+        "business_list_files",
+        "business_meta_ad_control",
+        "business_meta_ad_evaluate",
+        "business_meta_ad_insights_sync",
+        "business_meta_ad_launch",
+        "business_meta_pixel_ensure",
+        "business_meta_pixel_verify",
+        "business_open_state_of_mind",
+        "business_patch_file",
+        "business_post_operator_update",
+        "business_publish_mobile_release",
+        "business_publish_test_outreach",
+        "business_read_app_account",
+        "business_read_app_analytics",
+        "business_read_app_directory_entry",
+        "business_read_app_profile",
+        "business_read_app_record",
+        "business_read_business",
+        "business_read_channel_credit_budgets",
+        "business_read_conversation_thread",
+        "business_read_file",
+        "business_read_store_status",
+        "business_record_agent",
+        "business_record_conversation_message",
+        "business_record_episode",
+        "business_record_event",
+        "business_record_learning",
+        "business_record_memory",
+        "business_record_pulse",
+        "business_reddit_ad_control",
+        "business_reddit_ad_insights_sync",
+        "business_reddit_ad_launch",
+        "business_reddit_publish_outreach",
+        "business_refresh_product_surface",
+        "business_register_search_console",
+        "business_request_credential",
+        "business_schedule_ceo_wakeup",
+        "business_send_app_email",
+        "business_seo_add_property",
+        "business_seo_query_data",
+        "business_set_channel_credit_budgets",
+        "business_set_identity",
+        "business_set_money_shape",
+        "business_set_work_focus",
+        "business_shopify_create_product",
+        "business_shopify_read_orders",
+        "business_static_ad_generate",
+        "business_supabase_login",
+        "business_ugc_ad_generate",
+        "business_ugc_ad_write",
+        "business_update_conversation_message_status",
+        "business_upgrade_businesses",
+        "business_upsert_app_directory_entry",
+        "business_upsert_app_plan",
+        "business_upsert_app_record",
+        "business_upsert_app_surface_contract",
+        "business_upsert_business",
+        "business_upsert_conversation_thread",
+        "business_write_file",
+        "business_x_metrics_sync",
+        "business_x_publish_outreach",
+        "business_x_search",
+        "todo",
+        "web_extract",
+        "web_search"
+      ],
+      "baseline_tools": [
+        "business_read_business",
+        "business_act_on_app_connection",
+        "business_connect_shopify",
+        "business_disable_app_directory_entry",
+        "business_gc",
+        "business_list_app_connections",
+        "business_list_app_directory_entries",
+        "business_list_app_records",
+        "business_list_businesses",
+        "business_open_state_of_mind",
+        "business_post_operator_update",
+        "business_read_app_account",
+        "business_read_app_directory_entry",
+        "business_read_app_profile",
+        "business_read_app_record",
+        "business_read_channel_credit_budgets",
+        "business_request_credential",
+        "business_record_agent",
+        "business_record_episode",
+        "business_record_event",
+        "business_record_learning",
+        "business_record_pulse",
+        "business_reddit_publish_outreach",
+        "business_register_search_console",
+        "business_schedule_ceo_wakeup",
+        "business_seo_add_property",
+        "business_set_channel_credit_budgets",
+        "business_set_identity",
+        "business_set_money_shape",
+        "business_set_work_focus",
+        "business_shopify_create_product",
+        "business_shopify_read_orders",
+        "business_upgrade_businesses",
+        "business_upsert_app_directory_entry",
+        "business_upsert_app_record",
+        "business_upsert_business",
+        "business_upsert_conversation_thread",
+        "business_x_metrics_sync",
+        "todo"
+      ],
+      "denied_capabilities": [],
+      "denied_tools": [],
+      "denied_write_paths": []
+    },
+    "wake": {
+      "allowed_skills": [
+        "takyon-business-metrics",
+        "takyon-distribution",
+        "takyon-lightreel-seedance-fal-ugc",
+        "takyon-market-research",
+        "takyon-meta-ads-v2",
+        "takyon-reddit-ads",
+        "takyon-static-ad-creative-generator",
+        "takyon-x",
+        "ugc-video-ad"
+      ],
+      "allowed_capabilities": [
+        "business.files.read",
+        "business.files.write",
+        "business.memory.write",
+        "business.state.read",
+        "conversation.manage",
+        "conversation.read",
+        "creative.static-ad.generate",
+        "creative.ugc-video.generate",
+        "creative.ugc-workflow.compose",
+        "distribution.coordinate",
+        "meta.ads.operate",
+        "metrics.business.read",
+        "reddit.ads.operate",
+        "web.evidence.search",
+        "x.channel.operate"
+      ],
+      "allowed_tools": [
+        "business_calculate_pulse",
+        "business_create_workspace",
+        "business_enqueue_job",
+        "business_list_conversation_messages",
+        "business_list_files",
+        "business_meta_ad_control",
+        "business_meta_ad_evaluate",
+        "business_meta_ad_insights_sync",
+        "business_meta_ad_launch",
+        "business_meta_pixel_ensure",
+        "business_meta_pixel_verify",
+        "business_open_state_of_mind",
+        "business_patch_file",
+        "business_post_operator_update",
+        "business_publish_test_outreach",
+        "business_read_app_analytics",
+        "business_read_business",
+        "business_read_channel_credit_budgets",
+        "business_read_conversation_thread",
+        "business_read_file",
+        "business_record_conversation_message",
+        "business_record_episode",
+        "business_record_event",
+        "business_record_learning",
+        "business_record_memory",
+        "business_record_pulse",
+        "business_reddit_ad_control",
+        "business_reddit_ad_insights_sync",
+        "business_reddit_ad_launch",
+        "business_reddit_publish_outreach",
+        "business_schedule_ceo_wakeup",
+        "business_set_channel_credit_budgets",
+        "business_set_work_focus",
+        "business_static_ad_generate",
+        "business_ugc_ad_generate",
+        "business_ugc_ad_write",
+        "business_update_conversation_message_status",
+        "business_write_file",
+        "business_x_metrics_sync",
+        "business_x_publish_outreach",
+        "business_x_search",
+        "todo",
+        "web_extract",
+        "web_search"
+      ],
+      "baseline_tools": [
+        "business_read_business",
+        "business_open_state_of_mind",
+        "business_post_operator_update",
+        "business_read_channel_credit_budgets",
+        "business_record_episode",
+        "business_record_event",
+        "business_record_learning",
+        "business_record_pulse",
+        "business_reddit_publish_outreach",
+        "business_schedule_ceo_wakeup",
+        "business_set_channel_credit_budgets",
+        "business_set_work_focus",
+        "business_x_metrics_sync",
+        "todo"
+      ],
+      "denied_capabilities": [
+        "product.source.edit",
+        "product.surface.configure",
+        "product.surface.publish",
+        "product.runtime.verify",
+        "app.runtime.operate",
+        "mobile.store.release"
+      ],
+      "denied_tools": [
+        "business_upsert_app_surface_contract",
+        "business_upsert_app_plan",
+        "business_refresh_product_surface",
+        "business_invoke_app_action",
+        "business_supabase_login",
+        "business_create_app_checkout",
+        "business_send_app_email",
+        "business_publish_mobile_release"
+      ],
+      "denied_write_paths": [
+        "product/site",
+        "product/surface.md",
+        "product/app"
+      ]
+    }
+  },
+  "model_tool_inventory": [
+    "business_act_on_app_connection",
+    "business_calculate_pulse",
+    "business_check_runtime_capabilities",
+    "business_claude_agent_task",
+    "business_connect_shopify",
+    "business_create_app_checkout",
+    "business_create_workspace",
+    "business_decide_operator_approval",
+    "business_delete_app_record",
+    "business_delete_business",
+    "business_disable_app_directory_entry",
+    "business_enqueue_job",
+    "business_gc",
+    "business_generate_logo",
+    "business_generate_site_image",
+    "business_grant_app_entitlement",
+    "business_invoke_app_action",
+    "business_list_app_connections",
+    "business_list_app_directory_entries",
+    "business_list_app_media",
+    "business_list_app_records",
+    "business_list_businesses",
+    "business_list_conversation_messages",
+    "business_list_files",
+    "business_meta_ad_control",
+    "business_meta_ad_evaluate",
+    "business_meta_ad_insights_sync",
+    "business_meta_ad_launch",
+    "business_meta_pixel_ensure",
+    "business_meta_pixel_verify",
+    "business_open_state_of_mind",
+    "business_patch_file",
+    "business_post_operator_update",
+    "business_publish_mobile_release",
+    "business_publish_test_outreach",
+    "business_read_app_account",
+    "business_read_app_analytics",
+    "business_read_app_directory_entry",
+    "business_read_app_profile",
+    "business_read_app_record",
+    "business_read_business",
+    "business_read_channel_credit_budgets",
+    "business_read_conversation_thread",
+    "business_read_file",
+    "business_read_store_status",
+    "business_record_agent",
+    "business_record_app_usage",
+    "business_record_conversation_message",
+    "business_record_episode",
+    "business_record_event",
+    "business_record_learning",
+    "business_record_memory",
+    "business_record_pulse",
+    "business_record_stripe_webhook",
+    "business_reddit_ad_control",
+    "business_reddit_ad_insights_sync",
+    "business_reddit_ad_launch",
+    "business_reddit_publish_outreach",
+    "business_refresh_product_surface",
+    "business_register_search_console",
+    "business_request_credential",
+    "business_schedule_ceo_wakeup",
+    "business_send_app_email",
+    "business_seo_add_property",
+    "business_seo_query_data",
+    "business_set_channel_credit_budgets",
+    "business_set_control",
+    "business_set_identity",
+    "business_set_mode",
+    "business_set_money_shape",
+    "business_set_work_focus",
+    "business_shopify_create_product",
+    "business_shopify_read_orders",
+    "business_static_ad_generate",
+    "business_supabase_login",
+    "business_ugc_ad_generate",
+    "business_ugc_ad_write",
+    "business_update_conversation_message_status",
+    "business_upgrade_businesses",
+    "business_upsert_app_customer",
+    "business_upsert_app_directory_entry",
+    "business_upsert_app_plan",
+    "business_upsert_app_profile",
+    "business_upsert_app_record",
+    "business_upsert_app_surface_contract",
+    "business_upsert_business",
+    "business_upsert_conversation_thread",
+    "business_write_file",
+    "business_x_metrics_sync",
+    "business_x_publish_outreach",
+    "business_x_search",
+    "todo",
+    "web_extract",
+    "web_search"
+  ],
+  "model_tool_inventory_digest": "sha256:40fc174b4e51e179d7900976cb1cee978b5a56ad9f83497c183d003ad0d4642c",
+  "retired_resources_digest": "sha256:53073f0703b3099c80cc0f61c681aab6e4a713a23c95235f4c50ba000782e893",
+  "handoff_guidance": "HANDOFF binds portable skill contracts to the current runtime.\nUse only the tools exposed for the active mode; exact path and authority checks remain enforced by adapters.\nCapabilities:\n- app.customer.admin -> business_act_on_app_connection, business_delete_app_record, business_disable_app_directory_entry, business_grant_app_entitlement, business_list_app_connections, business_list_app_directory_entries, business_list_app_records, business_read_app_account, business_read_app_directory_entry, business_read_app_profile, business_read_app_record, business_record_app_usage, business_record_stripe_webhook, business_upsert_app_customer, business_upsert_app_directory_entry, business_upsert_app_profile, business_upsert_app_record, business_upsert_conversation_thread\n- app.runtime.operate -> business_upsert_app_plan, business_supabase_login, business_create_app_checkout, business_check_runtime_capabilities, business_invoke_app_action, business_send_app_email, business_list_app_media\n- budget.channel.manage -> business_read_channel_credit_budgets, business_set_channel_credit_budgets\n- business.files.read -> business_read_file, business_list_files\n- business.files.write -> business_write_file, business_patch_file\n- business.memory.write -> business_record_memory\n- business.state.read -> business_read_business\n- commerce.shopify.operate -> business_connect_shopify, business_shopify_create_product, business_shopify_read_orders\n- conversation.manage -> business_record_conversation_message, business_update_conversation_message_status\n- conversation.read -> business_list_conversation_messages, business_read_conversation_thread\n- creative.logo.generate -> business_generate_logo\n- creative.site-image.generate -> business_generate_site_image\n- creative.static-ad.generate -> business_static_ad_generate\n- creative.ugc-video.generate -> business_ugc_ad_generate, business_ugc_ad_write\n- creative.ugc-workflow.compose -> business_read_file, business_list_files, business_write_file, business_patch_file\n- distribution.coordinate -> business_create_workspace, business_publish_test_outreach, business_enqueue_job\n- meta.ads.operate -> business_meta_ad_launch, business_meta_ad_control, business_meta_ad_insights_sync, business_meta_ad_evaluate, business_meta_pixel_verify, business_meta_pixel_ensure\n- metrics.business.read -> business_calculate_pulse, business_read_app_analytics\n- mobile.store.read -> business_read_store_status\n- mobile.store.release -> business_publish_mobile_release\n- operator.business.admin -> business_list_businesses, business_upsert_business, business_delete_business, business_upgrade_businesses, business_gc, business_decide_operator_approval, business_set_control, business_set_identity, business_set_mode, business_set_money_shape, business_set_work_focus\n- operator.credentials.request -> business_request_credential\n- operator.lifecycle.record -> business_post_operator_update, business_record_agent, business_record_episode, business_record_event, business_record_learning, business_record_pulse, business_open_state_of_mind, business_schedule_ceo_wakeup\n- operator.todo.manage -> todo\n- product.runtime.verify -> business_check_runtime_capabilities, business_invoke_app_action\n- product.source.edit -> business_read_file, business_list_files, business_write_file, business_patch_file\n- product.surface.configure -> business_upsert_app_surface_contract, business_upsert_app_plan\n- product.surface.publish -> business_refresh_product_surface\n- reddit.ads.operate -> business_reddit_ad_launch, business_reddit_ad_control, business_reddit_ad_insights_sync\n- reddit.channel.publish -> business_reddit_publish_outreach\n- seo.evidence.read -> business_seo_query_data\n- seo.property.manage -> business_register_search_console, business_seo_add_property\n- web.evidence.search -> web_search, web_extract\n- x.channel.operate -> business_x_publish_outreach, business_x_search\n- x.metrics.read -> business_x_metrics_sync\nArtifacts:\n- app.runtime-contract -> product/surface.md (local; evidence=runtime_verification_receipt)\n- creative.brand-logo -> product/brand/logos (publish; evidence=creative_receipt)\n- creative.static-ads -> product/static-ads (publish; evidence=creative_receipt)\n- creative.ugc-video -> product/ugc-ads (publish; evidence=creative_receipt)\n- creative.ugc-workflow -> product/lightreel-seedance-fal-ugc-workflow.md (local; evidence=artifact_digest)\n- design.contract -> product/site/DESIGN.md (local; evidence=artifact_digest)\n- design.web-images -> product/site/public/generated (publish; evidence=creative_receipt)\n- distribution.campaign -> distribution/surface.md, distribution/campaign, distribution/local-published (local; evidence=action_receipt)\n- distribution.meta-ads -> distribution/meta-ads, metrics/meta-ads, metrics/meta-pixel (publish; evidence=provider_action_receipt)\n- distribution.reddit-ads -> product/public-assets, distribution/reddit-ads, metrics/reddit-ads (publish; evidence=provider_action_receipt)\n- distribution.x -> distribution/voice/x.md, distribution/campaign, distribution/local-published, metrics/conversations (publish; evidence=provider_action_receipt)\n- metrics.business-summary -> metrics/summary.md, metrics/summary.json, metrics/wake-history.md (local; evidence=artifact_digest)\n- metrics.seo-report -> metrics/seo (local; evidence=artifact_digest)\n- product.mobile-app -> product/surface.md, product/app (publish; evidence=mobile_release_receipt)\n- product.surface -> product/surface.md, product/site (publish; evidence=publication_receipt)\n- research.market -> research/market.md, research/sources.jsonl, metrics/research-summary.json (local; evidence=artifact_digest)\nMode write exclusions:\n- bootstrap: metrics, distribution, product/static-ads, product/ugc-ads, product/lightreel-seedance-fal-ugc-workflow.md, product/lightreel-seedance-fal-ugc-run\n- interactive: none\n- wake: product/site, product/surface.md, product/app",
+  "skills": [
+    {
+      "name": "design-taste-frontend",
+      "legacy_names": [],
+      "source_path": "creative/taste-frontend",
+      "plugin_path": "skills/design-taste-frontend",
+      "skill_file": "creative/taste-frontend/SKILL.md",
+      "contract_file": "creative/taste-frontend/contract.yaml",
+      "version": "1.0.0",
+      "description": "Design and implement distinctive landing pages, portfolios, and redesigns by inferring audience, visual direction, and an appropriate design system. Use when a marketing-facing web surface needs original frontend craft or a Taste design contract. Do not use for dashboards, data tables, or multi-step product application UI.",
+      "allowed_modes": [
+        "interactive",
+        "bootstrap"
+      ],
+      "workspace_roots": [
+        "product"
+      ],
+      "publication_paths": [
+        "product/site/DESIGN.md",
+        "product/site"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": null,
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "product.source.edit"
+      ],
+      "produces": [
+        "design.contract",
+        "product.surface"
+      ],
+      "bound_tools": [
+        "business_list_files",
+        "business_patch_file",
+        "business_read_business",
+        "business_read_file",
+        "business_write_file"
+      ],
+      "publish_files": [
+        "skills/design-taste-frontend/LICENSE",
+        "skills/design-taste-frontend/SKILL.md",
+        "skills/design-taste-frontend/contract.yaml",
+        "skills/design-taste-frontend/references/design-engineering.md",
+        "skills/design-taste-frontend/references/preflight.md",
+        "skills/design-taste-frontend/references/redesign-and-blocks.md",
+        "skills/design-taste-frontend/references/source-systems.md"
+      ],
+      "source_digest": "sha256:85a36a0f407ed0eaafa42a5654888ed20f7729139db3e5cf568748835077e90c",
+      "content_digest": "sha256:40c907a1ad78afce9dc0ae05a6c62c873139364de90e4f446425b33b774ea541"
+    },
+    {
+      "name": "surface-refresh-audit",
+      "legacy_names": [
+        "claude-refresh-audit"
+      ],
+      "source_path": "creative/surface-refresh-audit",
+      "plugin_path": "skills/surface-refresh-audit",
+      "skill_file": "creative/surface-refresh-audit/SKILL.md",
+      "contract_file": "creative/surface-refresh-audit/contract.yaml",
+      "version": "1.0.0",
+      "description": "Audit and improve an existing product surface while preserving its established design direction and functionality. Use when a shipped interface needs a focused refresh, redesign, or anti-slop pass. Do not use for a first build or for backend behavior changes.",
+      "allowed_modes": [
+        "interactive"
+      ],
+      "workspace_roots": [
+        "product"
+      ],
+      "publication_paths": [
+        "product/site"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": null,
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "product.source.edit"
+      ],
+      "produces": [
+        "product.surface"
+      ],
+      "bound_tools": [
+        "business_list_files",
+        "business_patch_file",
+        "business_read_business",
+        "business_read_file",
+        "business_write_file"
+      ],
+      "publish_files": [
+        "skills/surface-refresh-audit/LICENSE",
+        "skills/surface-refresh-audit/SKILL.md",
+        "skills/surface-refresh-audit/contract.yaml"
+      ],
+      "source_digest": "sha256:8d7a5acf0934c1dd0c1dc1321e7f5e721dc093c831114bdf6049a9b49b1cfd73",
+      "content_digest": "sha256:8d7a5acf0934c1dd0c1dc1321e7f5e721dc093c831114bdf6049a9b49b1cfd73"
+    },
+    {
+      "name": "takyon-app-runtime",
+      "legacy_names": [],
+      "source_path": "takyon/takyon-app-runtime",
+      "plugin_path": "skills/takyon-app-runtime",
+      "skill_file": "takyon/takyon-app-runtime/SKILL.md",
+      "contract_file": "takyon/takyon-app-runtime/contract.yaml",
+      "version": "1.0.0",
+      "description": "Configure and verify a business application's declared customer-facing runtime features and real signed-in actions. Use when auth, profiles, plans, entitlements, checkout, usage, or actions must be wired and proven through existing rails. Do not use to administer real customers, forge payment/webhook state, or perform purely visual layout work.",
+      "allowed_modes": [
+        "interactive",
+        "bootstrap"
+      ],
+      "workspace_roots": [
+        "product",
+        "metrics"
+      ],
+      "publication_paths": [
+        "product/surface.md"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:d0442b9b02d03caa431241108c3af47085f3114088324708c0d791ddc34c994d",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "business.files.write",
+        "product.surface.configure",
+        "app.runtime.operate"
+      ],
+      "produces": [
+        "app.runtime-contract"
+      ],
+      "bound_tools": [
+        "business_check_runtime_capabilities",
+        "business_create_app_checkout",
+        "business_invoke_app_action",
+        "business_list_app_media",
+        "business_list_files",
+        "business_patch_file",
+        "business_read_business",
+        "business_read_file",
+        "business_send_app_email",
+        "business_supabase_login",
+        "business_upsert_app_plan",
+        "business_upsert_app_surface_contract",
+        "business_write_file"
+      ],
+      "publish_files": [
+        "skills/takyon-app-runtime/SKILL.md",
+        "skills/takyon-app-runtime/contract.yaml",
+        "skills/takyon-app-runtime/references/runtime-rules.md",
+        "skills/takyon-app-runtime/templates/runtime.md"
+      ],
+      "source_digest": "sha256:58228c769e89fcf00b9feb086d00d30ba9a3829e40a2a454393fbcaa52ff722c",
+      "content_digest": "sha256:58228c769e89fcf00b9feb086d00d30ba9a3829e40a2a454393fbcaa52ff722c"
+    },
+    {
+      "name": "takyon-autonomous-seo-geo-operator",
+      "legacy_names": [],
+      "source_path": "takyon/autonomous-seo-geo-operator",
+      "plugin_path": "skills/takyon-autonomous-seo-geo-operator",
+      "skill_file": "takyon/autonomous-seo-geo-operator/SKILL.md",
+      "contract_file": "takyon/autonomous-seo-geo-operator/contract.yaml",
+      "version": "1.0.0",
+      "description": "Audit and improve one business web surface for honest search and AI-answer visibility. Use when a small, reviewable pass should improve metadata, schema, internal links, sitemap, robots, llms.txt, or a few strategic bottom-of-funnel pages. Do not use for off-page promotion, fabricated evidence, mass programmatic pages, or guaranteed ranking claims.",
+      "allowed_modes": [
+        "interactive"
+      ],
+      "workspace_roots": [
+        "product",
+        "metrics"
+      ],
+      "publication_paths": [
+        "product/site",
+        "metrics/seo/seo-geo-report-<YYYY-MM-DD>.md"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:2a59f313e49d33b872a85fa69c6fc694cde1a89627c753785af50ca44afbc03f",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "business.files.write",
+        "product.source.edit",
+        "product.surface.publish",
+        "seo.evidence.read"
+      ],
+      "produces": [
+        "product.surface",
+        "metrics.seo-report"
+      ],
+      "bound_tools": [
+        "business_list_files",
+        "business_patch_file",
+        "business_read_business",
+        "business_read_file",
+        "business_refresh_product_surface",
+        "business_seo_query_data",
+        "business_write_file"
+      ],
+      "publish_files": [
+        "skills/takyon-autonomous-seo-geo-operator/SKILL.md",
+        "skills/takyon-autonomous-seo-geo-operator/contract.yaml",
+        "skills/takyon-autonomous-seo-geo-operator/references/seo-checklist.md",
+        "skills/takyon-autonomous-seo-geo-operator/templates/page-brief.md",
+        "skills/takyon-autonomous-seo-geo-operator/templates/seo-report.md"
+      ],
+      "source_digest": "sha256:9083d47a73a66eba5c8ff3371113e4440c179e826189410fdf6ed4fe5bddf9fc",
+      "content_digest": "sha256:2957fe8a7f9c494a6efbd0f4343cbc10ee724e6589f2a38ced9c4e898b176ec9"
+    },
+    {
+      "name": "takyon-brand-logo",
+      "legacy_names": [],
+      "source_path": "takyon/takyon-brand-logo",
+      "plugin_path": "skills/takyon-brand-logo",
+      "skill_file": "takyon/takyon-brand-logo/SKILL.md",
+      "contract_file": "takyon/takyon-brand-logo/contract.yaml",
+      "version": "1.0.0",
+      "description": "Create a business-scoped icon-only brand mark with a transparent background. Use when a product, site, app, or social profile needs a real logo mark. Do not use for naming, brand voice, generic imagery, performance ads, photo editing, or video.",
+      "allowed_modes": [
+        "interactive",
+        "bootstrap"
+      ],
+      "workspace_roots": [
+        "product"
+      ],
+      "publication_paths": [
+        "product/brand/logos/<slug>/logo.png",
+        "product/brand/logos/<slug>/receipt.json"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:8211a05bb4a8d7d6cdada9b5b3d2d5fb7ff1130d39b6683779d194147f1f56a7",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "creative.logo.generate"
+      ],
+      "produces": [
+        "creative.brand-logo"
+      ],
+      "bound_tools": [
+        "business_generate_logo",
+        "business_list_files",
+        "business_read_business",
+        "business_read_file"
+      ],
+      "publish_files": [
+        "skills/takyon-brand-logo/SKILL.md",
+        "skills/takyon-brand-logo/contract.yaml"
+      ],
+      "source_digest": "sha256:84301c4107e86d04556876f1cbc9e65210e599f427c5d737dab07a334b7e028e",
+      "content_digest": "sha256:84301c4107e86d04556876f1cbc9e65210e599f427c5d737dab07a334b7e028e"
+    },
+    {
+      "name": "takyon-business-metrics",
+      "legacy_names": [],
+      "source_path": "takyon/takyon-business-metrics",
+      "plugin_path": "skills/takyon-business-metrics",
+      "skill_file": "takyon/takyon-business-metrics/SKILL.md",
+      "contract_file": "takyon/takyon-business-metrics/contract.yaml",
+      "version": "1.0.0",
+      "description": "Compute, summarize, and track canonical business metrics, wake history, and unresolved inbound state. Use when running every wake, establishing the first creation baseline, or when users, revenue, usage, or replies materially affect the next move. Do not use to invent strategy from missing measurements.",
+      "allowed_modes": [
+        "interactive",
+        "wake"
+      ],
+      "workspace_roots": [
+        "metrics",
+        "research"
+      ],
+      "publication_paths": [
+        "metrics/summary.md",
+        "metrics/summary.json",
+        "metrics/wake-history.md"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:9f205a610bc6457470bcd6be5ca2a1fd30b3f168d9c08cccc9f122e67c3d9c66",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "metrics.business.read",
+        "business.files.write"
+      ],
+      "produces": [
+        "metrics.business-summary"
+      ],
+      "bound_tools": [
+        "business_calculate_pulse",
+        "business_list_files",
+        "business_patch_file",
+        "business_read_app_analytics",
+        "business_read_business",
+        "business_read_file",
+        "business_write_file"
+      ],
+      "publish_files": [
+        "skills/takyon-business-metrics/SKILL.md",
+        "skills/takyon-business-metrics/contract.yaml",
+        "skills/takyon-business-metrics/references/metrics-rules.md",
+        "skills/takyon-business-metrics/templates/summary.md"
+      ],
+      "source_digest": "sha256:ab467959cfca611fc796e66351e0c6610899b3484d7dab288f7db2db772782d4",
+      "content_digest": "sha256:ab467959cfca611fc796e66351e0c6610899b3484d7dab288f7db2db772782d4"
+    },
+    {
+      "name": "takyon-distribution",
+      "legacy_names": [],
+      "source_path": "takyon/takyon-distribution",
+      "plugin_path": "skills/takyon-distribution",
+      "skill_file": "takyon/takyon-distribution/SKILL.md",
+      "contract_file": "takyon/takyon-distribution/contract.yaml",
+      "version": "1.0.0",
+      "description": "Plan and coordinate honest cross-channel demand creation, campaign artifacts, outreach lanes, and campaign continuation for one business. Use when distribution work spans channels or needs an operating plan. Do not use for channel-native X, Reddit, or paid-ad execution, or for product-surface changes.",
+      "allowed_modes": [
+        "interactive",
+        "wake"
+      ],
+      "workspace_roots": [
+        "distribution",
+        "metrics",
+        "research"
+      ],
+      "publication_paths": [
+        "distribution/surface.md",
+        "distribution/campaign",
+        "distribution/local-published"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:e08cfda093a24c2c7fd50f559aa4bcd9f98533a8f79c8fc2aa4059a72887a1be",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "business.files.write",
+        "metrics.business.read",
+        "distribution.coordinate"
+      ],
+      "produces": [
+        "distribution.campaign"
+      ],
+      "bound_tools": [
+        "business_calculate_pulse",
+        "business_create_workspace",
+        "business_enqueue_job",
+        "business_list_files",
+        "business_patch_file",
+        "business_publish_test_outreach",
+        "business_read_app_analytics",
+        "business_read_business",
+        "business_read_file",
+        "business_write_file"
+      ],
+      "publish_files": [
+        "skills/takyon-distribution/SKILL.md",
+        "skills/takyon-distribution/contract.yaml",
+        "skills/takyon-distribution/references/campaign-rules.md",
+        "skills/takyon-distribution/templates/campaign.md",
+        "skills/takyon-distribution/templates/forum-reply.md",
+        "skills/takyon-distribution/templates/reply-draft.md"
+      ],
+      "source_digest": "sha256:c26d64dcc01b82a94418624eefa437d0e1b6bce710b6834c716067338cb0c347",
+      "content_digest": "sha256:c26d64dcc01b82a94418624eefa437d0e1b6bce710b6834c716067338cb0c347"
+    },
+    {
+      "name": "takyon-lightreel-seedance-fal-ugc",
+      "legacy_names": [],
+      "source_path": "takyon/takyon-lightreel-seedance-fal-ugc",
+      "plugin_path": "skills/takyon-lightreel-seedance-fal-ugc",
+      "skill_file": "takyon/takyon-lightreel-seedance-fal-ugc/SKILL.md",
+      "contract_file": "takyon/takyon-lightreel-seedance-fal-ugc/contract.yaml",
+      "version": "1.0.0",
+      "description": "Turn business facts into a single-person creator-format research brief, a Seedance-safe prompt, and a fal-compatible render payload. Use when a UGC concept needs evidence-informed creator direction before video generation. Do not use for secret handling, product UI work, screen recordings, product-shot videos, or multi-actor ads.",
+      "allowed_modes": [
+        "interactive",
+        "wake"
+      ],
+      "workspace_roots": [
+        "product"
+      ],
+      "publication_paths": [
+        "product/lightreel-seedance-fal-ugc-workflow.md"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:fffacd78d87e451028aff5dcc0f8b6201c467eb65e020bfda52f874d8fd50338",
+      "requires": [
+        "business.state.read",
+        "creative.ugc-workflow.compose"
+      ],
+      "produces": [
+        "creative.ugc-workflow"
+      ],
+      "bound_tools": [
+        "business_list_files",
+        "business_patch_file",
+        "business_read_business",
+        "business_read_file",
+        "business_write_file"
+      ],
+      "publish_files": [
+        "skills/takyon-lightreel-seedance-fal-ugc/SKILL.md",
+        "skills/takyon-lightreel-seedance-fal-ugc/contract.yaml",
+        "skills/takyon-lightreel-seedance-fal-ugc/templates/runtime-input.example.json"
+      ],
+      "source_digest": "sha256:e52c92d33164624963d97aee4d916aca5cb2cb9b1d51ebc1bec62eef8b76f2d2",
+      "content_digest": "sha256:fc0bb6d935c8b20c9d69545a02473cba2e3eee145e5dc74b580076f9073f8198"
+    },
+    {
+      "name": "takyon-market-research",
+      "legacy_names": [],
+      "source_path": "takyon/takyon-market-research",
+      "plugin_path": "skills/takyon-market-research",
+      "skill_file": "takyon/takyon-market-research/SKILL.md",
+      "contract_file": "takyon/takyon-market-research/contract.yaml",
+      "version": "1.0.0",
+      "description": "Gather and synthesize current customer, competitor, channel, pricing, and demand evidence for one business. Use when evidence is weak or stale or when positioning, audience, offer, pricing, or channel decisions need fresh truth. Do not use for cosmetic copy changes that do not change a business decision.",
+      "allowed_modes": [
+        "interactive",
+        "wake"
+      ],
+      "workspace_roots": [
+        "research",
+        "metrics"
+      ],
+      "publication_paths": [
+        "research/market.md",
+        "research/sources.jsonl",
+        "metrics/research-summary.json"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:0306021adf8907b82d9688b3e32ee01b43143b5488e0f9cc4339dece5e78d22b",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "business.files.write",
+        "business.memory.write",
+        "web.evidence.search"
+      ],
+      "produces": [
+        "research.market"
+      ],
+      "bound_tools": [
+        "business_list_files",
+        "business_patch_file",
+        "business_read_business",
+        "business_read_file",
+        "business_record_memory",
+        "business_write_file",
+        "web_extract",
+        "web_search"
+      ],
+      "publish_files": [
+        "skills/takyon-market-research/SKILL.md",
+        "skills/takyon-market-research/contract.yaml",
+        "skills/takyon-market-research/references/research-sources.md",
+        "skills/takyon-market-research/templates/market.md",
+        "skills/takyon-market-research/templates/sources.jsonl"
+      ],
+      "source_digest": "sha256:a4c4b02ae461094152df6debf18085198dee37cfd509aba551ce410a40b51af3",
+      "content_digest": "sha256:a4c4b02ae461094152df6debf18085198dee37cfd509aba551ce410a40b51af3"
+    },
+    {
+      "name": "takyon-meta-ads-v2",
+      "legacy_names": [],
+      "source_path": "takyon/takyon-meta-ads-v2",
+      "plugin_path": "skills/takyon-meta-ads-v2",
+      "skill_file": "takyon/takyon-meta-ads-v2/SKILL.md",
+      "contract_file": "takyon/takyon-meta-ads-v2/contract.yaml",
+      "version": "2.0.0",
+      "description": "Launch, control, measure, and verify Meta campaigns from finished real creative, including pixel readiness and evidence-backed performance evaluation. Use when an existing image or video is ready for Meta execution or an existing campaign needs operation. Do not use to create media, fabricate attribution, hard-delete campaigns, or bypass missing authority.",
+      "allowed_modes": [
+        "interactive",
+        "wake"
+      ],
+      "workspace_roots": [
+        "product",
+        "distribution",
+        "metrics"
+      ],
+      "publication_paths": [
+        "distribution/meta-ads/<slug>/plan.json",
+        "distribution/meta-ads/<slug>/receipt.json",
+        "distribution/meta-ads/<slug>/actions/<idempotency>.json",
+        "metrics/meta-ads/<slug>/insights.jsonl",
+        "metrics/meta-ads/<slug>/syncs/<idempotency>.json",
+        "metrics/meta-ads/<slug>/evaluations/<idempotency>.json",
+        "metrics/meta-pixel/<slug>/preflight.json",
+        "metrics/meta-pixel/<slug>/ensure.json"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:1f5bf04ba13af3a9f3c1fc6d6aef3606d00a25a5d0c99e82a0267091d16f6380",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "meta.ads.operate"
+      ],
+      "produces": [
+        "distribution.meta-ads"
+      ],
+      "bound_tools": [
+        "business_list_files",
+        "business_meta_ad_control",
+        "business_meta_ad_evaluate",
+        "business_meta_ad_insights_sync",
+        "business_meta_ad_launch",
+        "business_meta_pixel_ensure",
+        "business_meta_pixel_verify",
+        "business_read_business",
+        "business_read_file"
+      ],
+      "publish_files": [
+        "skills/takyon-meta-ads-v2/SKILL.md",
+        "skills/takyon-meta-ads-v2/contract.yaml",
+        "skills/takyon-meta-ads-v2/references/benchmarks.md",
+        "skills/takyon-meta-ads-v2/references/campaign-options.md",
+        "skills/takyon-meta-ads-v2/references/pixel-attribution.md",
+        "skills/takyon-meta-ads-v2/references/pixel-health.md"
+      ],
+      "source_digest": "sha256:392224c30203d3eb51af288cf4cb86018d17afcf0dfe3239d3a0e79dfa5813a6",
+      "content_digest": "sha256:fdc61a5617ca402f72c54f1df1d8f37006365860ad71c0e07d9514e3f6411b25"
+    },
+    {
+      "name": "takyon-mobile-app",
+      "legacy_names": [],
+      "source_path": "takyon/takyon-mobile-app",
+      "plugin_path": "skills/takyon-mobile-app",
+      "skill_file": "takyon/takyon-mobile-app/SKILL.md",
+      "contract_file": "takyon/takyon-mobile-app/contract.yaml",
+      "version": "1.1.0",
+      "description": "Build, verify, compliance-check, and release an iOS application for a mobile-app business. Use when real mobile source is missing, starter-shaped, or needs a focused pass, or when a verified build should move through TestFlight or App Store submission. Do not use for web products, shared backend runtime ownership, or archetype selection.",
+      "allowed_modes": [
+        "interactive",
+        "bootstrap"
+      ],
+      "workspace_roots": [
+        "product",
+        "metrics"
+      ],
+      "publication_paths": [
+        "product/surface.md",
+        "product/app"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:ba49dada9256fb985f1148abc0b72325a9f8084a111c4af323d7bdce715677ee",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "product.source.edit",
+        "mobile.store.read",
+        "mobile.store.release"
+      ],
+      "produces": [
+        "product.mobile-app"
+      ],
+      "bound_tools": [
+        "business_list_files",
+        "business_patch_file",
+        "business_publish_mobile_release",
+        "business_read_business",
+        "business_read_file",
+        "business_read_store_status",
+        "business_write_file"
+      ],
+      "publish_files": [
+        "skills/takyon-mobile-app/SKILL.md",
+        "skills/takyon-mobile-app/contract.yaml"
+      ],
+      "source_digest": "sha256:3a0eeba03a3cfc6369be0b984c1f05b10ad67c892beb75a538e9f4d12704c870",
+      "content_digest": "sha256:3a0eeba03a3cfc6369be0b984c1f05b10ad67c892beb75a538e9f4d12704c870"
+    },
+    {
+      "name": "takyon-product",
+      "legacy_names": [],
+      "source_path": "takyon/takyon-product",
+      "plugin_path": "skills/takyon-product",
+      "skill_file": "takyon/takyon-product/SKILL.md",
+      "contract_file": "takyon/takyon-product/contract.yaml",
+      "version": "1.0.0",
+      "description": "Build or improve one business web product, including its public landing surface and real signed-in customer workflow, then verify the build and publication result. Use when the product is missing, starter-shaped, incomplete, or needs a focused iteration. Do not use for market research, channel distribution, or backend-rail invention.",
+      "allowed_modes": [
+        "interactive",
+        "bootstrap"
+      ],
+      "workspace_roots": [
+        "product",
+        "metrics"
+      ],
+      "publication_paths": [
+        "product/surface.md",
+        "product/site"
+      ],
+      "execution_profiles": {
+        "initial_landing": {
+          "effort": "medium",
+          "max_turns": 60,
+          "budget_usd": null,
+          "timeout_ms": 900000
+        },
+        "product_workflow": {
+          "effort": "high",
+          "max_turns": 90,
+          "budget_usd": 25.0,
+          "timeout_ms": 1800000
+        }
+      },
+      "invariants": [
+        "preserve_pinned_vite_scaffold",
+        "preserve_user_plus_entitlements_account_truth",
+        "forbid_has_active_subscription_gate",
+        "forbid_nested_subscription_status_gate",
+        "forbid_ad_hoc_client_account_parsing",
+        "preserve_canonical_route_skeleton",
+        "preserve_no_free_tier_and_no_trial",
+        "preserve_shared_takyon_app_kit",
+        "native_taste_controls_presentation_not_click_graph"
+      ],
+      "verification_floors": [
+        "deterministic_build_and_typecheck_green",
+        "publication_status_published_with_public_url",
+        "changed_action_certified_invoked_and_receipted"
+      ],
+      "routing_preservation_digest": "sha256:59437a81afcd047ff21d3f69b7359ba069a30b32270c7fdff6480a1be0ee9d3f",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "product.source.edit",
+        "product.surface.configure",
+        "product.surface.publish",
+        "product.runtime.verify",
+        "creative.site-image.generate"
+      ],
+      "produces": [
+        "product.surface"
+      ],
+      "bound_tools": [
+        "business_check_runtime_capabilities",
+        "business_generate_site_image",
+        "business_invoke_app_action",
+        "business_list_files",
+        "business_patch_file",
+        "business_read_business",
+        "business_read_file",
+        "business_refresh_product_surface",
+        "business_upsert_app_plan",
+        "business_upsert_app_surface_contract",
+        "business_write_file"
+      ],
+      "publish_files": [
+        "skills/takyon-product/SKILL.md",
+        "skills/takyon-product/contract.yaml"
+      ],
+      "source_digest": "sha256:93589cb3a4e8a17effea71d576db90f24c124593cb6c3e63d954dd9207e1ea87",
+      "content_digest": "sha256:93589cb3a4e8a17effea71d576db90f24c124593cb6c3e63d954dd9207e1ea87"
+    },
+    {
+      "name": "takyon-reddit-ads",
+      "legacy_names": [],
+      "source_path": "takyon/takyon-reddit-ads",
+      "plugin_path": "skills/takyon-reddit-ads",
+      "skill_file": "takyon/takyon-reddit-ads/SKILL.md",
+      "contract_file": "takyon/takyon-reddit-ads/contract.yaml",
+      "version": "1.0.1",
+      "description": "Launch, control, and measure Reddit campaigns from a real promoted post, public creative URL, or existing business media asset. Use when finished creative is ready for Reddit paid distribution, authentication and account discovery is needed, or a live campaign needs operation. Do not use to create media, fabricate URLs, or claim unsupported attribution.",
+      "allowed_modes": [
+        "interactive",
+        "wake"
+      ],
+      "workspace_roots": [
+        "product",
+        "distribution",
+        "metrics"
+      ],
+      "publication_paths": [
+        "product/public-assets/<slug>/receipt.json",
+        "distribution/reddit-ads/<slug>/plan.json",
+        "distribution/reddit-ads/<slug>/receipt.json",
+        "distribution/reddit-ads/<slug>/actions/<idempotency>.json",
+        "metrics/reddit-ads/<slug>/insights.jsonl",
+        "metrics/reddit-ads/<slug>/syncs/<idempotency>.json"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:036afdf20c1d872e0a748078f6af48b27fcced6f8abf4da95387a7c5eb78cdd1",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "reddit.ads.operate"
+      ],
+      "produces": [
+        "distribution.reddit-ads"
+      ],
+      "bound_tools": [
+        "business_list_files",
+        "business_read_business",
+        "business_read_file",
+        "business_reddit_ad_control",
+        "business_reddit_ad_insights_sync",
+        "business_reddit_ad_launch"
+      ],
+      "publish_files": [
+        "skills/takyon-reddit-ads/SKILL.md",
+        "skills/takyon-reddit-ads/contract.yaml",
+        "skills/takyon-reddit-ads/references/reddit-ads-framework.md",
+        "skills/takyon-reddit-ads/templates/plan.json"
+      ],
+      "source_digest": "sha256:2b439e79aacc07cd6c3d6ae74cfd5e2ff70e8cc49f7c34a4775fdc3cdc0bf0e5",
+      "content_digest": "sha256:2b439e79aacc07cd6c3d6ae74cfd5e2ff70e8cc49f7c34a4775fdc3cdc0bf0e5"
+    },
+    {
+      "name": "takyon-static-ad-creative-generator",
+      "legacy_names": [],
+      "source_path": "takyon/static-ad-creative-generator",
+      "plugin_path": "skills/takyon-static-ad-creative-generator",
+      "skill_file": "takyon/static-ad-creative-generator/SKILL.md",
+      "contract_file": "takyon/static-ad-creative-generator/contract.yaml",
+      "version": "1.2.0",
+      "description": "Design and generate business-scoped static performance-ad image variants from a factual brief. Use when Meta, Instagram, Facebook, or Reddit needs reviewable image-ad angles, specs, prompts, and real renders. Do not use for logos, generic art, video, long-form copy, or live ad-account operation and measurement.",
+      "allowed_modes": [
+        "interactive",
+        "wake"
+      ],
+      "workspace_roots": [
+        "product"
+      ],
+      "publication_paths": [
+        "product/static-ads/<slug>",
+        "product/static-ads/<slug>/manifest.json"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:879f7165d370b340e4e635c2aa6751cb63cfa3c2a624a2d0a304f712c6dc0101",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "creative.static-ad.generate"
+      ],
+      "produces": [
+        "creative.static-ads"
+      ],
+      "bound_tools": [
+        "business_list_files",
+        "business_read_business",
+        "business_read_file",
+        "business_static_ad_generate"
+      ],
+      "publish_files": [
+        "skills/takyon-static-ad-creative-generator/SKILL.md",
+        "skills/takyon-static-ad-creative-generator/contract.yaml",
+        "skills/takyon-static-ad-creative-generator/references/angle-taxonomy.md",
+        "skills/takyon-static-ad-creative-generator/references/hook-strategy.md",
+        "skills/takyon-static-ad-creative-generator/references/platform-specs.md",
+        "skills/takyon-static-ad-creative-generator/references/policy-checks.md",
+        "skills/takyon-static-ad-creative-generator/references/prompt-compiler-rules.md",
+        "skills/takyon-static-ad-creative-generator/references/qa-rubric.md",
+        "skills/takyon-static-ad-creative-generator/references/visual-templates.md",
+        "skills/takyon-static-ad-creative-generator/templates/ad-spec.schema.json",
+        "skills/takyon-static-ad-creative-generator/templates/ad-spec.template.json",
+        "skills/takyon-static-ad-creative-generator/templates/creative-brief.template.md"
+      ],
+      "source_digest": "sha256:1e48d4e5e1e3efb1f4e56d531f56911701e7b11197d3bb55e84511465eab4a0e",
+      "content_digest": "sha256:26a6f434861ffaa706eab716225df4d218c72650839bc889bec8ddbd373294fd"
+    },
+    {
+      "name": "takyon-x",
+      "legacy_names": [],
+      "source_path": "takyon/takyon-x",
+      "plugin_path": "skills/takyon-x",
+      "skill_file": "takyon/takyon-x/SKILL.md",
+      "contract_file": "takyon/takyon-x/contract.yaml",
+      "version": "2.1.0",
+      "description": "Draft, publish, review, and continue authentic X posts, replies, threads, and durable voice for one business. Use when distribution work is specifically X-shaped, including a wake or campaign turn, or X conversation handling is required. Do not use for broad cross-channel coordination or for pretending an external post succeeded without authoritative evidence.",
+      "allowed_modes": [
+        "interactive",
+        "wake"
+      ],
+      "workspace_roots": [
+        "distribution",
+        "metrics",
+        "research"
+      ],
+      "publication_paths": [
+        "distribution/voice/x.md",
+        "distribution/campaign",
+        "distribution/local-published",
+        "metrics/conversations"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:6f6bb67b5ad75fd0135fe4556647e599eb601d2e963c90b81b29a9dd25df6027",
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "business.files.write",
+        "metrics.business.read",
+        "x.channel.operate",
+        "conversation.read",
+        "conversation.manage"
+      ],
+      "produces": [
+        "distribution.x"
+      ],
+      "bound_tools": [
+        "business_calculate_pulse",
+        "business_list_conversation_messages",
+        "business_list_files",
+        "business_patch_file",
+        "business_read_app_analytics",
+        "business_read_business",
+        "business_read_conversation_thread",
+        "business_read_file",
+        "business_record_conversation_message",
+        "business_update_conversation_message_status",
+        "business_write_file",
+        "business_x_publish_outreach",
+        "business_x_search"
+      ],
+      "publish_files": [
+        "skills/takyon-x/SKILL.md",
+        "skills/takyon-x/contract.yaml",
+        "skills/takyon-x/references/ai-tells.md",
+        "skills/takyon-x/references/hook-library.md",
+        "skills/takyon-x/references/refinement-protocol.md",
+        "skills/takyon-x/references/voice-and-edge.md",
+        "skills/takyon-x/references/x-playbook.md",
+        "skills/takyon-x/templates/x-post.md",
+        "skills/takyon-x/templates/x-reply.md"
+      ],
+      "source_digest": "sha256:69ca5cfacbaecc939826341fad54b1f134fb7b258cfa7bff32ff530440e5cc58",
+      "content_digest": "sha256:69ca5cfacbaecc939826341fad54b1f134fb7b258cfa7bff32ff530440e5cc58"
+    },
+    {
+      "name": "taste-imagegen-web",
+      "legacy_names": [],
+      "source_path": "creative/taste-imagegen-web",
+      "plugin_path": "skills/taste-imagegen-web",
+      "skill_file": "creative/taste-imagegen-web/SKILL.md",
+      "contract_file": "creative/taste-imagegen-web/contract.yaml",
+      "version": "1.0.0",
+      "description": "Art-direct generated imagery and visual references for a web surface from its business and design brief. Use when an interface genuinely needs page-role-specific original imagery. Do not use for generic filler, direct provider calls, logos, ad creative, or image generation unrelated to a web surface.",
+      "allowed_modes": [
+        "interactive",
+        "bootstrap"
+      ],
+      "workspace_roots": [
+        "product"
+      ],
+      "publication_paths": [
+        "product/site/public/generated"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": null,
+      "requires": [
+        "business.state.read",
+        "business.files.read",
+        "creative.site-image.generate"
+      ],
+      "produces": [
+        "design.web-images"
+      ],
+      "bound_tools": [
+        "business_generate_site_image",
+        "business_list_files",
+        "business_read_business",
+        "business_read_file"
+      ],
+      "publish_files": [
+        "skills/taste-imagegen-web/LICENSE",
+        "skills/taste-imagegen-web/SKILL.md",
+        "skills/taste-imagegen-web/contract.yaml"
+      ],
+      "source_digest": "sha256:5942812f773cb5f2486f7dc88801e57a0c0f49b2c4e24d3034297b73d707eb8b",
+      "content_digest": "sha256:5942812f773cb5f2486f7dc88801e57a0c0f49b2c4e24d3034297b73d707eb8b"
+    },
+    {
+      "name": "ugc-video-ad",
+      "legacy_names": [],
+      "source_path": "takyon/ugc-video-ad",
+      "plugin_path": "skills/ugc-video-ad",
+      "skill_file": "takyon/ugc-video-ad/SKILL.md",
+      "contract_file": "takyon/ugc-video-ad/contract.yaml",
+      "version": "1.0.0",
+      "description": "Create a short business-scoped vertical talking-head UGC video ad with coordinated dialogue, action, reference imagery, continuity, and finishing. Use when a business needs a real social video advertisement. Do not use for screen recordings, product demos, multi-actor videos, non-business media, or fabricated completion.",
+      "allowed_modes": [
+        "interactive",
+        "wake"
+      ],
+      "workspace_roots": [
+        "product"
+      ],
+      "publication_paths": [
+        "product/ugc-ads/<slug>/ad.mp4",
+        "product/ugc-ads/<slug>/script.json",
+        "product/ugc-ads/<slug>/reference.png"
+      ],
+      "execution_profiles": {},
+      "invariants": [],
+      "verification_floors": [],
+      "routing_preservation_digest": "sha256:fe187dba8c0849cf78129d3f8c07ab85bfd40062ed31c69a7bbd98dfab9abf30",
+      "requires": [
+        "business.state.read",
+        "creative.ugc-video.generate"
+      ],
+      "produces": [
+        "creative.ugc-video"
+      ],
+      "bound_tools": [
+        "business_read_business",
+        "business_ugc_ad_generate",
+        "business_ugc_ad_write"
+      ],
+      "publish_files": [
+        "skills/ugc-video-ad/SKILL.md",
+        "skills/ugc-video-ad/assets/example-brief.json",
+        "skills/ugc-video-ad/contract.yaml",
+        "skills/ugc-video-ad/references/dialogue-action-framework.md",
+        "skills/ugc-video-ad/references/editing-and-stitching.md",
+        "skills/ugc-video-ad/references/realism-framework.md",
+        "skills/ugc-video-ad/templates/brief.json",
+        "skills/ugc-video-ad/templates/script.json"
+      ],
+      "source_digest": "sha256:3a854c99035110c3a417ae2ec6296961acef6f036b2c0e4beeb97b6d5e88f700",
+      "content_digest": "sha256:8a2a92178b82b230faa0186bbc4185208eff200894ee59c5e1bbd5e6904e84fc"
+    }
+  ]
+}

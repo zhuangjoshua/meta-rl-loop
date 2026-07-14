@@ -27,7 +27,35 @@ takyon_stage_runtime_release() {
   local target_host="$2"
   local target_key="$3"
   local revision="$4"
+  local release_profile="${5:-full}"
   local ssh_command=(ssh -i "$target_key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
+  # Keep the array non-empty: production deploys run under macOS Bash 3.2 with `set -u`, where
+  # expanding an empty array is an unbound-variable error.
+  local profile_rsync_filters=(--exclude '/.takyon-release-profile-noop')
+
+  case "$release_profile" in
+    full) ;;
+    subuser)
+      # The product-serving plane receives the shared backend runtime, never the operator-agent
+      # implementation or its approved skill material. These paths are absent from the staged tree,
+      # so activation's --delete also removes any legacy live copies.
+      profile_rsync_filters+=(
+        --exclude '/.claude/'
+        --exclude '/skills/'
+        --exclude '/plugins/takyon/bootstrap_phases.py'
+        --exclude '/plugins/takyon/claude_sdk_runtime.py'
+        --exclude '/plugins/takyon/claude_sdk_sessions.py'
+        --exclude '/scripts/build_approved_skills_manifest.py'
+        --exclude '/scripts/takyon-claude-agent-task.mjs'
+        --exclude '/scripts/takyon-claude-primary-entrypoint.mjs'
+        --exclude '/scripts/takyon-claude-primary-runtime.mjs'
+      )
+      ;;
+    *)
+      echo "unsupported runtime release profile: $release_profile" >&2
+      return 1
+      ;;
+  esac
 
   "${ssh_command[@]}" "$target_host" \
     "set -euo pipefail
@@ -48,6 +76,7 @@ takyon_stage_runtime_release() {
     --exclude 'node_modules/' \
     --exclude 'web/node_modules/' \
     --exclude '/.venv' \
+    "${profile_rsync_filters[@]}" \
     -e "ssh -i $target_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
     "$artifact_runtime/" \
     "$target_host:$TAKYON_REMOTE_STAGED_RUNTIME/"

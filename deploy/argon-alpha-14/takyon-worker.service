@@ -39,6 +39,7 @@ BindPaths=/run/user/995
 ProtectSystem=strict
 ReadWritePaths=/opt/takyon
 ReadOnlyPaths=/opt/takyon/hermes-agent-main
+ReadOnlyPaths=/opt/takyon/.takyon/runtime/claude-agent-sdk
 WorkingDirectory=/opt/takyon/hermes-agent-main
 EnvironmentFile=-/opt/takyon/.takyon/.env
 EnvironmentFile=-/opt/takyon/secrets/.env
@@ -52,17 +53,23 @@ UnsetEnvironment=TAKYON_CAP_SIGNING_KEY
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
-# Same strict role split as the dashboard: CEO/wake turns use OpenAI; coding workers and their
-# internal SDK subagents use DeepSeek. Core refuses any per-call model that conflicts with this pin.
+# The primary operator agent is one Claude Agent SDK session pinned to DeepSeek through Safebox.
 Environment=TAKYON_STRICT_MODEL_ROLES=1
-Environment=TAKYON_MODEL=gpt-5.5
+Environment=TAKYON_MODEL=deepseek-v4-pro
 Environment=TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro
 Environment=ANTHROPIC_MODEL=deepseek-v4-pro
 Environment=ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro
 Environment=ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro
 Environment=ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro
 Environment=CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro
-Environment=TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1
+Environment=TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD=5
+Environment=TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD=2
+Environment=TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD=2000000
+Environment=TAKYON_CLAUDE_SKILLS_PLUGIN=/opt/takyon/.takyon/runtime/claude-agent-sdk/current/plugin
+Environment=TAKYON_CLAUDE_SKILLS_MANIFEST=/opt/takyon/.takyon/runtime/claude-agent-sdk/current/plugin/approved-skills.json
+Environment=TAKYON_CLAUDE_NODE_RUNTIME=/opt/takyon/.takyon/runtime/claude-agent-sdk/current/node-runtime
+Environment=TAKYON_DISABLE_LEGACY_SKILL_SYNC=1
+Environment=TAKYON_WORKER_AGENT_RUNTIME=claude-agent-sdk
 Environment=TAKYON_HOST_ROLE=operator
 Environment=TAKYON_ENV=prod
 Environment=TAKYON_STRIPE_MODE=live

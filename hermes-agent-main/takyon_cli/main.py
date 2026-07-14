@@ -1531,11 +1531,12 @@ def cmd_chat(args):
     except Exception:
         pass
 
-    # Sync bundled skills on every CLI launch (fast -- skips unchanged skills)
+    # Seed mutable legacy skills only for explicit non-SDK/local compatibility.
     try:
-        from tools.skills_sync import sync_skills
+        from tools.skills_sync import should_sync_legacy_skills, sync_skills
 
-        sync_skills(quiet=True)
+        if should_sync_legacy_skills():
+            sync_skills(quiet=True)
     except Exception:
         pass
 

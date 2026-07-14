@@ -33,6 +33,7 @@ enabled). Activation is a separate, operator-gated step.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -44,7 +45,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from . import app_usage, billing, composio_distribution, jobs, wakes
 from .jobs import Job, JobOutcome, JobRunResult
@@ -60,6 +61,7 @@ _DEFAULT_MAX_TURNS = 30
 # actively calling tools / streaming, but a hung API call or stuck tool with NO activity for this
 # many seconds is interrupted and the job fails (then retries / requeues). 0 disables the guard.
 _DEFAULT_TURN_TIMEOUT = 600.0
+_DEFAULT_WAKE_WALL_TIMEOUT = 1800.0
 # Idle headroom for the mobile_app bootstrap marathon (see ceo_bootstrap_handler): app build +
 # store-signed publish push a single turn well past the web default without being stuck.
 _MOBILE_BOOTSTRAP_TURN_TIMEOUT = 1800.0
@@ -82,13 +84,22 @@ _STALE_SECONDS = 900
 # absorbed inside the SAME CEO turn instead of burning the whole bootstrap job's only retry and
 # failing the business after a few seconds of bad luck.
 _BOOTSTRAP_API_RETRY_FLOOR = 6
-# A publish/completeness gate is normal product feedback, not an instruction to fail the durable job
-# and remount a new workspace. Keep bounded continuations inside the same job/workspace so the CEO
-# repairs existing work without rebranding or rebuilding from scratch.
-_BOOTSTRAP_MAX_SAME_JOB_TURNS = 3
 # Release product-AI usage holds whose provider call crashed before settle/release.
 _APP_USAGE_HOLD_TTL_SECONDS = 3600
 _X_POST_CHAR_LIMIT = 280
+_SDK_SESSION_RETENTION_SWEEP_INTERVAL_SECONDS = 300.0
+_SDK_SESSION_RETENTION_SWEEP_LOCK = threading.Lock()
+_SDK_SESSION_RETENTION_NEXT_SWEEP_AT = 0.0
+
+_LAST_SDK_TURN_RECEIPT: contextvars.ContextVar[dict[str, Any] | None] = (
+    contextvars.ContextVar("takyon_last_sdk_turn_receipt", default=None)
+)
+
+
+def _consume_sdk_turn_receipt() -> dict[str, Any] | None:
+    receipt = _LAST_SDK_TURN_RECEIPT.get()
+    _LAST_SDK_TURN_RECEIPT.set(None)
+    return dict(receipt) if isinstance(receipt, Mapping) else None
 
 
 def _utc_now_iso() -> str:
@@ -1000,6 +1011,7 @@ class _RuntimeProgress:
                 "summary": summary,
             },
         )
+        self._touch_activity()
 
     def emit(self, line: str) -> None:
         text = str(line or "").strip()
@@ -1015,6 +1027,7 @@ class _RuntimeProgress:
             line=text,
             command=self.command,
         )
+        self._touch_activity()
 
     def stream_delta(self, delta: Any) -> None:
         if delta is None:
@@ -1206,7 +1219,59 @@ def _ceo_turn_bound_reason(
     return ""
 
 
-def _run_ceo_turn(
+_WORKER_AGENT_RUNTIME_ENV = "TAKYON_WORKER_AGENT_RUNTIME"
+_WORKER_AGENT_RUNTIME_HERMES = "hermes"
+_WORKER_AGENT_RUNTIME_SDK = "claude-agent-sdk"
+
+
+def _selected_worker_agent_runtime() -> str:
+    """Return the explicit canary runtime; never fall back after an SDK error."""
+
+    selected = str(
+        os.getenv(_WORKER_AGENT_RUNTIME_ENV) or _WORKER_AGENT_RUNTIME_HERMES
+    ).strip().lower()
+    if selected not in {
+        _WORKER_AGENT_RUNTIME_HERMES,
+        _WORKER_AGENT_RUNTIME_SDK,
+    }:
+        raise RuntimeError(
+            f"unsupported {_WORKER_AGENT_RUNTIME_ENV}={selected!r}; expected "
+            f"{_WORKER_AGENT_RUNTIME_HERMES!r} or {_WORKER_AGENT_RUNTIME_SDK!r}"
+        )
+    return selected
+
+
+def _job_billing_mode(job: Job, handler: jobs.Handler) -> str:
+    """Bind queue billing to the selected handler runtime before any hold."""
+
+    if handler in {ceo_bootstrap_handler, ceo_wake_handler}:
+        if _selected_worker_agent_runtime() == _WORKER_AGENT_RUNTIME_SDK:
+            return jobs.BILLING_MODE_PROVIDER_BROKER
+    return jobs.BILLING_MODE_JOB_RESERVATION
+
+
+def _sdk_turn_budget_usd(
+    *, turn_config: Mapping[str, Any], payload: Mapping[str, Any]
+) -> float:
+    """Resolve an explicit high-level turn budget; there is no SDK default."""
+
+    raw = (
+        turn_config.get("max_budget_usd")
+        or payload.get("max_budget_usd")
+        or os.getenv("TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD")
+    )
+    try:
+        value = float(raw or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value <= 0:
+        raise RuntimeError(
+            "primary SDK turn requires explicit max_budget_usd in its turn policy"
+        )
+    return value
+
+
+def _run_hermes_ceo_turn(
     *,
     slug: str,
     system_prompt: str,
@@ -1222,6 +1287,7 @@ def _run_ceo_turn(
     hard_stop_callback: Callable[[str], None] | None = None,
     api_retry_floor: int = 0,
     progress: _RuntimeProgress | None = None,
+    record_final_chat: bool = True,
 ) -> tuple[str, float, str, bool]:
     """Run ONE CEO wake turn for ``business:<slug>`` and return ``(final_response, cost_usd,
     cost_status, turn_completed)``.
@@ -1330,7 +1396,9 @@ def _run_ceo_turn(
     # context, so this cannot affect a future Hermes turn. The final no-tool-call
     # response is still recorded once more after the turn returns (deduped).
     agent.interim_assistant_callback = (
-        lambda text, already_streamed=False: _record_ceo_turn_chat(slug, text)
+        (lambda text, already_streamed=False: _record_ceo_turn_chat(slug, text))
+        if record_final_chat
+        else None
     )
 
     # Run on a worker thread and watch the agent's own activity tracker, so a hung turn is caught
@@ -1424,7 +1492,11 @@ def _run_ceo_turn(
     with worker_activity_binding, registered_tool_context_binding:
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         ctx = contextvars.copy_context()
-        run_kwargs = {"stream_callback": progress.stream_delta} if progress is not None else {}
+        run_kwargs = (
+            {"stream_callback": progress.stream_delta}
+            if progress is not None and record_final_chat
+            else {}
+        )
         future = pool.submit(ctx.run, agent.run_conversation, user_prompt, **run_kwargs)
         timed_out = False
         ownership_lost_reason = ""
@@ -1627,7 +1699,8 @@ def _run_ceo_turn(
 
     if bounded_stop_reason:
         final_response = f"Launch work stopped at its bounded runtime: {bounded_stop_reason}."
-        _record_ceo_turn_chat(slug, final_response)
+        if record_final_chat:
+            _record_ceo_turn_chat(slug, final_response)
         cost_usd = float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
         cost_status = str(getattr(agent, "session_cost_status", "unknown") or "unknown")
         _emit_turn_event(
@@ -1663,7 +1736,8 @@ def _run_ceo_turn(
     # The chat IS the turn: record this wake/bootstrap turn's own reply as one chat
     # bubble (business.ceo_turn). Display-only mirror of final_response — never feeds
     # back into the agent's context.
-    _record_ceo_turn_chat(slug, final_response)
+    if record_final_chat:
+        _record_ceo_turn_chat(slug, final_response)
     cost_usd = float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
     cost_status = str(getattr(agent, "session_cost_status", "unknown") or "unknown")
     # turn_completed is False when the loop hit the iteration cap (a clean finish under the cap
@@ -1672,6 +1746,396 @@ def _run_ceo_turn(
     turn_completed = bool(result.get("completed"))
     _emit_turn_event("ok", completed=turn_completed, response_head=final_response)
     return final_response, cost_usd, cost_status, turn_completed
+
+
+def _run_claude_sdk_ceo_turn(
+    *,
+    slug: str,
+    system_prompt: str,
+    user_prompt: str,
+    toolsets: list[str],
+    max_turns: int,
+    max_budget_usd: float,
+    effort: str,
+    inactivity_limit: float,
+    sdk_session_id: str,
+    sdk_resume_session: bool,
+    sdk_epoch: str,
+    wall_clock_limit: float = 0.0,
+    completion_probe: Callable[[], bool] | None = None,
+    completion_grace_seconds: float = 0.0,
+    external_activity_probe: Callable[[], bool] | None = None,
+    terminal_review_probe: Callable[[], bool] | None = None,
+    hard_stop_callback: Callable[[str], None] | None = None,
+    progress: _RuntimeProgress | None = None,
+    sdk_allowed_tools: frozenset[str] | None = None,
+    sdk_tool_receipt_callback: Callable[[str, Mapping[str, Any], str], None] | None = None,
+    record_final_chat: bool = True,
+) -> tuple[str, float, str, bool]:
+    """Run one SDK turn with the same Python-owned orchestration gates."""
+
+    from gateway.session_context import get_session_env
+
+    from . import cost_events
+    from .claude_sdk_runtime import (
+        ClaudeSdkProcessStopped,
+        run_primary_sdk_subprocess,
+        stable_sdk_session_id,
+    )
+    from .claude_sdk_sessions import PostgresClaudeSdkSessionStore
+    from .core import _active_operator_task_receipt_context
+
+    owner_user_id = _business_owner_user_id(slug)
+    stable_session = stable_sdk_session_id(sdk_session_id)
+    workspace_root = str(
+        get_session_env("TAKYON_SESSION_WORKSPACE_ROOT", "") or ""
+    ).strip()
+    if not workspace_root:
+        raise RuntimeError(
+            "primary SDK CEO turn requires the bound business workspace"
+        )
+    task_context = _active_operator_task_receipt_context() or {}
+    task_kind = str(task_context.get("task_kind") or "ceo_wake").strip().lower()
+    try:
+        invocation_mode = {
+            "ceo_bootstrap": "bootstrap",
+            "ceo_wake": "wake",
+        }[task_kind]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"primary SDK CEO turn has unsupported task kind {task_kind!r}"
+        ) from exc
+    task_id = str(task_context.get("run_id") or sdk_session_id or "").strip()
+    session_store = PostgresClaudeSdkSessionStore(
+        operator_user_id=owner_user_id,
+        business_slug=slug,
+    )
+    started_at = time.time()
+    started_monotonic = time.monotonic()
+    completion_observed_at: float | None = None
+    next_completion_probe_at = started_monotonic
+    bounded_stop_reason = ""
+    _LAST_SDK_TURN_RECEIPT.set(None)
+
+    def active_work() -> bool:
+        active_tool_probe = getattr(progress, "has_active_tool", None)
+        if callable(active_tool_probe) and bool(active_tool_probe()):
+            return True
+        if callable(external_activity_probe):
+            return bool(external_activity_probe())
+        return False
+
+    def stop_probe(_elapsed: float, _idle: float) -> str | None:
+        nonlocal completion_observed_at, next_completion_probe_at
+        active_claim = jobs.current_job_claim()
+        if active_claim is not None and active_claim.lost:
+            return f"claim_lost:{active_claim.reason}"
+        if callable(terminal_review_probe):
+            try:
+                if bool(terminal_review_probe()):
+                    return "durable bootstrap blocker requires human review"
+            except Exception as exc:
+                return f"human-review proof read unavailable: {exc}"
+        now = time.monotonic()
+        if callable(completion_probe) and now >= next_completion_probe_at:
+            next_completion_probe_at = now + _BOOTSTRAP_COMPLETION_PROBE_INTERVAL
+            try:
+                if bool(completion_probe()) and completion_observed_at is None:
+                    completion_observed_at = now
+            except Exception:
+                pass
+        external_work = active_work()
+        if external_work and completion_observed_at is not None:
+            completion_observed_at = now
+        reason = _ceo_turn_bound_reason(
+            now=now,
+            started_at=started_monotonic,
+            wall_clock_limit=wall_clock_limit,
+            completion_observed_at=completion_observed_at,
+            completion_grace_seconds=completion_grace_seconds,
+            active_external_work=external_work,
+        )
+        if reason and reason.startswith("reached ") and callable(hard_stop_callback):
+            try:
+                hard_stop_callback(reason)
+            except Exception as exc:
+                _log.warning(
+                    "worker: SDK bootstrap hard-stop request failed for business:%s; "
+                    "pinning the parent claim: %s",
+                    slug,
+                    exc,
+                )
+                return None
+        return reason or None
+
+    def on_progress(event: Mapping[str, Any]) -> None:
+        if progress is None:
+            return
+        kind = str(event.get("kind") or "runtime").strip()
+        status = str(event.get("status") or "running").strip()
+        detail = _normalize_worker_progress_text(event.get("detail"), limit=4000)
+        trace = event.get("trace") if isinstance(event.get("trace"), Mapping) else {}
+        if kind == "assistant" and status == "output":
+            # Match the prior Hermes live-chat contract: each completed
+            # tool-continuing assistant message is visible immediately, while a
+            # phase-internal final summary stays private when record_final_chat
+            # is disabled. Wake/interactive turns expose their final response;
+            # the post-turn write below deduplicates that same last message.
+            message_role = str(trace.get("message_role") or "").strip()
+            if detail and (record_final_chat or message_role == "interim"):
+                _record_ceo_turn_chat(slug, detail)
+            return
+        if kind == "tool":
+            # Parent bridge callbacks produce the canonical scoped tool trace.
+            return
+        if kind == "skill":
+            skill_name = str(trace.get("skill_name") or "").strip()
+            entry_key = str(trace.get("entry_key") or f"skill:{skill_name}").strip()
+            progress._record_trace(
+                entry_kind="skill",
+                entry_key=entry_key,
+                label=skill_name or "Skill",
+                detail=detail or f"{skill_name or 'Skill'} {status}.",
+                status=("running" if status == "started" else status),
+                tool_name="Skill",
+                skill_name=skill_name,
+                summary=detail if status in {"completed", "failed"} else "",
+            )
+            return
+        if detail and kind in {"session", "provider", "turn"}:
+            progress.emit(f"{kind} -> {detail}")
+
+    def tool_completed(
+        _tool_use_id: str,
+        name: str,
+        args: Mapping[str, Any],
+        result: str,
+    ) -> None:
+        if progress is not None:
+            progress.tool_completed(_tool_use_id, name, args, result)
+        if callable(sdk_tool_receipt_callback):
+            sdk_tool_receipt_callback(name, args, result)
+
+    disabled_toolsets = [
+        "cronjob",
+        "messaging",
+        "clarify",
+        "memory",
+        "session_search",
+        "terminal",
+        "file",
+        "browser",
+        "code_execution",
+    ]
+    registered_tool_context_binding = nullcontext()
+    if task_context:
+        import sys
+
+        registered_core = sys.modules.get("takyon_plugins.takyon.core")
+        registered_binder = getattr(
+            registered_core, "_bound_operator_task_context", None
+        )
+        if callable(registered_binder):
+            registered_tool_context_binding = registered_binder(**task_context)
+    try:
+        with registered_tool_context_binding:
+            result = run_primary_sdk_subprocess(
+                business=slug,
+                operator_user_id=owner_user_id,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                # HANDOFF's reviewed runtime baseline includes the bounded
+                # todo tool in every mode. Bootstrap's legacy Hermes config did
+                # not list that toolset, so add it before the exact policy
+                # filter; the compiled allowlist still prevents any widening.
+                enabled_toolsets=list(dict.fromkeys([*toolsets, "todo"])),
+                disabled_toolsets=disabled_toolsets,
+                invocation_allowed_tools=sdk_allowed_tools,
+                workspace_root=workspace_root,
+                session_id=stable_session,
+                resume_session=sdk_resume_session,
+                session_store=session_store,
+                task_id=task_id,
+                mode=invocation_mode,
+                epoch=str(sdk_epoch or task_context.get("task_kind") or "ceo_wake"),
+                max_turns=max_turns,
+                max_budget_usd=max_budget_usd,
+                effort=effort,
+                inactivity_limit=inactivity_limit,
+                stop_probe=stop_probe,
+                active_work_probe=active_work,
+                progress_callback=on_progress,
+                on_tool_start=(progress.tool_started if progress is not None else None),
+                on_tool_complete=tool_completed,
+            )
+    except ClaudeSdkProcessStopped as exc:
+        if exc.reason.startswith("claim_lost:"):
+            raise jobs.JobClaimLost(
+                f"CEO turn for business:{slug} lost its exact worker claim: "
+                f"{exc.reason.split(':', 1)[1]}"
+            ) from exc
+        if exc.inactivity_timeout:
+            raise TimeoutError(
+                f"CEO wake for business:{slug} idle past "
+                f"{int(inactivity_limit)}s inactivity limit"
+            ) from exc
+        bounded_stop_reason = exc.reason
+        _LAST_SDK_TURN_RECEIPT.set(
+            {
+                "session_id": stable_session,
+                "resumed": bool(sdk_resume_session),
+                "mode": str(task_context.get("task_kind") or "ceo_turn"),
+                "epoch": str(sdk_epoch or task_context.get("task_kind") or "ceo_turn"),
+                "status": "stopped",
+                "stop_reason": bounded_stop_reason,
+            }
+        )
+        final_response = (
+            f"Launch work stopped at its bounded runtime: {bounded_stop_reason}."
+        )
+        if record_final_chat:
+            _record_ceo_turn_chat(slug, final_response)
+        return final_response, 0.0, "unknown", False
+
+    final_response = str(result.get("summary") or "").strip()
+    if not final_response:
+        raise RuntimeError(
+            f"primary SDK returned no final response for business:{slug}"
+        )
+    if record_final_chat:
+        _record_ceo_turn_chat(slug, final_response)
+    raw_cost = result.get("total_cost_usd")
+    cost_usd = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
+    cost_status = "actual" if isinstance(raw_cost, (int, float)) else "unknown"
+    usage = result.get("usage") if isinstance(result.get("usage"), Mapping) else {}
+    _LAST_SDK_TURN_RECEIPT.set(
+        {
+            "session_id": stable_session,
+            "resumed": bool(sdk_resume_session),
+            "mode": str(task_context.get("task_kind") or "ceo_turn"),
+            "epoch": str(sdk_epoch or task_context.get("task_kind") or "ceo_turn"),
+            "status": "completed",
+            "model": str(result.get("model") or ""),
+            "actual_models": list(result.get("actual_models") or []),
+            "usage": dict(usage),
+            "total_cost_usd": cost_usd,
+            "skill_receipt": result.get("skill_receipt"),
+            "invocation_id": str(result.get("invocation_id") or ""),
+            "invocation_total_ceiling_microusd": int(
+                result.get("invocation_total_ceiling_microusd") or 0
+            ),
+            "invocation_per_call_ceiling_microusd": int(
+                result.get("invocation_per_call_ceiling_microusd") or 0
+            ),
+        }
+    )
+    try:
+        cost_events.record_operator_event_autoconn(
+            event_kind=cost_events.KIND_TURN,
+            business_slug=slug,
+            user_id=owner_user_id,
+            job_id=task_id or None,
+            run_id=task_id or None,
+            session_id=stable_session,
+            task_kind=str(task_context.get("task_kind") or "ceo_turn"),
+            name=str(task_context.get("task_kind") or "ceo_turn"),
+            status="ok",
+            provider="safebox",
+            model=str(result.get("model") or "") or None,
+            input_tokens=int(usage.get("input_tokens") or 0),
+            output_tokens=int(usage.get("output_tokens") or 0),
+            cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
+            cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+            cost_microusd=int(round(cost_usd * 1_000_000)),
+            cost_status=cost_status,
+            duration_ms=int((time.time() - started_at) * 1000),
+            payload={
+                "turn_completed": True,
+                "billing_mode": jobs.BILLING_MODE_PROVIDER_BROKER,
+                "skill_receipt": result.get("skill_receipt"),
+                "response_head": final_response[:500],
+            },
+        )
+    except Exception:
+        pass
+    return final_response, cost_usd, cost_status, True
+
+
+def _run_ceo_turn(
+    *,
+    slug: str,
+    system_prompt: str,
+    user_prompt: str,
+    toolsets: list[str],
+    max_turns: int,
+    inactivity_limit: float,
+    wall_clock_limit: float = 0.0,
+    completion_probe: Callable[[], bool] | None = None,
+    completion_grace_seconds: float = 0.0,
+    external_activity_probe: Callable[[], bool] | None = None,
+    terminal_review_probe: Callable[[], bool] | None = None,
+    hard_stop_callback: Callable[[str], None] | None = None,
+    api_retry_floor: int = 0,
+    progress: _RuntimeProgress | None = None,
+    agent_runtime: str = _WORKER_AGENT_RUNTIME_HERMES,
+    sdk_session_id: str = "",
+    sdk_resume_session: bool = False,
+    sdk_max_budget_usd: float = 0.0,
+    sdk_effort: str = "high",
+    sdk_epoch: str = "",
+    sdk_allowed_tools: frozenset[str] | None = None,
+    sdk_tool_receipt_callback: Callable[[str, Mapping[str, Any], str], None] | None = None,
+    record_final_chat: bool = True,
+) -> tuple[str, float, str, bool]:
+    selected = str(agent_runtime or "").strip().lower()
+    if selected == _WORKER_AGENT_RUNTIME_HERMES:
+        _LAST_SDK_TURN_RECEIPT.set(None)
+        return _run_hermes_ceo_turn(
+            slug=slug,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            toolsets=toolsets,
+            max_turns=max_turns,
+            inactivity_limit=inactivity_limit,
+            wall_clock_limit=wall_clock_limit,
+            completion_probe=completion_probe,
+            completion_grace_seconds=completion_grace_seconds,
+            external_activity_probe=external_activity_probe,
+            terminal_review_probe=terminal_review_probe,
+            hard_stop_callback=hard_stop_callback,
+            api_retry_floor=api_retry_floor,
+            progress=progress,
+            record_final_chat=record_final_chat,
+        )
+    if selected != _WORKER_AGENT_RUNTIME_SDK:
+        raise RuntimeError(f"unsupported CEO agent runtime {selected!r}")
+    if not sdk_session_id:
+        raise RuntimeError("primary SDK CEO turn requires a stable session ID")
+    if sdk_max_budget_usd <= 0:
+        raise RuntimeError("primary SDK CEO turn requires an explicit budget")
+    return _run_claude_sdk_ceo_turn(
+        slug=slug,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        toolsets=toolsets,
+        max_turns=max_turns,
+        max_budget_usd=sdk_max_budget_usd,
+        effort=sdk_effort,
+        inactivity_limit=inactivity_limit,
+        sdk_session_id=sdk_session_id,
+        sdk_resume_session=sdk_resume_session,
+        sdk_epoch=sdk_epoch,
+        sdk_allowed_tools=sdk_allowed_tools,
+        sdk_tool_receipt_callback=sdk_tool_receipt_callback,
+        record_final_chat=record_final_chat,
+        wall_clock_limit=wall_clock_limit,
+        completion_probe=completion_probe,
+        completion_grace_seconds=completion_grace_seconds,
+        external_activity_probe=external_activity_probe,
+        terminal_review_probe=terminal_review_probe,
+        hard_stop_callback=hard_stop_callback,
+        progress=progress,
+    )
 
 
 def _business_owner_user_id(slug: str) -> str:
@@ -1826,6 +2290,354 @@ def _bootstrap_has_durable_live_product(
     if workflow_requested and not _bootstrap_real_http_actions(store, slug):
         return False
     return True
+
+
+def _bootstrap_phase_authoritative_evidence(
+    store: Any,
+    run: Any,
+    phase: str,
+    *,
+    workflow_requested: bool,
+    archetype: str,
+) -> Any | None:
+    """Validate one phase from durable runtime truth; assistant prose is ignored."""
+
+    from .bootstrap_phases import AuthoritativePhaseEvidence, PHASE_REQUIRED_SKILLS
+
+    slug = str(run.business_slug)
+    owner = str(run.owner_user_id)
+    receipts = list(run.phase_receipts.get(phase) or [])
+    if phase == "preflight":
+        with store._connect() as conn:
+            business = store._ensure_business(conn, slug)
+        if str((business or {}).get("owner_user_id") or "") != owner:
+            raise RuntimeError("bootstrap preflight business ownership changed")
+        return AuthoritativePhaseEvidence(
+            "business-row", {"business_slug": slug, "owner_user_id": owner}
+        )
+
+    required_skills = PHASE_REQUIRED_SKILLS.get(phase, frozenset())
+    if phase == "mobile" and str(archetype or "").strip().lower() != "mobile_app":
+        required_skills = frozenset()
+    invoked_skills: set[str] = set()
+    for receipt in receipts:
+        if (
+            not isinstance(receipt, Mapping)
+            or receipt.get("tool") != "__primary_agent_runtime__"
+            or receipt.get("status") != "completed"
+        ):
+            continue
+        raw_invoked = receipt.get("skills_invoked")
+        if not isinstance(raw_invoked, Sequence) or isinstance(
+            raw_invoked, (str, bytes, bytearray)
+        ):
+            continue
+        invoked_skills.update(
+            str(skill).strip().split(":", 1)[-1]
+            for skill in raw_invoked
+            if str(skill or "").strip()
+        )
+    if not required_skills <= invoked_skills:
+        return None
+
+    root = store._business_root(slug)
+    if phase == "brief":
+        path = root / "research" / "strategy.md"
+        try:
+            body = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if len(body) < 80:
+            return None
+        # Business creation seeds this exact two-line skeleton before the
+        # bootstrap starts. A long operator goal can make that placeholder
+        # exceed the byte threshold, but it is not the Taste-authored offer,
+        # audience, positioning, and tone brief required by this phase.
+        meaningful_lines = [line.strip() for line in body.splitlines() if line.strip()]
+        if (
+            len(meaningful_lines) == 2
+            and meaningful_lines[0].startswith("# ")
+            and meaningful_lines[1].lower().startswith("goal:")
+        ):
+            return None
+        return AuthoritativePhaseEvidence(
+            "workspace-artifact",
+            {
+                "path": "research/strategy.md",
+                "sha256": hashlib.sha256(body.encode()).hexdigest(),
+                "bytes": len(body.encode()),
+            },
+        )
+
+    if phase in {"surface", "landing_build_publish", "final_workflow_build_publish"}:
+        try:
+            with store._connect() as conn:
+                surface = store._app_surface_contract(conn, slug)
+        except Exception:
+            return None
+        if not isinstance(surface, Mapping):
+            return None
+        if phase == "surface":
+            runtime_features = {
+                str(item).strip().lower() for item in surface.get("runtime_features") or []
+            }
+            routes = {
+                str(item.get("path") if isinstance(item, Mapping) else item).strip()
+                for item in surface.get("routes") or []
+            }
+            if str(surface.get("source_path") or "").strip("/") != "product/site":
+                return None
+            if not {"auth", "account", "profile", "checkout"} <= runtime_features:
+                return None
+            if not {"/", "/app", "/app/profile"} <= routes:
+                return None
+            return AuthoritativePhaseEvidence(
+                "app-surface-contract",
+                {
+                    "source_path": "product/site",
+                    "runtime_features": sorted(runtime_features),
+                    "routes": sorted(routes),
+                },
+            )
+        if phase == "landing_build_publish":
+            metadata = surface.get("metadata") if isinstance(surface.get("metadata"), Mapping) else {}
+            publish = metadata.get("takyon_publish") if isinstance(metadata.get("takyon_publish"), Mapping) else {}
+            status = str(publish.get("status") or surface.get("publish_status") or "").lower()
+            build_id = str(surface.get("live_build_id") or "").strip()
+            public_url = str(publish.get("public_url") or surface.get("public_url") or "").strip()
+            if status != "published" or not build_id or not public_url:
+                return None
+            return AuthoritativePhaseEvidence(
+                "live-product-publication",
+                {"build_id": build_id, "public_url": public_url, "status": status},
+            )
+        if not _bootstrap_has_durable_live_product(
+            store, slug, workflow_requested=workflow_requested
+        ):
+            return None
+        return AuthoritativePhaseEvidence(
+            "final-product-done-predicate",
+            {
+                "workflow_requested": workflow_requested,
+                "real_http_actions": sorted(_bootstrap_real_http_actions(store, slug)),
+                "live_build_id": str(surface.get("live_build_id") or ""),
+                "required_skills_invoked": sorted(required_skills),
+            },
+        )
+
+    if phase in {"search", "logo"}:
+        rel = (
+            f"product/seo/search-console/{slug}/receipt.json"
+            if phase == "search"
+            else f"product/brand/logos/{slug}/receipt.json"
+        )
+        expected_key = str(
+            run.phase_idempotency[phase]["register" if phase == "search" else "generate"]
+        )
+        receipt: dict[str, Any] = {}
+        try:
+            loaded = json.loads((root / rel).read_text(encoding="utf-8"))
+            receipt = dict(loaded) if isinstance(loaded, Mapping) else {}
+        except (OSError, ValueError):
+            receipt = {}
+        if receipt and str(receipt.get("idempotency_key") or "") == expected_key:
+            status = str(receipt.get("status") or "").lower()
+            success = bool(receipt.get("success"))
+            allowed_blocker = status.startswith("blocked") if phase == "search" else (
+                "insufficient" in status or "unconfigured" in status
+            )
+            if success or allowed_blocker:
+                return AuthoritativePhaseEvidence(
+                    "tool-receipt-artifact",
+                    {"path": rel, "status": status, "success": success},
+                )
+        for observed in reversed(receipts):
+            status = str(observed.get("status") or "").lower()
+            error = str(observed.get("error") or "").lower()
+            allowed_blocker = (
+                status.startswith("blocked")
+                if phase == "search"
+                else ("insufficient" in status + error or "unconfigured" in status + error)
+            )
+            if bool(observed.get("success")) or allowed_blocker:
+                return AuthoritativePhaseEvidence(
+                    "parent-tool-bridge-receipt", dict(observed)
+                )
+        return None
+
+    if phase == "mobile":
+        if str(archetype or "").strip().lower() != "mobile_app":
+            return AuthoritativePhaseEvidence("archetype-policy", {"skipped": True})
+        from .core import _creative_credit_reservation_outcome
+
+        for key in dict(run.phase_idempotency.get("mobile") or {}).values():
+            outcome = _creative_credit_reservation_outcome(
+                store, slug, f"mobile-release:{slug}:preview:{key}"
+            )
+            metadata = outcome.get("metadata") if isinstance(outcome.get("metadata"), Mapping) else {}
+            if outcome.get("state") == "committed" and str(metadata.get("build_id") or ""):
+                return AuthoritativePhaseEvidence(
+                    "creative-credit-ledger",
+                    {"idempotency_key": key, "build_id": str(metadata.get("build_id"))},
+                )
+        for observed in reversed(receipts):
+            if bool(observed.get("success")) and str(observed.get("build_id") or ""):
+                return AuthoritativePhaseEvidence("parent-tool-bridge-receipt", dict(observed))
+            blocker = (
+                str(observed.get("status") or "") + " " + str(observed.get("error") or "")
+            ).lower()
+            if any(
+                token in blocker
+                for token in (
+                    "greenlight_preflight_failed",
+                    "compliance",
+                    "insufficient",
+                    "credit",
+                    "eas_builder_unconfigured",
+                )
+            ):
+                return AuthoritativePhaseEvidence("parent-tool-bridge-receipt", dict(observed))
+        return None
+
+    if phase == "finalize":
+        if not _bootstrap_has_durable_live_product(
+            store, slug, workflow_requested=workflow_requested
+        ):
+            return None
+        if not any(
+            receipt.get("tool") == "business_post_operator_update"
+            and bool(receipt.get("success"))
+            for receipt in receipts
+        ):
+            return None
+        if not any(
+            receipt.get("tool") == "__primary_agent_runtime__"
+            and receipt.get("status") == "completed"
+            for receipt in receipts
+        ):
+            return None
+        return AuthoritativePhaseEvidence(
+            "final-done-gate-and-update-receipt",
+            {
+                "product_complete": True,
+                "operator_update_recorded": True,
+                "sdk_turn_completed": True,
+            },
+        )
+    return None
+
+
+def _post_bootstrap_phase_operator_update(
+    phase_store: Any,
+    run: Any,
+    phase: str,
+    *,
+    completed: bool = False,
+) -> None:
+    """Post one deterministic, deduplicated customer milestone per phase."""
+
+    from .core import handle_business_post_operator_update
+
+    copy = {
+        "brief": (
+            "Defining your offer",
+            "I’m turning your idea into a clear offer, audience, and product direction.",
+        ),
+        "surface": (
+            "Shaping the product",
+            "I’m setting the customer journey and the core access and account experience.",
+        ),
+        "landing_build_publish": (
+            "Designing your public launch",
+            "I’m crafting the branded public experience and putting the first polished version online.",
+        ),
+        "search": (
+            "Connecting search visibility",
+            "The public experience is live; I’m connecting it to search discovery now.",
+        ),
+        "logo": (
+            "Creating the brand mark",
+            "I’m creating the visual identity that will carry through the public and customer experience.",
+        ),
+        "final_workflow_build_publish": (
+            "Building the customer experience",
+            "I’m finishing the signed-in product experience and the real customer workflow.",
+        ),
+        "mobile": (
+            "Building the iOS app",
+            "I’m shaping and packaging the real mobile product for its first signed build.",
+        ),
+        "finalize": (
+            "Finishing launch checks",
+            "The product work is in place; I’m checking the final business and launch outcomes.",
+        ),
+    }
+    if phase not in copy:
+        raise RuntimeError(f"bootstrap phase {phase!r} has no customer update")
+    phase_index = {
+        name: index for index, name in enumerate(
+            (
+                "brief",
+                "surface",
+                "landing_build_publish",
+                "search",
+                "logo",
+                "final_workflow_build_publish",
+                "mobile",
+                "finalize",
+            )
+        )
+    }
+    current_index = phase_index[phase] + (1 if completed else 0)
+    mobile = str(run.immutable_inputs.get("archetype") or "").lower() == "mobile_app"
+    milestones = [
+        ("Define the offer", "RESEARCH", 0),
+        ("Design and publish the brand", "PRODUCT", 4),
+        ("Build the customer experience", "PRODUCT", 5),
+        *(([("Build the iOS app", "PRODUCT", 6)]) if mobile else []),
+        ("Complete launch checks", "LAUNCH", 7),
+    ]
+    milestone_payload = []
+    for title, category, completion_index in milestones:
+        if current_index > completion_index:
+            status = "completed"
+        elif current_index <= completion_index and (
+            (title == "Define the offer" and current_index == 0)
+            or (title == "Design and publish the brand" and 1 <= current_index <= 4)
+            or (title == "Build the customer experience" and current_index == 5)
+            or (title == "Build the iOS app" and current_index == 6)
+            or (title == "Complete launch checks" and current_index == 7)
+        ):
+            status = "running"
+        else:
+            status = "queued"
+        milestone_payload.append(
+            {"title": title, "category": category, "status": status}
+        )
+    if completed:
+        headline = "Your launch is ready"
+        summary = (
+            "The core launch work is complete, the product is published, and the final checks are finished."
+        )
+    else:
+        headline, summary = copy[phase]
+    update_key_name = "operator_update_completed" if completed else "operator_update"
+    args = {
+        "business": run.business_slug,
+        "headline": headline,
+        "summary": summary,
+        "milestones": milestone_payload,
+        "idempotency_key": str(run.phase_idempotency[phase][update_key_name]),
+        "reason": "fresh business launch milestone",
+        "actor": "worker",
+    }
+    raw = handle_business_post_operator_update(args)
+    phase_store.record_operator_update_receipt(
+        run.job_id,
+        phase,
+        args=args,
+        result=raw,
+    )
 
 
 def _bootstrap_x_launch_outcome(
@@ -2500,11 +3312,31 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
     progress = _RuntimeProgress(slug=slug, kind="ceo_wake", command=f"/wake {slug}")
 
     payload = job.payload or {}
+    agent_runtime = _selected_worker_agent_runtime()
+    sdk_max_budget_usd = (
+        _sdk_turn_budget_usd(turn_config={}, payload=payload)
+        if agent_runtime == _WORKER_AGENT_RUNTIME_SDK
+        else 0.0
+    )
+    sdk_effort = str(
+        payload.get("effort")
+        or os.getenv("TAKYON_PRIMARY_AGENT_EFFORT")
+        or "high"
+    ).strip().lower()
+    try:
+        wake_attempt = max(1, int(getattr(job, "attempts", 1) or 1))
+    except (TypeError, ValueError):
+        wake_attempt = 1
     try:
         max_turns = int(payload.get("max_turns") or _DEFAULT_MAX_TURNS)
     except (TypeError, ValueError):
         max_turns = _DEFAULT_MAX_TURNS
     inactivity_limit = _env_float("TAKYON_WORKER_TURN_TIMEOUT", _DEFAULT_TURN_TIMEOUT)
+    wake_wall_clock_limit = max(
+        60.0,
+        _env_float("TAKYON_WORKER_WAKE_WALL_TIMEOUT", _DEFAULT_WAKE_WALL_TIMEOUT),
+    )
+    sdk_receipts: list[dict[str, Any]] = []
 
     tokens: list[object] = []
     try:
@@ -2611,8 +3443,18 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
                     toolsets=toolsets,
                     max_turns=max_turns,
                     inactivity_limit=inactivity_limit,
+                    wall_clock_limit=wake_wall_clock_limit,
                     progress=progress,
+                    agent_runtime=agent_runtime,
+                    sdk_session_id=str(job.id),
+                    sdk_resume_session=wake_attempt > 1,
+                    sdk_max_budget_usd=sdk_max_budget_usd,
+                    sdk_effort=sdk_effort,
+                    sdk_epoch="wake",
                 )
+                if agent_runtime == _WORKER_AGENT_RUNTIME_SDK:
+                    if receipt := _consume_sdk_turn_receipt():
+                        sdk_receipts.append(receipt)
     except Exception as exc:
         if _is_ceo_inactivity_timeout(exc):
             status = _best_effort_terminalize_owned_timeout(job, error=str(exc))
@@ -2661,8 +3503,15 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
             "final_response": final_response[:4000],
             "cost_usd": round(cost_usd, 6),
             "cost_status": cost_status,
+            "agent_runtime": agent_runtime,
+            "sdk_receipts": sdk_receipts,
         },
         actual_cost_cents=cents,
+        billing_mode=(
+            jobs.BILLING_MODE_PROVIDER_BROKER
+            if agent_runtime == _WORKER_AGENT_RUNTIME_SDK
+            else jobs.BILLING_MODE_JOB_RESERVATION
+        ),
     )
 
 
@@ -2671,8 +3520,15 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
 
     from .turn_runtime import (
         _bootstrap_goal_requests_product_workflow,
+        _bootstrap_public_site_url,
         _business_workspace_execution_context,
-        _ceo_bootstrap_turn_config,
+        _ceo_bootstrap_phase_runtime_config,
+    )
+    from .bootstrap_phases import (
+        PHASE_ALLOWED_TOOLS,
+        PHASE_MAX_TURNS,
+        PostgresBootstrapPhaseStore,
+        phase_prompt,
     )
     from .core import TakyonStore, _bound_operator_task_context
 
@@ -2721,18 +3577,25 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             archetype = str((row or {}).get("archetype") or "").strip().lower()
         except Exception:
             archetype = ""
-    bootstrap_turn = _ceo_bootstrap_turn_config(
-        slug,
+    bootstrap_turn = _ceo_bootstrap_phase_runtime_config(
         goal,
-        active_mode,
-        business_name=business_name,
-        animations=animations,
         archetype=archetype,
     )
-    user_prompt = str(bootstrap_turn.get("user_prompt") or "")
     system_prompt = str(bootstrap_turn.get("ephemeral_system_prompt") or "")
     toolsets = list(bootstrap_turn.get("enabled_toolsets") or ["takyon", "takyon-authority", "skills"])
     payload = job.payload or {}
+    agent_runtime = _selected_worker_agent_runtime()
+    sdk_max_budget_usd = (
+        _sdk_turn_budget_usd(turn_config=bootstrap_turn, payload=payload)
+        if agent_runtime == _WORKER_AGENT_RUNTIME_SDK
+        else 0.0
+    )
+    sdk_effort = str(
+        bootstrap_turn.get("effort")
+        or payload.get("effort")
+        or os.getenv("TAKYON_PRIMARY_AGENT_EFFORT")
+        or "high"
+    ).strip().lower()
     try:
         max_turns = int(payload.get("max_turns") or _DEFAULT_MAX_TURNS)
     except (TypeError, ValueError):
@@ -2770,11 +3633,33 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     schedule = str(payload.get("schedule") or "").strip()
     command = f"/create {slug}"
     progress = _RuntimeProgress(slug=slug, kind="ceo_bootstrap", command=command)
+    sdk_receipts: list[dict[str, Any]] = []
     bootstrap_started_monotonic = time.monotonic()
     bootstrap_deadline_monotonic = bootstrap_started_monotonic + wall_clock_limit
     bootstrap_deadline_at = time.time() + wall_clock_limit
     human_review_blocker: dict[str, Any] = {}
     platform_publish_blocker = ""
+    phase_store = PostgresBootstrapPhaseStore(
+        operator_user_id=owner_user_id,
+        business_slug=slug,
+    )
+    phase_run = phase_store.initialize_or_load(
+        job_id=bootstrap_job_id,
+        sdk_session_id=bootstrap_job_id,
+        owner_user_id=owner_user_id,
+        business_slug=slug,
+        immutable_inputs={
+            "goal": goal,
+            "business_name": business_name,
+            "active_mode": active_mode,
+            "animations": animations,
+            "archetype": archetype,
+            "workflow_requested": workflow_requested,
+            "schedule": schedule,
+            "job_payload": dict(payload),
+        },
+        job_attempt=bootstrap_attempt,
+    )
 
     tokens: list[object] = []
     try:
@@ -2815,8 +3700,27 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 cost_usd = 0.0
                 cost_status = "unknown"
                 turn_completed = False
-                next_prompt = user_prompt
-                for same_job_turn in range(1, _BOOTSTRAP_MAX_SAME_JOB_TURNS + 1):
+                sdk_query_count = 0
+                phase_calls_this_attempt: dict[str, int] = {}
+
+                def verify_phase(run: Any, phase: str) -> Any | None:
+                    return _bootstrap_phase_authoritative_evidence(
+                        store,
+                        run,
+                        phase,
+                        workflow_requested=workflow_requested,
+                        archetype=archetype,
+                    )
+
+                while True:
+                    # The first incomplete phase is revalidated before any model call. Effects that
+                    # committed before a crash are checkpointed here and never paid/executed twice.
+                    phase_run = phase_store.reconcile_first_incomplete(
+                        bootstrap_job_id, verify_phase
+                    )
+                    phase = phase_run.current_phase
+                    if phase is None:
+                        break
                     human_review_blocker = _read_bootstrap_human_review_blocker_pinned(
                         store,
                         slug,
@@ -2861,19 +3765,38 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                             ),
                         )
                         break
+                    phase_calls_this_attempt[phase] = phase_calls_this_attempt.get(phase, 0) + 1
+                    if phase_calls_this_attempt[phase] > 2:
+                        raise RuntimeError(
+                            f"bootstrap phase {phase} did not produce its authoritative done predicate"
+                        )
+                    phase_store.start_phase(
+                        bootstrap_job_id, phase, job_attempt=bootstrap_attempt
+                    )
+                    _post_bootstrap_phase_operator_update(
+                        phase_store,
+                        phase_run,
+                        phase,
+                    )
+                    next_prompt = phase_prompt(
+                        phase_run,
+                        phase,
+                        public_site_url=_bootstrap_public_site_url(slug),
+                        animations=animations,
+                    )
                     refresh_cursor, _ = _product_publish_blocker_after(store, slug, "")
-                    response, turn_cost_usd, turn_cost_status, turn_completed = _run_ceo_turn(
+                    sdk_query_count += 1
+                    configured_phase_turns = PHASE_MAX_TURNS.get(phase, _DEFAULT_MAX_TURNS)
+                    if payload.get("max_turns") is not None:
+                        configured_phase_turns = min(configured_phase_turns, max_turns)
+                    response, turn_cost_usd, turn_cost_status, phase_turn_completed = _run_ceo_turn(
                         slug=slug,
                         system_prompt=system_prompt,
                         user_prompt=next_prompt,
                         toolsets=toolsets,
-                        max_turns=max_turns,
+                        max_turns=max(1, int(configured_phase_turns)),
                         inactivity_limit=inactivity_limit,
-                        wall_clock_limit=(
-                            wall_clock_limit
-                            if same_job_turn == 1
-                            else max(60.0, wall_clock_limit - elapsed)
-                        ),
+                        wall_clock_limit=max(60.0, wall_clock_limit - elapsed),
                         completion_probe=lambda: _bootstrap_ready_for_completion_grace(
                             store,
                             slug,
@@ -2909,10 +3832,45 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                         ),
                         api_retry_floor=_BOOTSTRAP_API_RETRY_FLOOR,
                         progress=progress,
+                        agent_runtime=agent_runtime,
+                        sdk_session_id=bootstrap_job_id,
+                        sdk_resume_session=(
+                            bootstrap_attempt > 1 or sdk_query_count > 1
+                        ),
+                        sdk_max_budget_usd=sdk_max_budget_usd,
+                        sdk_effort=sdk_effort,
+                        # Every continuation and retry belongs to this one
+                        # job-level cumulative Safebox spend envelope.
+                        sdk_epoch="bootstrap",
+                        sdk_allowed_tools=PHASE_ALLOWED_TOOLS[phase],
+                        sdk_tool_receipt_callback=lambda name, args, result, active_phase=phase: (
+                            phase_store.record_tool_receipt(
+                                bootstrap_job_id,
+                                active_phase,
+                                tool_name=name,
+                                args=args,
+                                result=result,
+                            )
+                        ),
+                        # Phase summaries are internal orchestration output. Customer-visible
+                        # progress is emitted only through the deterministic operator-update rail.
+                        record_final_chat=False,
                     )
+                    sdk_turn_receipt: dict[str, Any] | None = None
+                    if agent_runtime == _WORKER_AGENT_RUNTIME_SDK:
+                        if receipt := _consume_sdk_turn_receipt():
+                            sdk_turn_receipt = receipt
+                            sdk_receipts.append(receipt)
+                    if phase_turn_completed:
+                        phase_store.record_runtime_completion(
+                            bootstrap_job_id,
+                            phase,
+                            runtime_receipt=sdk_turn_receipt,
+                        )
                     final_response = response
                     cost_usd += turn_cost_usd
                     cost_status = turn_cost_status
+                    turn_completed = phase_turn_completed
                     if time.monotonic() >= bootstrap_deadline_monotonic:
                         human_review_blocker = _request_bootstrap_hard_stop_pinned(
                             store,
@@ -2948,33 +3906,29 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                     )
                     if platform_publish_blocker:
                         break
-                    try:
-                        durable_product_complete = _bootstrap_has_durable_live_product(
-                            store,
-                            slug,
-                            workflow_requested=workflow_requested,
-                        )
-                    except Exception:
-                        durable_product_complete = False
-                    mobile_bootstrap = str(archetype or "").strip().lower() == "mobile_app"
-                    if durable_product_complete and (turn_completed or not mobile_bootstrap):
-                        break
-                    if same_job_turn >= _BOOTSTRAP_MAX_SAME_JOB_TURNS:
-                        break
-                    next_prompt = (
-                        f"Continue the SAME in-progress bootstrap for business:{slug}. This is a "
-                        "bounded same-job continuation, not a new launch. Preserve the canonical "
-                        "business/product name already stored for this business. Inspect and reuse "
-                        "the existing product files, surface contract, receipts, actions, and build "
-                        "artifacts; do not restart, rebrand, or redo completed work. Resolve the "
-                        "current completeness blocker and continue immediately. Complete every "
-                        "remaining product phase from the original bootstrap instruction; do not "
-                        "redo an already-live product. Do not perform research, pulse, X, or distribution "
-                        "work in this bootstrap. Do not "
-                        "conclude with a status report or next-step suggestion until the public "
-                        "product is published, every requested customer workflow is implemented "
-                        "with real runtime-backed actions."
+                    # Only a runtime validator may advance. A natural model stop with no durable
+                    # artifact/receipt remains on this phase for one bounded repair query.
+                    phase_run = phase_store.reconcile_first_incomplete(
+                        bootstrap_job_id, verify_phase
                     )
+                completed_phase_run = phase_store.load(bootstrap_job_id)
+                if completed_phase_run.status == "completed":
+                    _post_bootstrap_phase_operator_update(
+                        phase_store,
+                        completed_phase_run,
+                        "finalize",
+                        completed=True,
+                    )
+                finalize_evidence = completed_phase_run.phase_evidence.get("finalize")
+                finalize_details = (
+                    finalize_evidence.get("details")
+                    if isinstance(finalize_evidence, Mapping)
+                    and isinstance(finalize_evidence.get("details"), Mapping)
+                    else {}
+                )
+                turn_completed = bool(
+                    turn_completed or finalize_details.get("sdk_turn_completed")
+                )
     except Exception as exc:
         # Every exceptional parent path—not only inactivity—must cancel and drain its exact queued/
         # running children before run_one is allowed to requeue the parent. Otherwise an API error or
@@ -3095,10 +4049,17 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 "review_blocker": blocker_text,
                 "review_source": str(human_review_blocker.get("source") or "runtime"),
                 "wake": wake_result,
+                "agent_runtime": agent_runtime,
+                "sdk_receipts": sdk_receipts,
             },
             actual_cost_cents=cents,
             terminal_status="blocked",
             terminal_reason="bootstrap_human_review_required",
+            billing_mode=(
+                jobs.BILLING_MODE_PROVIDER_BROKER
+                if agent_runtime == _WORKER_AGENT_RUNTIME_SDK
+                else jobs.BILLING_MODE_JOB_RESERVATION
+            ),
         )
 
     if platform_publish_blocker:
@@ -3125,10 +4086,17 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                     "reason": "platform_publish_blocked",
                     "requested_schedule": schedule,
                 },
+                "agent_runtime": agent_runtime,
+                "sdk_receipts": sdk_receipts,
             },
             actual_cost_cents=cents,
             terminal_status="blocked",
             terminal_reason="platform_publish_blocked",
+            billing_mode=(
+                jobs.BILLING_MODE_PROVIDER_BROKER
+                if agent_runtime == _WORKER_AGENT_RUNTIME_SDK
+                else jobs.BILLING_MODE_JOB_RESERVATION
+            ),
         )
 
     # ── Post-turn finalization (NON-FATAL by contract) ──────────────────────────────────────────
@@ -3348,8 +4316,15 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             "live_action_execution_status": live_action_execution_status,
             "live_action_execution_verification": live_action_verification,
             "wake": wake_result,
+            "agent_runtime": agent_runtime,
+            "sdk_receipts": sdk_receipts,
         },
         actual_cost_cents=cents,
+        billing_mode=(
+            jobs.BILLING_MODE_PROVIDER_BROKER
+            if agent_runtime == _WORKER_AGENT_RUNTIME_SDK
+            else jobs.BILLING_MODE_JOB_RESERVATION
+        ),
     )
 
 
@@ -3897,6 +4872,30 @@ def _conn_is_safebox_authority(conn) -> bool:
     return True
 
 
+def _maybe_prune_expired_sdk_sessions(conn) -> int:
+    """Run the bounded cross-tenant retention sweep only on an operator worker.
+
+    The process-local cadence prevents every empty queue poll from rescanning
+    the transcript table. Forced RLS and the operator-only table grant remain
+    the database-side authority boundary.
+    """
+
+    global _SDK_SESSION_RETENTION_NEXT_SWEEP_AT
+    observed = time.monotonic()
+    with _SDK_SESSION_RETENTION_SWEEP_LOCK:
+        if observed < _SDK_SESSION_RETENTION_NEXT_SWEEP_AT:
+            return 0
+        _SDK_SESSION_RETENTION_NEXT_SWEEP_AT = (
+            observed + _SDK_SESSION_RETENTION_SWEEP_INTERVAL_SECONDS
+        )
+    from .claude_sdk_sessions import prune_expired_sdk_sessions_global
+    from .runtime_app import assert_takyon_pg_role
+
+    raw = getattr(conn, "_pg", conn)
+    assert_takyon_pg_role(raw, "operator")
+    return prune_expired_sdk_sessions_global(conn)
+
+
 def drain_tick(
     conn,
     *,
@@ -3948,6 +4947,21 @@ def drain_tick(
                 _APP_USAGE_HOLD_TTL_SECONDS,
             ),
         )
+    else:
+        try:
+            pruned_sessions = _maybe_prune_expired_sdk_sessions(conn)
+            if pruned_sessions:
+                _log.info(
+                    "worker[%s]: pruned %d expired Claude SDK sessions",
+                    worker_id,
+                    pruned_sessions,
+                )
+        except Exception as exc:  # noqa: BLE001 - a failed sweep must not stop queue work
+            _log.warning(
+                "worker[%s]: Claude SDK session retention sweep failed: %s",
+                worker_id,
+                exc,
+            )
 
     while stop is None or not stop.is_set():
         outcome: JobOutcome | None = jobs.run_one(
@@ -3961,6 +4975,7 @@ def drain_tick(
             heartbeat_conn_factory=heartbeat_conn_factory,
             min_queue_age_seconds=min_queue_age_seconds,
             worker_release_sha=worker_release_sha,
+            billing_mode_resolver=_job_billing_mode,
         )
         if outcome is None:
             break

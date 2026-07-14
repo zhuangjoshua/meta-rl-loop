@@ -34,6 +34,7 @@ MemoryMax=80%
 OOMPolicy=stop
 ReadWritePaths=/opt/takyon
 ReadOnlyPaths=/opt/takyon/hermes-agent-main
+ReadOnlyPaths=/opt/takyon/.takyon/runtime/claude-agent-sdk
 WorkingDirectory=/opt/takyon/hermes-agent-main
 EnvironmentFile=-/opt/takyon/.takyon/.env
 EnvironmentFile=-/opt/takyon/secrets/.env
@@ -47,21 +48,24 @@ UnsetEnvironment=TAKYON_CAP_SIGNING_KEY
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
-# Production model roles are explicit process pins. The CEO stays on OpenAI; every coding-worker
-# model name, including Claude SDK internal subagents, stays on the same DeepSeek model.
+# The primary operator agent is one Claude Agent SDK session pinned to DeepSeek through Safebox.
 Environment=TAKYON_STRICT_MODEL_ROLES=1
-Environment=TAKYON_MODEL=gpt-5.5
+Environment=TAKYON_MODEL=deepseek-v4-pro
 Environment=TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro
 Environment=ANTHROPIC_MODEL=deepseek-v4-pro
 Environment=ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro
 Environment=ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro
 Environment=ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro
 Environment=CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro
-Environment=TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1
-# Long operator tool runs (claude.agent_task, product.surface_refresh) execute on the durable
-# worker plane (takyon-worker.service) instead of inline in this process: the tool enqueues, waits
-# on the canonical work-request run row, and a PTY refresh/disconnect no longer kills the run.
-# Requires the worker service to be active; remove this line to fall back to inline execution.
+Environment=TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD=5
+Environment=TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD=2
+Environment=TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD=2000000
+# All reviewed native skills are mounted from the release-owned, read-only SDK plugin.
+Environment=TAKYON_CLAUDE_SKILLS_PLUGIN=/opt/takyon/.takyon/runtime/claude-agent-sdk/current/plugin
+Environment=TAKYON_CLAUDE_SKILLS_MANIFEST=/opt/takyon/.takyon/runtime/claude-agent-sdk/current/plugin/approved-skills.json
+Environment=TAKYON_CLAUDE_NODE_RUNTIME=/opt/takyon/.takyon/runtime/claude-agent-sdk/current/node-runtime
+Environment=TAKYON_DISABLE_LEGACY_SKILL_SYNC=1
+# Long product refresh/release operations remain on the durable queue worker.
 Environment=TAKYON_OPERATOR_TASKS_VIA_WORKER=1
 # Per-session operator identity, stage ENFORCE (bind -> observe -> enforce): every dashboard
 # session resolves its principal from the authenticated session path (auth0/local dashboard

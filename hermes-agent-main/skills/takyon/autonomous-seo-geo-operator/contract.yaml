@@ -1,0 +1,3 @@
+schema_version: 1
+requires: [business.state.read, business.files.read, business.files.write, product.source.edit, product.surface.publish, seo.evidence.read]
+produces: [product.surface, metrics.seo-report]

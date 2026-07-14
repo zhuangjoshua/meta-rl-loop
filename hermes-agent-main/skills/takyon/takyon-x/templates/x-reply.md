@@ -21,7 +21,7 @@ Return exactly one send-ready reply (no variants).
 - 1–2 sentences, one move, no explanation
 - End a beat early; leave something implied
 - No hashtags, no emojis, no borrowed internet slang
-- Match the business voice in `distribution/voice/x.md`
+- Match the durable business X voice artifact
 
 ## Reject If
 

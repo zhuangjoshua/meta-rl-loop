@@ -63,7 +63,21 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" \
 ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y ca-certificates curl rsync caddy docker.io ffmpeg
+  apt-get install -y ca-certificates curl gnupg rsync caddy docker.io ffmpeg
+  node_major=\"\$(node -p 'process.versions.node.split(\".\")[0]' 2>/dev/null || true)\"
+  if [[ ! \"\$node_major\" =~ ^[0-9]+$ ]] || (( node_major < 20 )); then
+    install -d -m 0755 /etc/apt/keyrings
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
+    chmod 0644 /etc/apt/keyrings/nodesource.gpg
+    printf '%s\n' \
+      'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main' \
+      > /etc/apt/sources.list.d/nodesource.list
+    apt-get update
+    apt-get install -y nodejs
+  fi
+  node -e 'const major=Number(process.versions.node.split(\".\")[0]); if (major < 20) process.exit(1)'
+  npm --version >/dev/null
   if ! command -v xurl >/dev/null 2>&1; then
     curl -fsSL https://raw.githubusercontent.com/xdevplatform/xurl/main/install.sh | bash
   fi

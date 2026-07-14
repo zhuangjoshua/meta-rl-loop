@@ -115,12 +115,25 @@ opus_model="$(service_env_value ANTHROPIC_DEFAULT_OPUS_MODEL)"
 sonnet_model="$(service_env_value ANTHROPIC_DEFAULT_SONNET_MODEL)"
 haiku_model="$(service_env_value ANTHROPIC_DEFAULT_HAIKU_MODEL)"
 subagent_model="$(service_env_value CLAUDE_CODE_SUBAGENT_MODEL)"
+skills_plugin="$(service_env_value TAKYON_CLAUDE_SKILLS_PLUGIN)"
+skills_manifest="$(service_env_value TAKYON_CLAUDE_SKILLS_MANIFEST)"
+node_runtime="$(service_env_value TAKYON_CLAUDE_NODE_RUNTIME)"
+primary_budget="$(service_env_value TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD)"
+primary_per_call_budget="$(service_env_value TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD)"
+operator_session_max_cost="$(service_env_value TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD)"
 [[ "$strict_model_roles" == "1" ]] || die "strict model roles are not enabled in $TAKYON_SERVICE"
-[[ "$ceo_model" == "gpt-5.5" ]] || die "CEO model pin is not gpt-5.5 in $TAKYON_SERVICE"
+[[ "$ceo_model" == "deepseek-v4-pro" ]] || die "primary agent model pin is not deepseek-v4-pro in $TAKYON_SERVICE"
 for model_value in "$worker_model" "$anthropic_model" "$opus_model" "$sonnet_model" "$haiku_model" "$subagent_model"; do
   [[ "$model_value" == "deepseek-v4-pro" ]] \
-    || die "coding-worker model aliases are not all deepseek-v4-pro in $TAKYON_SERVICE"
+    || die "Agent SDK model aliases are not all deepseek-v4-pro in $TAKYON_SERVICE"
 done
+[[ -r "$skills_plugin/.claude-plugin/plugin.json" ]] || die "approved skills plugin is unavailable"
+[[ -r "$skills_manifest" ]] || die "approved skills manifest is unavailable"
+[[ -r "$node_runtime/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" ]] \
+  || die "pinned Claude Agent SDK runtime is unavailable"
+[[ "$primary_budget" == "5" ]] || die "primary SDK total budget pin is invalid"
+[[ "$primary_per_call_budget" == "2" ]] || die "primary SDK per-call budget pin is invalid"
+[[ "$operator_session_max_cost" == "2000000" ]] || die "operator session cost pin is invalid"
 
 logs=1
 args=("$@")
@@ -161,6 +174,13 @@ export ANTHROPIC_DEFAULT_OPUS_MODEL="$opus_model"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="$sonnet_model"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="$haiku_model"
 export CLAUDE_CODE_SUBAGENT_MODEL="$subagent_model"
+export TAKYON_CLAUDE_SKILLS_PLUGIN="$skills_plugin"
+export TAKYON_CLAUDE_SKILLS_MANIFEST="$skills_manifest"
+export TAKYON_CLAUDE_NODE_RUNTIME="$node_runtime"
+export TAKYON_DISABLE_LEGACY_SKILL_SYNC=1
+export TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD="$primary_budget"
+export TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD="$primary_per_call_budget"
+export TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD="$operator_session_max_cost"
 export TAKYON_SESSION_USER_ID="${TAKYON_SESSION_USER_ID:-$DEFAULT_OPERATOR_USER_ID}"
 
 exec runuser -u takyon -- "$RUNTIME_DIR/takyon" "${args[@]}"

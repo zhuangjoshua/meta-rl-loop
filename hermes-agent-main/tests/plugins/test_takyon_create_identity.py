@@ -1,6 +1,14 @@
 import pytest
 import types
+import uuid
 from pathlib import Path
+
+from plugins.takyon.bootstrap_phases import (
+    PHASE_MAX_TURNS,
+    BootstrapPhaseRun,
+    bootstrap_phase_idempotency,
+    phase_prompt,
+)
 
 from plugins.takyon.cli import (
     TakyonError,
@@ -11,6 +19,39 @@ from plugins.takyon.cli import (
     _resolve_dashboard_create_identity,
     run_takyon_command,
 )
+
+
+def _checkpointed_phase_prompt(phase: str, *, workflow: bool = False) -> str:
+    job_id = str(uuid.uuid4())
+    run = BootstrapPhaseRun(
+        job_id=job_id,
+        sdk_session_id=job_id,
+        owner_user_id=str(uuid.uuid4()),
+        business_slug="quoteforge" if workflow else "crm",
+        immutable_inputs={
+            "goal": (
+                "Build a service that turns messy notes into a contractor-ready quote request."
+                if workflow
+                else "construction CRM"
+            ),
+            "business_name": "QuoteForge" if workflow else "CRM",
+            "workflow_requested": workflow,
+            "archetype": "web_app",
+        },
+        phase_idempotency=bootstrap_phase_idempotency(job_id),
+        current_phase=phase,
+        completed_phases=(),
+        phase_evidence={},
+        phase_receipts={},
+        phase_attempts={},
+        status="running",
+    )
+    return phase_prompt(
+        run,
+        phase,
+        public_site_url=f"https://{run.business_slug}.coscale.app/",
+        animations=False,
+    )
 
 
 def test_resolve_create_identity_prefers_name_derived_from_goal_text():
@@ -82,52 +123,33 @@ def test_bootstrap_prompt_pins_canonical_business_name():
 
 
 def test_bootstrap_prompt_requires_bold_landing_and_branded_appkit_auth_surface():
-    prompt = _business_bootstrap_instruction(
-        "crm",
-        "construction CRM",
-        "live",
-        business_name="CRM",
-    )
+    landing = _checkpointed_phase_prompt("landing_build_publish")
+    final = _checkpointed_phase_prompt("final_workflow_build_publish")
 
-    assert "Keep /app present and wired through the existing Hermes app kit runtime rails for sign-in, subscription, account, and profile access." in prompt
-    assert "This must NOT look like a generic starter kit, membership template, or placeholder SaaS shell." in prompt
-    assert "If `Explicit product workflow requested: no`, do NOT build a bespoke product application, custom backend workflow, domain-specific dashboard, fake coach/product tabs, sample domain data, charts, or invented in-app flows in this pass." in prompt
-    assert "Let the native Taste skill infer the appropriate visual intensity from the brief" in prompt
-    assert "bold, visually opinionated" not in prompt
-    assert "Make the existing sign-in, subscription, account, and profile surfaces polished, branded, and customer-specific instead of generic starter UI." in prompt
-    assert "The result should be publishable and product-specific on the first pass." in prompt
+    assert "Invoke takyon-product and design-taste-frontend" in landing
+    assert "preserving PublicSiteHeader" in landing
+    assert "Do not customize app-layout.tsx, app-home.tsx, or profile.tsx yet." in landing
+    assert "Customize app-home.tsx and profile.tsx while preserving app-layout.tsx" in final
+    assert "landing, auth, checkout, profile, and support rails" in final
 
 
 def test_bootstrap_prompt_folds_workflow_build_into_second_pass_and_verifies_real_action():
-    prompt = _business_bootstrap_instruction(
-        "quoteforge",
-        "Build a service that turns messy home-repair notes into a contractor-ready scope of work and quote request.",
-        "live",
-        business_name="QuoteForge",
-    )
+    prompt = _checkpointed_phase_prompt("final_workflow_build_publish", workflow=True)
 
-    assert "In this SAME second business_claude_agent_task, extend `/app` into the requested real signed-in subscribed customer workflow" in prompt
-    assert "do NOT start a third product build pass here" in prompt
-    assert "Verify that `/app` is wired to at least one real non-underscore HTTP action file under `product/site/actions/`" in prompt
-    assert "call business_check_runtime_capabilities for the business and confirm the requested action is exposed" not in prompt
+    assert "real product/site/actions/*.ts generation" in prompt
+    assert "useDecodedActionRunner UI wiring" in prompt
+    assert "records persistence/reopen" in prompt
+    assert "Do not invoke the app action" in prompt
+    assert "business_claude_agent_task" not in prompt
 
 
 def test_bootstrap_prompt_trusts_authoritative_product_result_and_stops_on_blocker():
-    prompt = _business_bootstrap_instruction(
-        "crm",
-        "construction CRM",
-        "live",
-        business_name="CRM",
-    )
+    prompt = _checkpointed_phase_prompt("landing_build_publish")
 
-    # The contract, not the sentence: the CEO must trust the tool's exact result, stop on a real
-    # blocker, and never continue post-product work after a blocked build.
-    assert "trusting only its exact success/blocker and surface_refresh publish status" in prompt
-    assert "record that exact blocker in research/strategy.md and stop bootstrap there" in prompt
-    assert "Do not paraphrase a different platform diagnosis." in prompt
-    assert "publish to X" in prompt
-    assert "Do not inspect the worker result." not in prompt
-    assert "If something is blocked, record the blocker in research/strategy.md and continue with the next step." not in prompt
+    assert "require structured publish.status published plus a real public_url" in prompt
+    assert "record the exact blocker in research/strategy.md and stop" in prompt
+    assert "Never fake a receipt" in prompt
+    assert "X" not in prompt
 
 
 def test_bootstrap_prompt_passes_explicit_search_console_site_url():
@@ -151,15 +173,17 @@ def test_bootstrap_turn_config_uses_expanded_shared_turn_budget():
         business_name="CRM",
     )
 
-    assert config["max_turns"] == 30
+    assert config["max_turns"] == 90
+    assert PHASE_MAX_TURNS["final_workflow_build_publish"] == 60
 
 
 def test_ceo_prompt_rule_8_stops_redelegation_on_blocked_authority_violation():
     prompt_path = Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "prompts" / "ceo.md"
     text = prompt_path.read_text(encoding="utf-8")
 
-    assert "bounded same-run continuation" in text
-    assert "do not re-delegate the same unchanged `product/site/` task" in text
+    assert "You are the single primary model agent" in text
+    assert "Never spawn or delegate to another model agent" in text
+    assert "business_claude_agent_task" not in text
     assert "automatic local source/build repair retry" not in text
 
 

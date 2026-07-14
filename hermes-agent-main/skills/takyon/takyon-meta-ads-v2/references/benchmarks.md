@@ -1,9 +1,9 @@
 # Benchmarks + rules (single source for the evaluator)
 
 Tunable **fallback heuristics**, not Meta-official figures — except the Learning-phase rule, which is
-Meta-documented. Per-business CPA/ROAS targets from `research/` override the table. This file owns the
+Meta-documented. Per-business CPA/ROAS targets from current business research override the table. This file owns the
 thresholds, the verdict→action map, and the learning/fatigue/attribution rules used by
-`business_meta_ad_evaluate`.
+bound evaluation capability.
 
 ## Thresholds (heuristic)
 | Metric | Good | Watch | Poor |

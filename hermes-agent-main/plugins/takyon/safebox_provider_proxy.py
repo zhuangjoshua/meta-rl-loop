@@ -54,11 +54,13 @@ Hard invariants for every route here:
 from __future__ import annotations
 
 import json as _json
+import hashlib
 import logging
 import re
 import threading
 import time as _time
-from typing import Any, Iterator
+import uuid
+from typing import Any, Iterator, Mapping
 
 import anyio
 import httpx
@@ -279,13 +281,36 @@ class _ProxyAuth:
     ``scope`` is a verified ``CapabilityScope`` keyed on the operator's ``takyon_user_id`` (the rail
     key). ``ceiling_microusd`` is the signed per-call cost ceiling, enforced for every capability."""
 
-    __slots__ = ("scope", "ceiling_microusd", "enforce_ceiling", "via")
+    __slots__ = (
+        "scope",
+        "ceiling_microusd",
+        "enforce_ceiling",
+        "via",
+        "invocation_id",
+        "invocation_total_ceiling_microusd",
+        "capability_expires_at",
+    )
 
-    def __init__(self, *, scope, ceiling_microusd: int, enforce_ceiling: bool, via: str):
+    def __init__(
+        self,
+        *,
+        scope,
+        ceiling_microusd: int,
+        enforce_ceiling: bool,
+        via: str,
+        invocation_id: str = "",
+        invocation_total_ceiling_microusd: int = 0,
+        capability_expires_at: int = 0,
+    ):
         self.scope = scope
         self.ceiling_microusd = int(ceiling_microusd)
         self.enforce_ceiling = bool(enforce_ceiling)
         self.via = via
+        self.invocation_id = str(invocation_id or "").strip()
+        self.invocation_total_ceiling_microusd = int(
+            invocation_total_ceiling_microusd or 0
+        )
+        self.capability_expires_at = int(capability_expires_at or 0)
 
 
 def _authorize_operator_proxy(
@@ -321,7 +346,7 @@ def _authorize_operator_proxy(
     if signing_key and cred:
         for audience in accepted_audiences:
             try:
-                scope, _nonce, _exp = verify_capability(
+                scope, _nonce, exp = verify_capability(
                     cred, signing_key=signing_key, expected_audience=audience, now=now
                 )
             except CapabilityError:
@@ -331,6 +356,11 @@ def _authorize_operator_proxy(
                 ceiling_microusd=int(scope.max_cost_microusd),
                 enforce_ceiling=True,
                 via=f"capability:{audience}",
+                invocation_id=str(getattr(scope, "invocation_id", "") or ""),
+                invocation_total_ceiling_microusd=int(
+                    getattr(scope, "max_total_cost_microusd", 0) or 0
+                ),
+                capability_expires_at=int(exp),
             )
 
     # (b) The shared internal token is NOT spend authority (authority principle / G2). It is held by
@@ -440,15 +470,94 @@ class _AnthropicStreamUsage:
 
 
 # ── Per-provider estimate / actual pricing ────────────────────────────────────────────────────────
+_PRIMARY_SDK_MODEL = "deepseek-v4-pro"
+
+
+def _static_model_context_tokens(model: object) -> int:
+    """Return a conservative, offline context ceiling or fail closed.
+
+    Provider reserves cannot use prompt-length heuristics: framing, tools, and
+    tokenizer drift can make those estimates smaller than realized input
+    usage. This lookup uses only the checked-in model catalog and never a
+    network/default fallback.
+    """
+
+    from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS
+
+    canonical = str(model or "").strip().lower()
+    if "/" in canonical:
+        canonical = canonical.rsplit("/", 1)[-1]
+    for known_model, context_tokens in sorted(
+        DEFAULT_CONTEXT_LENGTHS.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        if str(known_model).lower() in canonical:
+            context = int(context_tokens)
+            if context > 0:
+                return context
+            break
+    raise ValueError("provider_model_static_context_unknown")
+
+
+def _requested_output_tokens(
+    payload: Mapping[str, Any],
+    *,
+    key: str,
+    alias: str | None = None,
+    default: int,
+) -> int:
+    raw = payload.get(key)
+    if raw is None and alias:
+        raw = payload.get(alias)
+    if raw is None:
+        raw = default
+    try:
+        requested = int(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("provider_max_output_tokens_invalid") from exc
+    if requested <= 0:
+        raise ValueError("provider_max_output_tokens_invalid")
+    return requested
+
+
+def _enforce_primary_sdk_model(
+    auth: _ProxyAuth,
+    payload: Mapping[str, Any],
+    *,
+    route: str,
+) -> None:
+    """Bind invocation capabilities to the one production SDK model/route."""
+
+    if not auth.invocation_id:
+        return
+    requested_model = str(payload.get("model") or "").strip()
+    if route != "anthropic.messages" or requested_model != _PRIMARY_SDK_MODEL:
+        raise HTTPException(
+            status_code=403,
+            detail="operator_sdk_model_not_allowed",
+            headers={"x-should-retry": "false"},
+        )
+
+
 def _anthropic_estimate_microusd(payload: dict[str, Any]) -> int:
-    """The SERVER-side reserve estimate for an Anthropic call: the billed cost of the canonical payload's
-    estimated input tokens + the requested max_tokens (worst-case output). Fail-closed: an unpriced model
-    raises so the reserve never runs on an unpriceable call."""
+    """Reserve the full static context plus requested worst-case output.
+
+    The full context is priced as uncached input, which safely dominates any
+    realized mix of uncached and cheaper cached tokens. Unknown model context
+    or pricing fails before money authority or a provider key is reached.
+    """
     from . import ai_provider
 
-    _built, model, est_in = ai_provider.anthropic_payload(payload or {})
-    max_tokens = int((_built or {}).get("max_tokens") or 0)
-    _realized, billed = ai_provider.billed_microusd_cost(model, int(est_in), int(max_tokens))
+    _built, model, _est_in = ai_provider.anthropic_payload(payload or {})
+    context_tokens = _static_model_context_tokens(model)
+    max_tokens = _requested_output_tokens(
+        payload or {},
+        key="max_tokens",
+        alias="maxTokens",
+        default=int((_built or {}).get("max_tokens") or 1024),
+    )
+    _realized, billed = ai_provider.billed_microusd_cost(
+        model, context_tokens, max_tokens
+    )
     return int(billed)
 
 
@@ -481,16 +590,19 @@ def _openai_key_local() -> str:
 
 
 def _openai_responses_estimate_microusd(payload: dict[str, Any]) -> int:
-    """SERVER-side reserve estimate for an OpenAI Responses call. Input tokens are approximated from
-    the serialized payload (chars/4 — the Responses `input` array carries the whole prompt); output is
-    the requested `max_output_tokens` cap (or a modest default). Fail-closed: an unpriced model raises
-    so the reserve never runs on an unpriceable call."""
+    """Reserve the full static context plus requested worst-case output."""
     from . import ai_provider
 
     model = str((payload or {}).get("model") or "").strip()
-    est_in = max(1, len(_json.dumps(payload or {})) // 4)
-    max_out = int((payload or {}).get("max_output_tokens") or _OPENAI_RESPONSES_DEFAULT_MAX_OUTPUT_TOKENS)
-    _realized, billed = ai_provider.openai_billed_microusd_cost(model, est_in, max_out)
+    context_tokens = _static_model_context_tokens(model)
+    max_out = _requested_output_tokens(
+        payload or {},
+        key="max_output_tokens",
+        default=_OPENAI_RESPONSES_DEFAULT_MAX_OUTPUT_TOKENS,
+    )
+    _realized, billed = ai_provider.openai_billed_microusd_cost(
+        model, context_tokens, max_out
+    )
     return int(billed)
 
 
@@ -590,7 +702,222 @@ def _tavily_price_microusd(operation: str, payload: dict[str, Any]) -> int:
 
 
 # ── Money-gate helpers (operator rail) ────────────────────────────────────────────────────────────
-def _reserve_or_refuse(auth: _ProxyAuth, estimate_microusd: int):
+class _SdkInvocationEnvelope:
+    """Safebox-only cumulative authority for one primary SDK invocation."""
+
+    def claim(
+        self,
+        auth: _ProxyAuth,
+        estimate_microusd: int,
+        *,
+        call_id: str | None = None,
+    ) -> dict[str, Any]:
+        from .safebox_app import _safebox_db_conn
+
+        invocation_id = str(auth.invocation_id or "").strip()
+        call = str(call_id or uuid.uuid4())
+        estimate = max(0, int(estimate_microusd))
+        if not invocation_id:
+            raise RuntimeError("operator_sdk_invocation_missing")
+        with _safebox_db_conn() as conn, conn.transaction():
+            row = conn.execute(
+                "select owner_user_id::text, coalesce(business_slug, ''), "
+                "total_ceiling_microusd, per_call_ceiling_microusd, "
+                "extract(epoch from expires_at)::bigint, expires_at > now() "
+                "from operator_sdk_invocations where invocation_id = %s::uuid for update",
+                (invocation_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("operator_sdk_invocation_unknown")
+            expected_scope = (
+                str(getattr(auth.scope, "takyon_user_id", "") or ""),
+                str(getattr(auth.scope, "business_slug", "") or ""),
+                int(auth.invocation_total_ceiling_microusd),
+                int(auth.ceiling_microusd),
+                int(auth.capability_expires_at),
+            )
+            actual_scope = (
+                str(row[0] or ""),
+                str(row[1] or ""),
+                int(row[2]),
+                int(row[3]),
+                int(row[4]),
+            )
+            if actual_scope != expected_scope:
+                raise RuntimeError("operator_sdk_invocation_scope_mismatch")
+            if not bool(row[5]):
+                raise HTTPException(status_code=401, detail="operator_sdk_invocation_expired")
+            if estimate > int(row[3]):
+                raise HTTPException(
+                    status_code=402,
+                    detail="estimate_exceeds_invocation_per_call_ceiling",
+                )
+            existing = conn.execute(
+                "select estimate_microusd, actual_microusd, status "
+                "from operator_sdk_invocation_calls "
+                "where invocation_id = %s::uuid and call_id = %s::uuid",
+                (invocation_id, call),
+            ).fetchone()
+            if existing is not None:
+                if int(existing[0]) != estimate:
+                    raise RuntimeError("operator_sdk_invocation_call_replay_mismatch")
+                return {
+                    "invocation_id": invocation_id,
+                    "call_id": call,
+                    "estimate_microusd": estimate,
+                    "status": str(existing[2]),
+                    "actual_microusd": (
+                        int(existing[1]) if existing[1] is not None else None
+                    ),
+                    "replayed": True,
+                }
+            consumed = conn.execute(
+                "select coalesce(sum(case when status = 'held' then estimate_microusd "
+                "when status = 'settled' then actual_microusd else 0 end), 0) "
+                "from operator_sdk_invocation_calls where invocation_id = %s::uuid",
+                (invocation_id,),
+            ).fetchone()
+            already = int((consumed or (0,))[0] or 0)
+            if already + estimate > int(row[2]):
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "error": "operator_sdk_invocation_budget_exceeded",
+                        "remaining_microusd": max(0, int(row[2]) - already),
+                    },
+                )
+            conn.execute(
+                "insert into operator_sdk_invocation_calls "
+                "(invocation_id, call_id, estimate_microusd) "
+                "values (%s::uuid, %s::uuid, %s)",
+                (invocation_id, call, estimate),
+            )
+        return {
+            "invocation_id": invocation_id,
+            "call_id": call,
+            "estimate_microusd": estimate,
+            "status": "held",
+            "actual_microusd": None,
+            "replayed": False,
+        }
+
+    def settle(self, claim: Mapping[str, Any], actual_microusd: int) -> None:
+        from .safebox_app import _safebox_db_conn
+
+        estimate = int(claim["estimate_microusd"])
+        actual = int(actual_microusd)
+        if actual < 0:
+            raise RuntimeError("operator_sdk_invocation_actual_invalid")
+        if actual > estimate:
+            raise RuntimeError(
+                "operator_sdk_invocation_actual_exceeds_reserved_estimate"
+            )
+        with _safebox_db_conn() as conn, conn.transaction():
+            row = conn.execute(
+                "select estimate_microusd, actual_microusd, status "
+                "from operator_sdk_invocation_calls "
+                "where invocation_id = %s::uuid and call_id = %s::uuid for update",
+                (claim["invocation_id"], claim["call_id"]),
+            ).fetchone()
+            if row is None or int(row[0]) != estimate:
+                raise RuntimeError("operator_sdk_invocation_call_missing")
+            status = str(row[2])
+            if status == "settled":
+                if int(row[1]) != actual:
+                    raise RuntimeError("operator_sdk_invocation_settlement_mismatch")
+                return
+            if status != "held":
+                raise RuntimeError("operator_sdk_invocation_call_already_released")
+            conn.execute(
+                "update operator_sdk_invocation_calls set status = 'settled', "
+                "actual_microusd = %s, finalized_at = now() "
+                "where invocation_id = %s::uuid and call_id = %s::uuid",
+                (actual, claim["invocation_id"], claim["call_id"]),
+            )
+
+    def release(self, claim: Mapping[str, Any]) -> None:
+        from .safebox_app import _safebox_db_conn
+
+        with _safebox_db_conn() as conn, conn.transaction():
+            row = conn.execute(
+                "select status from operator_sdk_invocation_calls "
+                "where invocation_id = %s::uuid and call_id = %s::uuid for update",
+                (claim["invocation_id"], claim["call_id"]),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("operator_sdk_invocation_call_missing")
+            status = str(row[0])
+            if status == "released":
+                return
+            if status != "held":
+                raise RuntimeError("operator_sdk_invocation_call_already_settled")
+            conn.execute(
+                "update operator_sdk_invocation_calls set status = 'released', "
+                "finalized_at = now() where invocation_id = %s::uuid and call_id = %s::uuid",
+                (claim["invocation_id"], claim["call_id"]),
+            )
+
+
+class _InvocationBoundLedger:
+    def __init__(self, ledger, envelope: _SdkInvocationEnvelope, envelope_claim):
+        self._ledger = ledger
+        self._envelope = envelope
+        self._envelope_claim = envelope_claim
+
+    def settle(self, reservation, actual_microusd: int) -> None:
+        actual = int(actual_microusd)
+        estimate = int(self._envelope_claim["estimate_microusd"])
+        # Validate before touching the operator billing hold. Estimator or
+        # pricing drift leaves both holds intact rather than charging one rail
+        # and under-recording the invocation rail.
+        if actual < 0:
+            raise RuntimeError("operator_sdk_invocation_actual_invalid")
+        if actual > estimate:
+            raise RuntimeError(
+                "operator_sdk_invocation_actual_exceeds_reserved_estimate"
+            )
+        self._ledger.settle(reservation, actual)
+        self._envelope.settle(self._envelope_claim, actual)
+
+    def release(self, reservation) -> None:
+        self._ledger.release(reservation)
+        self._envelope.release(self._envelope_claim)
+
+
+def _stable_sdk_call_id(
+    auth: _ProxyAuth,
+    *,
+    operation: str,
+    payload: Mapping[str, Any],
+) -> str | None:
+    """Derive a replay-stable call UUID inside the authenticated invocation."""
+
+    invocation_id = str(auth.invocation_id or "").strip()
+    if not invocation_id:
+        return None
+    try:
+        namespace = uuid.UUID(invocation_id)
+        canonical = _json.dumps(
+            dict(payload),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid_sdk_provider_payload") from exc
+    fingerprint = hashlib.sha256(
+        str(operation or "").strip().encode("utf-8") + b"\0" + canonical
+    ).hexdigest()
+    return str(uuid.uuid5(namespace, fingerprint))
+
+
+def _reserve_or_refuse(
+    auth: _ProxyAuth,
+    estimate_microusd: int,
+    *,
+    call_id: str | None = None,
+):
     """Ceiling-check (for a capability) then RESERVE the operator budget. Returns the reservation handle.
 
     Raises HTTPException(402) on an over-ceiling estimate or an exhausted operator budget — BEFORE any
@@ -601,10 +928,37 @@ def _reserve_or_refuse(auth: _ProxyAuth, estimate_microusd: int):
     est = int(estimate_microusd)
     if auth.enforce_ceiling and est > int(auth.ceiling_microusd):
         raise HTTPException(status_code=402, detail="estimate_exceeds_ceiling")
+    envelope = _SdkInvocationEnvelope() if auth.invocation_id else None
+    try:
+        envelope_claim = (
+            envelope.claim(auth, est, call_id=call_id)
+            if envelope is not None
+            else None
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail="operator_sdk_invocation_authority_unavailable"
+        ) from exc
+    if envelope_claim is not None and envelope_claim.get("replayed"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "operator_sdk_invocation_call_replay",
+                "call_id": envelope_claim["call_id"],
+            },
+            headers={"x-should-retry": "false"},
+        )
     ledger = _OperatorBudgetAdapter()
     try:
         reservation = ledger.reserve(auth.scope, est)
     except OperatorBudgetExceeded as exc:
+        if envelope is not None and envelope_claim is not None:
+            try:
+                envelope.release(envelope_claim)
+            except Exception:
+                pass  # durable held estimate is the conservative recovery state
         raise HTTPException(
             status_code=402,
             detail={
@@ -614,18 +968,32 @@ def _reserve_or_refuse(auth: _ProxyAuth, estimate_microusd: int):
             },
         ) from exc
     except Exception as exc:  # noqa: BLE001 — BrokerLedgerError (missing identity / no account) is fail-closed
+        if envelope is not None and envelope_claim is not None:
+            try:
+                envelope.release(envelope_claim)
+            except Exception:
+                pass
         message = str(exc)
         if message.endswith("_missing") or message.endswith("_no_billing_account"):
             raise HTTPException(status_code=503, detail=message) from exc
         raise HTTPException(status_code=502, detail="operator_budget_error") from exc
+    if envelope is not None and envelope_claim is not None:
+        return _InvocationBoundLedger(ledger, envelope, envelope_claim), reservation
     return ledger, reservation
 
 
 def _settle(ledger, reservation, actual_microusd: int) -> None:
     try:
         ledger.settle(reservation, int(actual_microusd))
-    except Exception:  # noqa: BLE001 — settle must never surface to the caller after a successful call
-        pass
+    except Exception as exc:  # noqa: BLE001 — provider may already have succeeded
+        # Adapters fail before finalization, so durable holds remain
+        # conservative. Never silently hide pricing or settlement drift.
+        _log.error(
+            "provider settlement failed; hold retained actual_microusd=%s "
+            "exception_class=%s",
+            int(actual_microusd),
+            type(exc).__name__,
+        )
 
 
 def _release(ledger, reservation) -> None:
@@ -646,13 +1014,22 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
     def _anthropic_passthrough(payload: dict[str, Any], auth: _ProxyAuth):
         """Reserve -> resolve key -> (stream|call) -> settle. The key is injected ONLY into the outbound
         request headers; it never appears in the response."""
+        _enforce_primary_sdk_model(auth, payload, route="anthropic.messages")
         # 1. RESERVE the operator budget on the worst-case estimate BEFORE any key resolution / upstream
         #    call. Out of budget / unpriced model -> refused here (402 / 503).
         try:
             estimate = _anthropic_estimate_microusd(payload)
         except Exception as exc:  # noqa: BLE001 — AnthropicPricingUnavailable etc. -> fail-closed 503
             raise HTTPException(status_code=503, detail="anthropic_pricing_unavailable") from exc
-        ledger, reservation = _reserve_or_refuse(auth, estimate)
+        ledger, reservation = _reserve_or_refuse(
+            auth,
+            estimate,
+            call_id=_stable_sdk_call_id(
+                auth,
+                operation="anthropic.messages",
+                payload=payload,
+            ),
+        )
 
         # 2. Resolve the key LOCALLY (release the hold and 503 if unconfigured — never proceed keyless).
         model = str((payload or {}).get("model") or "")
@@ -849,11 +1226,20 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
     # lockdown so NO raw OpenAI key ever exists on an operator machine — the exact same contract as
     # the Anthropic/DeepSeek lane above: reserve -> inject key server-side -> stream/call -> settle.
     def _openai_responses_passthrough(payload: dict[str, Any], auth: _ProxyAuth):
+        _enforce_primary_sdk_model(auth, payload, route="openai.responses")
         try:
             estimate = _openai_responses_estimate_microusd(payload)
         except Exception as exc:  # noqa: BLE001 — OpenAIPricingUnavailable etc. -> fail-closed 503
             raise HTTPException(status_code=503, detail="openai_pricing_unavailable") from exc
-        ledger, reservation = _reserve_or_refuse(auth, estimate)
+        ledger, reservation = _reserve_or_refuse(
+            auth,
+            estimate,
+            call_id=_stable_sdk_call_id(
+                auth,
+                operation="openai.responses",
+                payload=payload,
+            ),
+        )
 
         key = _openai_key_local()
         if not key:
@@ -982,7 +1368,15 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
             price = _tavily_price_microusd(op, payload)
         except Exception as exc:  # noqa: BLE001 — TavilyPricingUnavailable -> fail-closed 503
             raise HTTPException(status_code=503, detail="tavily_pricing_unavailable") from exc
-        ledger, reservation = _reserve_or_refuse(auth, price)
+        ledger, reservation = _reserve_or_refuse(
+            auth,
+            price,
+            call_id=_stable_sdk_call_id(
+                auth,
+                operation=f"tavily.{op}",
+                payload=payload,
+            ),
+        )
 
         key = _tavily_key()
         if not key:

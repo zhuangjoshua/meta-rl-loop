@@ -19366,7 +19366,11 @@ class TakyonStore:
         for job in list_jobs(include_disabled=True):
             name = str(job.get("name") or "")
             origin = job.get("origin") if isinstance(job.get("origin"), dict) else {}
-            if name == expected_name or str(origin.get("business") or "") == business:
+            if (
+                str(job.get("business") or "") == business
+                or name == expected_name
+                or str(origin.get("business") or "") == business
+            ):
                 matches.append(job)
         return matches
 
@@ -23320,7 +23324,7 @@ class TakyonStore:
             "all means no focus restriction. Safety/control reads, pulse, blocker recording, and changing the focus are always allowed. "
             "Use first-class business tools for requested videos/images, local outreach publication, websites, deploys, checkout, provider calls, and other concrete artifacts; if a gate is missing, report the gate instead of substituting a Markdown brief. "
             "If unresolved inbound exists, inspect the actual conversation threads before deciding whether to reply or post. "
-            "Advance the outreach lifecycle: if no distribution campaign exists, start distribution/campaign/; if the current distribution campaign is incomplete, continue missing lanes, touches, or files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect X threads directly with takyon-x when the channel is clear, handle broader non-X discussion-thread work in takyon-distribution when the channel is clear, or load takyon-conversation-followup to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
+            "Advance the outreach lifecycle: if no distribution campaign exists, start distribution/campaign/; if the current distribution campaign is incomplete, continue missing lanes, touches, or files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect X threads directly with takyon-x when the channel is clear and handle broader non-X discussion-thread work with takyon-distribution; if no replies after review, choose the next campaign, angle, lane, or offer change. "
             "If the next move is X-native, use takyon-x; for a top-level X post, read current research/ state and use it to choose the audience, promise, objection, and hook. "
             "Product edits are NOT available on autonomous wakes: building or iterating the product, changing the app surface, pricing/plans, entitlements, mode, or destructive controls happen only at create/bootstrap or on an explicit operator chat request, and the underlying tools will refuse here. If /app is still only the create-time shell, or you judge a product/pricing change is warranted, do NOT attempt it on this wake — record the recommendation in research/strategy.md (and note it in metrics/wake-history.md) so the operator can request the change in chat. Spend this wake on distribution, research, metrics, and outreach instead. "
             "Do not narrate private setup with phrases like 'Good, I have the full business context' or 'Now I will'. "
@@ -23348,7 +23352,7 @@ class TakyonStore:
     def _ceo_cron_toolsets(self) -> list[str]:
         # The CEO operator role owns the spendful business methods (logo/ad/x-search/app-plan/etc.),
         # which live in the quarantined ``takyon-authority`` toolset so they never leak into generic
-        # Hermes/sub-agent/product-runtime contexts. The CEO turn is exactly the role meant to call
+        # or product-runtime contexts. The CEO turn is exactly the role meant to call
         # them, so it must carry that toolset; the tools themselves are fail-closed money gates, and
         # the worker-only operations (refresh_product_surface / runtime-capability provisioning)
         # self-guard against session-bound calls regardless of toolset membership.
@@ -23367,6 +23371,7 @@ class TakyonStore:
                     "prompt": self._ceo_cron_prompt(slug),
                     "skills": [],
                     "enabled_toolsets": self._ceo_cron_toolsets(),
+                    "business": slug,
                 },
         )
         return {
@@ -23487,6 +23492,7 @@ class TakyonStore:
                     "schedule": schedule,
                     "skills": [],
                     "enabled_toolsets": enabled_toolsets,
+                    "business": slug,
                     "enabled": schedule_enabled,
                     "state": "scheduled" if schedule_enabled else "paused",
                 },
@@ -23507,6 +23513,7 @@ class TakyonStore:
             skills=[],
             enabled_toolsets=enabled_toolsets,
             repeat=None,
+            business=slug,
         )
         if first_run_at is not None:
             job = update_job(job["id"], {"next_run_at": first_run_at.isoformat()}) or job

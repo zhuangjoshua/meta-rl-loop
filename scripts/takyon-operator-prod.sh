@@ -32,6 +32,27 @@ ACTIVE_LOCAL_WORKER_PREFIX_FILE="${TAKYON_OPERATOR_ACTIVE_WORKER_PREFIX_FILE:-$L
 OPERATOR_HOME="${TAKYON_OPERATOR_PROD_HOME:-$LOCAL_PROD_ROOT/operator}"
 DEFAULT_OPERATOR_USER_ID="${TAKYON_OPERATOR_DEFAULT_USER_ID:-150e4213-4006-4dc1-9cf3-ca7ab3b4696f}"
 OPERATOR_USER_ID_OVERRIDE=""
+PREPARE_PRIMARY_AGENT_RUNTIME="$ROOT/scripts/prepare-claude-agent-sdk-runtime.sh"
+
+prepare_primary_agent_runtime() {
+  [[ -x "$PREPARE_PRIMARY_AGENT_RUNTIME" ]] \
+    || die "primary Agent SDK runtime helper not found: $PREPARE_PRIMARY_AGENT_RUNTIME"
+  # shellcheck disable=SC1090
+  eval "$(TAKYON_PYTHON="$TAKYON_CLI_PYTHON" \
+    "$PREPARE_PRIMARY_AGENT_RUNTIME" "$ROOT" "$OPERATOR_HOME")"
+  export TAKYON_STRICT_MODEL_ROLES=1
+  export TAKYON_MODEL=deepseek-v4-pro
+  export TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro
+  export ANTHROPIC_MODEL=deepseek-v4-pro
+  export ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro
+  export ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro
+  export CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro
+  export TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD=5
+  export TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD=2
+  export TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD=2000000
+  export TAKYON_WORKER_AGENT_RUNTIME=claude-agent-sdk
+}
 
 # ── Named operator profiles ──────────────────────────────────────────────────────────────
 # Short name -> Takyon operator user-id, so you never paste a UUID:
@@ -692,6 +713,13 @@ keys = {
     'ANTHROPIC_DEFAULT_SONNET_MODEL',
     'ANTHROPIC_DEFAULT_HAIKU_MODEL',
     'CLAUDE_CODE_SUBAGENT_MODEL',
+    'TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD',
+    'TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD',
+    'TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD',
+    'TAKYON_CLAUDE_SKILLS_PLUGIN',
+    'TAKYON_CLAUDE_SKILLS_MANIFEST',
+    'TAKYON_CLAUDE_NODE_RUNTIME',
+    'TAKYON_DISABLE_LEGACY_SKILL_SYNC',
 }
 
 pid = subprocess.check_output(
@@ -738,13 +766,20 @@ if wrong_runtime:
 
 expected_models = {
     'TAKYON_STRICT_MODEL_ROLES': '1',
-    'TAKYON_MODEL': 'gpt-5.5',
+    'TAKYON_MODEL': 'deepseek-v4-pro',
     'TAKYON_CLAUDE_AGENT_MODEL': 'deepseek-v4-pro',
     'ANTHROPIC_MODEL': 'deepseek-v4-pro',
     'ANTHROPIC_DEFAULT_OPUS_MODEL': 'deepseek-v4-pro',
     'ANTHROPIC_DEFAULT_SONNET_MODEL': 'deepseek-v4-pro',
     'ANTHROPIC_DEFAULT_HAIKU_MODEL': 'deepseek-v4-pro',
     'CLAUDE_CODE_SUBAGENT_MODEL': 'deepseek-v4-pro',
+    'TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD': '5',
+    'TAKYON_PRIMARY_AGENT_PER_CALL_MAX_BUDGET_USD': '2',
+    'TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD': '2000000',
+    'TAKYON_CLAUDE_SKILLS_PLUGIN': '/opt/takyon/.takyon/runtime/claude-agent-sdk/current/plugin',
+    'TAKYON_CLAUDE_SKILLS_MANIFEST': '/opt/takyon/.takyon/runtime/claude-agent-sdk/current/plugin/approved-skills.json',
+    'TAKYON_CLAUDE_NODE_RUNTIME': '/opt/takyon/.takyon/runtime/claude-agent-sdk/current/node-runtime',
+    'TAKYON_DISABLE_LEGACY_SKILL_SYNC': '1',
 }
 wrong = [
     f'{key}={env.get(key) or \"<missing>\"}'
@@ -799,6 +834,7 @@ load_operator_env() {
     require_files
     ensure_operator_runtime_deps
     load_dev_operator_env
+    prepare_primary_agent_runtime
     return 0
   fi
   require_files
@@ -830,6 +866,7 @@ load_operator_env() {
     export TAKYON_CLAUDE_AGENT_BROKER_URL="$LOCAL_SAFEBOX_URL"
   fi
   export TAKYON_STORAGE_BACKEND="${TAKYON_STORAGE_BACKEND:-supabase_s3}"
+  prepare_primary_agent_runtime
   export TAKYON_SESSION_USER_ID="$(resolved_operator_user_id)"
   # Stage 2 (ClaimScope): one pool-id env binds this session's enqueues to the Mac's active
   # worker pool via the jobs reservation columns (claim_scope.session_claim_scope).

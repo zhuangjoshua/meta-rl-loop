@@ -1,19 +1,10 @@
-"""Operator inference gateway for Takyon-owned agent turns.
+"""Takyon operator inference compatibility and primary-agent facade.
 
-This keeps the Hermes/CEO tool loop outside the authority boundary while routing
-the actual provider HTTP requests through a local proxy transport. The proxy
-holds the real provider/base-URL resolution server-side; the outer agent only
-sees a placeholder key and a local gateway endpoint.
-
-This is intentionally a minimum-delta transport cutover:
-  * the agent loop, tool execution, and local filesystem writes stay where they are
-  * the model/provider request hop is redirected through a local gateway transport
-  * raw provider credentials are not injected into the outer ``AIAgent`` instance
-
-The gateway currently supports the three wire protocols used by operator runs:
-``chat_completions``, ``codex_responses``, and ``anthropic_messages``.
-Unsupported modes fail closed with a clear error instead of silently bypassing
-the gateway.
+New operator turns use :class:`PrimaryAgentFacade`, which delegates the model
+loop to the shared Claude Agent SDK subprocess and retains only the metadata
+surface needed by the existing CLI/dashboard RPC layer.  The older HTTP
+transport helpers remain temporarily for rollback inspection, but no live
+Takyon builder constructs the former Hermes model loop.
 """
 
 from __future__ import annotations
@@ -22,8 +13,10 @@ import json
 import logging
 import os
 import threading
+import uuid
+from types import SimpleNamespace
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import parse_qsl, urlparse
 
 import httpx
@@ -236,45 +229,486 @@ def rebuild_operator_gateway_transport(agent: Any) -> None:
     )
 
 
-def build_operator_gateway_agent(
+_PRIMARY_AGENT_MODEL = "deepseek-v4-pro"
+_PRIMARY_INTERACTIVE_TOOLSETS = (
+    "takyon",
+    "takyon-authority",
+    "web",
+    "skills",
+    "todo",
+)
+_PRIMARY_INTERACTIVE_DISABLED_TOOLSETS = (
+    "cronjob",
+    "messaging",
+    "memory",
+    "session_search",
+    "terminal",
+    "file",
+    "browser",
+    "code_execution",
+)
+
+
+def primary_interactive_budget_usd() -> float:
+    """Return the explicit per-turn SDK ceiling; absence is a deploy error."""
+
+    raw = str(os.getenv("TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD") or "").strip()
+    try:
+        value = float(raw or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value <= 0 or value > 100:
+        raise RuntimeError(
+            "interactive Claude Agent SDK turns require "
+            "TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD between 0 and 100"
+        )
+    return value
+
+
+def primary_interactive_epoch() -> str:
+    """Return a fresh Safebox invocation-envelope epoch for one SDK turn."""
+
+    return f"interactive:{uuid.uuid4()}"
+
+
+def compose_primary_agent_system_prompt(*parts: object) -> str:
+    """Compose stable CEO policy with optional UI/session overlays."""
+
+    try:
+        from plugins.takyon.turn_runtime import _load_ceo_prompt
+
+        ceo_prompt = str(_load_ceo_prompt() or "").strip()
+    except Exception:
+        ceo_prompt = ""
+    values: list[str] = []
+    for candidate in (ceo_prompt, *parts):
+        text = str(candidate or "").strip()
+        if text and text not in values:
+            values.append(text)
+    values.append(
+        "Use the approved native skills through the Skill tool when their "
+        "descriptions match the request. Skill availability, semantic capability "
+        "bindings, tool exposure, and write paths are enforced by the immutable "
+        "published HANDOFF policy; never infer broader authority from a skill body."
+    )
+    return "\n\n".join(values).strip()
+
+
+def _primary_message_text(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        text_parts: list[str] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("type") or "") == "text":
+                text = str(item.get("text") or "").strip()
+                if text:
+                    text_parts.append(text)
+        if text_parts:
+            return "\n\n".join(text_parts)
+    raise RuntimeError(
+        "primary Claude Agent SDK turns require text input; image attachments "
+        "must be pre-analyzed by the existing vision rail"
+    )
+
+
+class PrimaryAgentFacade:
+    """Metadata-compatible shell around the shared primary SDK subprocess.
+
+    The dashboard keeps its established RPC/session/history structures while
+    model state lives in the durable SDK SessionStore.  This object holds no
+    provider credential and exposes no nested-agent primitive.
+    """
+
+    def __init__(
+        self,
+        *,
+        operator_user_id: str = "",
+        business_slug: str = "",
+        workspace_root: str = "",
+        agent_kwargs: Mapping[str, Any] | None = None,
+    ) -> None:
+        kwargs = dict(agent_kwargs or {})
+        self.model = _PRIMARY_AGENT_MODEL
+        self.provider = "safebox"
+        self.api_mode = "anthropic_messages"
+        self.base_url = ""
+        self.api_key = "scoped-at-call"
+        self.max_iterations = int(kwargs.get("max_iterations") or 90)
+        self.enabled_toolsets = list(
+            kwargs.get("enabled_toolsets") or _PRIMARY_INTERACTIVE_TOOLSETS
+        )
+        self.disabled_toolsets = list(
+            kwargs.get("disabled_toolsets")
+            or _PRIMARY_INTERACTIVE_DISABLED_TOOLSETS
+        )
+        self.ephemeral_system_prompt = kwargs.get("ephemeral_system_prompt") or None
+        self.reasoning_config = kwargs.get("reasoning_config")
+        self.service_tier = kwargs.get("service_tier")
+        self.request_overrides = dict(kwargs.get("request_overrides") or {})
+        self.providers_allowed = None
+        self.providers_ignored = None
+        self.providers_order = None
+        self.provider_sort = None
+        self.provider_require_parameters = False
+        self.provider_data_collection = None
+        self.openrouter_min_coding_score = None
+        self.pass_session_id = bool(kwargs.get("pass_session_id"))
+        self.skip_context_files = True
+        self.skip_memory = True
+        self.verbose_logging = bool(kwargs.get("verbose_logging"))
+        self.session_id = str(kwargs.get("session_id") or "")
+        self._session_db = kwargs.get("session_db")
+        self._checkpoint_mgr = None
+        self._fallback_model = None
+        self._cached_system_prompt = compose_primary_agent_system_prompt(
+            self.ephemeral_system_prompt
+        )
+        self.tools: list[dict[str, Any]] = []
+        self.context_compressor = SimpleNamespace(
+            last_prompt_tokens=0,
+            context_length=0,
+            compression_count=0,
+        )
+        self.session_input_tokens = 0
+        self.session_prompt_tokens = 0
+        self.session_output_tokens = 0
+        self.session_completion_tokens = 0
+        self.session_cache_read_tokens = 0
+        self.session_cache_write_tokens = 0
+        self.session_reasoning_tokens = 0
+        self.session_total_tokens = 0
+        self.session_api_calls = 0
+        self.session_estimated_cost_usd = 0.0
+        self.session_cost_status = "unknown"
+        self._takyon_primary_sdk = True
+        self._takyon_operator_gateway = True
+        self._takyon_operator_gateway_context = OperatorGatewayContext(
+            provider="safebox",
+            requested_provider="safebox",
+            api_mode="anthropic_messages",
+            upstream_base_url="",
+            model=_PRIMARY_AGENT_MODEL,
+            operator_user_id=str(operator_user_id or "").strip(),
+            business_slug=str(business_slug or "").strip(),
+            workspace_root=str(workspace_root or "").strip(),
+        )
+        self.tool_start_callback = kwargs.get("tool_start_callback")
+        self.tool_complete_callback = kwargs.get("tool_complete_callback")
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.status_callback = kwargs.get("status_callback")
+        self.background_review_callback = None
+        self.interim_assistant_callback = None
+        self._interrupted = threading.Event()
+
+    def _scope(self) -> tuple[str, str, str]:
+        from gateway.session_context import get_session_env
+
+        context = self._takyon_operator_gateway_context
+        owner = str(
+            context.operator_user_id
+            or get_session_env("TAKYON_SESSION_USER_ID", "")
+            or ""
+        ).strip()
+        business = str(
+            context.business_slug
+            or get_session_env("TAKYON_SESSION_BUSINESS_SLUG", "")
+            or ""
+        ).strip()
+        workspace = str(
+            context.workspace_root
+            or get_session_env("TAKYON_SESSION_WORKSPACE_ROOT", "")
+            or ""
+        ).strip()
+        if not owner or not business or not workspace:
+            raise RuntimeError(
+                "primary Claude Agent SDK operator turns require exact operator, "
+                "business, and workspace scope; global model chat is disabled"
+            )
+        return owner, business, workspace
+
+    def _apply_usage(self, receipt: Mapping[str, Any]) -> None:
+        usage = receipt.get("usage") if isinstance(receipt.get("usage"), Mapping) else {}
+        self.session_input_tokens = int(
+            usage.get("input_tokens") or usage.get("input") or 0
+        )
+        self.session_prompt_tokens = self.session_input_tokens
+        self.session_output_tokens = int(
+            usage.get("output_tokens") or usage.get("output") or 0
+        )
+        self.session_completion_tokens = self.session_output_tokens
+        self.session_cache_read_tokens = int(
+            usage.get("cache_read_input_tokens") or usage.get("cache_read") or 0
+        )
+        self.session_cache_write_tokens = int(
+            usage.get("cache_creation_input_tokens") or usage.get("cache_write") or 0
+        )
+        self.session_total_tokens = self.session_input_tokens + self.session_output_tokens
+        self.session_api_calls = 1
+        raw_cost = receipt.get("total_cost_usd")
+        if isinstance(raw_cost, (int, float)):
+            self.session_estimated_cost_usd = float(raw_cost)
+            self.session_cost_status = "actual"
+
+    def run_conversation(
+        self,
+        user_message: object,
+        *,
+        conversation_history: Sequence[Mapping[str, Any]] | None = None,
+        system_message: str | None = None,
+        task_id: str | None = None,
+        stream_callback: Any = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        from plugins.takyon.claude_sdk_runtime import (
+            primary_sdk_session_project_key,
+            run_primary_sdk_subprocess,
+            stable_sdk_session_id,
+        )
+        from plugins.takyon.claude_sdk_sessions import PostgresClaudeSdkSessionStore
+
+        owner, business, workspace = self._scope()
+        stable_session = stable_sdk_session_id(self.session_id or task_id)
+        store = PostgresClaudeSdkSessionStore(
+            operator_user_id=owner,
+            business_slug=business,
+        )
+        key = {
+            "projectKey": primary_sdk_session_project_key(
+                operator_user_id=owner,
+                business=business,
+            ),
+            "sessionId": stable_session,
+        }
+        resume = store.load(key) is not None
+
+        def progress(event: Mapping[str, Any]) -> None:
+            kind = str(event.get("kind") or "runtime")
+            status = str(event.get("status") or "running")
+            detail = str(event.get("detail") or "")
+            trace = event.get("trace") if isinstance(event.get("trace"), Mapping) else {}
+            if kind == "skill" and callable(self.tool_progress_callback):
+                self.tool_progress_callback(
+                    f"skill.{status}",
+                    name=str(trace.get("skill_name") or "Skill"),
+                    preview=detail,
+                    status=status,
+                )
+            elif kind in {"session", "provider", "turn"} and callable(
+                self.status_callback
+            ):
+                self.status_callback(kind, detail)
+
+        result = run_primary_sdk_subprocess(
+            business=business,
+            operator_user_id=owner,
+            system_prompt=compose_primary_agent_system_prompt(
+                self.ephemeral_system_prompt,
+                system_message,
+            ),
+            user_prompt=_primary_message_text(user_message),
+            enabled_toolsets=self.enabled_toolsets,
+            disabled_toolsets=self.disabled_toolsets,
+            workspace_root=workspace,
+            session_id=stable_session,
+            resume_session=resume,
+            session_store=store,
+            task_id=str(task_id or self.session_id or ""),
+            mode="interactive",
+            epoch=primary_interactive_epoch(),
+            max_turns=self.max_iterations,
+            max_budget_usd=primary_interactive_budget_usd(),
+            effort="high",
+            stop_probe=lambda _elapsed, _idle: (
+                "operator interrupted the SDK turn" if self._interrupted.is_set() else None
+            ),
+            progress_callback=progress,
+            on_tool_start=self.tool_start_callback,
+            on_tool_complete=self.tool_complete_callback,
+        )
+        self._apply_usage(result)
+        final = str(result.get("summary") or "").strip()
+        if not final:
+            raise RuntimeError("primary Claude Agent SDK returned no final response")
+        if callable(stream_callback):
+            stream_callback(final)
+        messages = [dict(item) for item in (conversation_history or ())]
+        messages.extend(
+            [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": final},
+            ]
+        )
+        return {
+            "final_response": final,
+            "messages": messages,
+            "completed": True,
+            "sdk_receipt": dict(result),
+        }
+
+    def interrupt(self) -> None:
+        self._interrupted.set()
+
+    def steer(self, _text: str) -> bool:
+        return False
+
+    def close(self) -> None:
+        self._interrupted.set()
+
+    def compact_session(
+        self,
+        *,
+        session_id: str,
+        focus_topic: str | None = None,
+        operator_user_id: str | None = None,
+        business_slug: str | None = None,
+        workspace_root: str | None = None,
+    ) -> dict[str, Any]:
+        """Run the SDK's native manual compaction on one exact durable session."""
+
+        from plugins.takyon.claude_sdk_runtime import (
+            primary_sdk_session_project_key,
+            run_primary_sdk_subprocess,
+            stable_sdk_session_id,
+        )
+        from plugins.takyon.claude_sdk_sessions import PostgresClaudeSdkSessionStore
+
+        requested_session = str(session_id or self.session_id or "").strip()
+        if not requested_session:
+            raise RuntimeError("manual SDK compaction requires an exact session ID")
+        focus = " ".join(str(focus_topic or "").split())
+        if "\x00" in focus or len(focus) > 500:
+            raise RuntimeError("manual SDK compaction focus must be at most 500 characters")
+        explicit_scope = any(
+            value is not None
+            for value in (operator_user_id, business_slug, workspace_root)
+        )
+        if explicit_scope:
+            if operator_user_id is None or business_slug is None or workspace_root is None:
+                raise RuntimeError(
+                    "manual SDK compaction requires complete operator, business, and workspace scope"
+                )
+            owner = str(operator_user_id or "").strip()
+            business = str(business_slug or "").strip()
+            workspace = str(workspace_root or "").strip()
+            if not owner or not workspace:
+                raise RuntimeError(
+                    "manual SDK compaction requires exact operator and workspace scope"
+                )
+        else:
+            owner, business, workspace = self._scope()
+        stable_session = stable_sdk_session_id(requested_session)
+        store = PostgresClaudeSdkSessionStore(
+            operator_user_id=owner,
+            business_slug=business,
+        )
+        key = {
+            "projectKey": primary_sdk_session_project_key(
+                operator_user_id=owner,
+                business=business,
+            ),
+            "sessionId": stable_session,
+        }
+        if store.load(key) is None:
+            raise RuntimeError(
+                "manual SDK compaction requires an existing durable session"
+            )
+
+        def progress(event: Mapping[str, Any]) -> None:
+            if not callable(self.status_callback):
+                return
+            if (
+                str(event.get("kind") or "") == "session"
+                and str(event.get("status") or "") == "compacted"
+            ):
+                self.status_callback(
+                    "session", str(event.get("detail") or "Context compacted.")
+                )
+
+        result = run_primary_sdk_subprocess(
+            business=business,
+            operator_user_id=owner,
+            system_prompt=compose_primary_agent_system_prompt(
+                self.ephemeral_system_prompt
+            ),
+            user_prompt=f"/compact{f' {focus}' if focus else ''}",
+            enabled_toolsets=self.enabled_toolsets,
+            disabled_toolsets=self.disabled_toolsets,
+            workspace_root=workspace,
+            session_id=stable_session,
+            resume_session=True,
+            session_store=store,
+            task_id=f"compact:{stable_session}",
+            mode="interactive",
+            epoch=primary_interactive_epoch(),
+            operation="compact",
+            max_turns=1,
+            max_budget_usd=primary_interactive_budget_usd(),
+            effort="high",
+            inactivity_limit=600.0,
+            progress_callback=progress,
+        )
+        receipt = result.get("compact_receipt")
+        if not isinstance(receipt, Mapping) or receipt.get("trigger") != "manual":
+            raise RuntimeError(
+                "manual SDK compaction completed without a durable boundary receipt"
+            )
+        self._apply_usage(result)
+        return dict(result)
+
+    def refresh_tools(self) -> list[dict[str, Any]]:
+        raise RuntimeError(
+            "primary SDK tool inventory is immutable for the published runtime release"
+        )
+
+    def reload_mcp_tools(self) -> list[dict[str, Any]]:
+        raise RuntimeError(
+            "primary SDK MCP inventory is immutable for the published runtime release"
+        )
+
+    def commit_memory_session(self, _history: object) -> None:
+        return None
+
+    def switch_model(self, *, new_model: str, **_kwargs: Any) -> None:
+        if str(new_model or "").strip() != _PRIMARY_AGENT_MODEL:
+            raise RuntimeError(
+                f"primary operator model is pinned to {_PRIMARY_AGENT_MODEL}"
+            )
+
+    def _compress_context(
+        self, history: Sequence[Mapping[str, Any]], *_args: Any, **_kwargs: Any
+    ) -> tuple[list[dict[str, Any]], None]:
+        del history
+        raise RuntimeError(
+            "manual UI compression must use native SDK compact_session; generic "
+            "history compression cannot rewrite its durable session"
+        )
+
+
+def build_primary_agent_facade(
     *,
-    runtime: dict[str, Any],
-    model: str,
+    runtime: dict[str, Any] | None = None,
+    model: str = "",
     operator_user_id: str | None = None,
     business_slug: str | None = None,
     workspace_root: str | None = None,
     agent_kwargs: dict[str, Any] | None = None,
-):
-    from run_agent import AIAgent
-
-    if not operator_gateway_supported(runtime):
-        raise RuntimeError(
-            "operator gateway does not yet support "
-            f"api_mode={runtime.get('api_mode')!r}"
-        )
-    _require_strict_ceo_role(runtime, str(model or "").strip())
-
-    agent_kwargs = dict(agent_kwargs or {})
-    configured_fallback = agent_kwargs.pop("fallback_model", None)
-    if configured_fallback:
-        raise RuntimeError("Takyon CEO model fallback is disabled")
-    agent_kwargs["fallback_model"] = None
-    gateway_base = operator_gateway_client_base_url(runtime.get("api_mode") or "")
-    agent = AIAgent(
-        model=model,
-        provider=runtime.get("provider"),
-        base_url=gateway_base,
-        api_key=_PLACEHOLDER_API_KEY,
-        api_mode=runtime.get("api_mode"),
-        **agent_kwargs,
+) -> PrimaryAgentFacade:
+    del runtime, model
+    return PrimaryAgentFacade(
+        operator_user_id=str(operator_user_id or ""),
+        business_slug=str(business_slug or ""),
+        workspace_root=str(workspace_root or ""),
+        agent_kwargs=agent_kwargs,
     )
-    return enable_operator_gateway(
-        agent,
-        runtime,
-        operator_user_id=operator_user_id,
-        business_slug=business_slug,
-        workspace_root=workspace_root,
-    )
+
+
+def build_operator_gateway_agent(**kwargs: Any) -> PrimaryAgentFacade:
+    """Compatibility alias; live callers receive the primary SDK facade."""
+
+    return build_primary_agent_facade(**kwargs)
 
 
 def _replace_openai_gateway_client(agent: Any, context: OperatorGatewayContext) -> None:

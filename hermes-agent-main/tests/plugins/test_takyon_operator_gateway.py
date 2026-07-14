@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 import httpx
 import pytest
 
@@ -88,6 +90,71 @@ def _anthropic_context(business="latexflow", operator_user_id="owner-1"):
         operator_user_id=operator_user_id,
         business_slug=business,
     )
+
+
+def test_primary_facade_manual_compaction_uses_exact_resumed_sdk_session(
+    monkeypatch, tmp_path
+):
+    from plugins.takyon import claude_sdk_runtime, claude_sdk_sessions
+
+    owner = str(uuid.uuid4())
+    session_id = str(uuid.uuid4())
+    captured = {}
+
+    class Store:
+        project_key = "project"
+
+        def __init__(self, **kwargs):
+            captured["store_scope"] = kwargs
+
+        def load(self, key):
+            captured["load_key"] = key
+            return [{"type": "user", "uuid": "existing"}]
+
+    def run(**kwargs):
+        captured["run"] = kwargs
+        return {
+            "operation": "compact",
+            "compact_receipt": {
+                "trigger": "manual",
+                "pre_tokens": 1200,
+                "post_tokens": 300,
+            },
+            "usage": {"input_tokens": 40, "output_tokens": 10},
+            "total_cost_usd": 0.02,
+        }
+
+    monkeypatch.setattr(
+        claude_sdk_sessions, "PostgresClaudeSdkSessionStore", Store
+    )
+    monkeypatch.setattr(claude_sdk_runtime, "run_primary_sdk_subprocess", run)
+    monkeypatch.setattr(og, "compose_primary_agent_system_prompt", lambda *_args: "policy")
+    monkeypatch.setenv("TAKYON_PRIMARY_AGENT_MAX_BUDGET_USD", "2")
+
+    agent = og.PrimaryAgentFacade(
+        operator_user_id=owner,
+        business_slug="acme",
+        workspace_root=str(tmp_path),
+    )
+    result = agent.compact_session(
+        session_id=session_id,
+        focus_topic="  preserve   launch decisions  ",
+    )
+
+    assert result["compact_receipt"]["post_tokens"] == 300
+    assert captured["store_scope"] == {
+        "operator_user_id": owner,
+        "business_slug": "acme",
+    }
+    assert captured["load_key"]["sessionId"] == session_id
+    assert captured["run"]["session_id"] == session_id
+    assert captured["run"]["resume_session"] is True
+    assert captured["run"]["operation"] == "compact"
+    assert captured["run"]["user_prompt"] == (
+        "/compact preserve launch decisions"
+    )
+    assert agent.session_total_tokens == 50
+    assert agent.session_estimated_cost_usd == 0.02
 
 
 def test_anthropic_broker_runtime_uses_safebox_root_and_session_token(monkeypatch):

@@ -1,0 +1,3 @@
+schema_version: 1
+requires: [business.state.read, business.files.read, business.files.write, metrics.business.read, x.channel.operate, conversation.read, conversation.manage]
+produces: [distribution.x]

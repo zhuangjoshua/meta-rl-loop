@@ -24,7 +24,7 @@ Two independent proofs; require both before claiming "functional".
   matching (`event_id`).
 
 ## Verdict
-Write `metrics/meta-pixel/<slug>/{ensure,preflight}.json` with: `installed_vps`, `installed_r2`,
+Write the declared pixel-health artifact with: `installed_vps`, `installed_r2`,
 `dataset_ok`, `custom_conversion_ok`, `dataset_id`, `custom_conversion_id`, `emq`, `last_event`, `ok`.
 `ok` is true only when **both** proofs pass. Degrade truthfully (`{configured, ok}`) — never simulate a
 healthy pixel from source alone.

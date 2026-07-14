@@ -621,9 +621,9 @@ def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
 
 
 def _start_agent_build(sid: str, session: dict) -> None:
-    """Start building the real AIAgent for a TUI session, once.
+    """Start building the primary SDK facade for a TUI session, once.
 
-    Classic `takyon` shows the prompt before constructing AIAgent; the TUI used
+    Classic `takyon` shows the prompt before constructing its runtime; the TUI used
     to eagerly build it during session.create, making startup feel blocked on
     tool discovery/model metadata even though the composer was visible.  Keep
     the shell responsive by deferring this work until the first prompt (or any
@@ -665,10 +665,15 @@ def _start_agent_build(sid: str, session: dict) -> None:
             current["agent"] = agent
 
             try:
-                worker = _SlashWorker(
-                    key,
-                    getattr(agent, "model", _resolve_model()),
-                    operator_user_id=_takyon_operator_user_id(current),
+                owner = _takyon_operator_user_id(current)
+                worker = (
+                    _SlashWorker(
+                        key,
+                        getattr(agent, "model", _resolve_model()),
+                        operator_user_id=owner,
+                    )
+                    if owner
+                    else _SlashWorker(key, getattr(agent, "model", _resolve_model()))
                 )
                 current["slash_worker"] = worker
             except Exception:
@@ -1201,6 +1206,13 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
 
     strict_roles = str(os.environ.get("TAKYON_STRICT_MODEL_ROLES") or "").strip().lower()
     agent = session.get("agent")
+    if getattr(agent, "_takyon_primary_sdk", False):
+        pinned_model = "deepseek-v4-pro"
+        if model_input != pinned_model:
+            raise ValueError(
+                f"primary operator model is pinned to {pinned_model!r}"
+            )
+        return {"value": pinned_model, "warning": ""}
     if strict_roles in {"1", "true", "yes", "on"}:
         pinned_model = str(os.environ.get("TAKYON_MODEL") or "").strip()
         if not pinned_model:
@@ -1342,11 +1354,8 @@ def _compress_session_history(
         approx_tokens = estimate_request_tokens_rough(
             history, system_prompt=_sys_prompt, tools=_tools
         )
-    # Pass system_message=None so AIAgent._compress_context rebuilds the
-    # system prompt cleanly via _build_system_prompt(None). Passing the
-    # cached prompt (which already contains the agent identity block)
-    # makes the rebuild append the identity a second time. Mirrors the
-    # CLI's _manual_compress fix for issue #15281.
+    # The primary SDK owns provider-context compaction; the facade keeps this
+    # UI-history operation conservative and never rewrites SDK authority.
     compressed, _ = agent._compress_context(
         history,
         None,
@@ -1372,10 +1381,10 @@ def _sync_session_key_after_compress(
     clear_pending_title: bool = True,
     restart_slash_worker: bool = True,
 ) -> None:
-    """Re-anchor session_key when AIAgent._compress_context rotates session_id.
+    """Re-anchor session_key if a runtime rotates its durable session id.
 
-    AIAgent._compress_context ends the current SessionDB session and creates
-    a new continuation session, rotating ``agent.session_id``.  The TUI
+    Historical runtimes created a continuation session during compression and
+    rotated ``agent.session_id``.  The TUI
     gateway keeps the gateway-side ``session_key`` separate (used for
     approval routing, slash worker init, DB title/history lookups, yolo
     state).  Without this sync, those operations would target the ended
@@ -1540,6 +1549,70 @@ def _current_profile_name() -> str:
         return "default"
 
 
+def _load_approved_skills_manifest() -> dict[str, Any]:
+    configured = str(os.environ.get("TAKYON_CLAUDE_SKILLS_MANIFEST") or "").strip()
+    candidates = [
+        Path(configured) if configured else None,
+        Path(__file__).resolve().parents[1] / "skills" / "approved-skills.json",
+    ]
+    errors: list[str] = []
+    for candidate in candidates:
+        if candidate is None or not candidate.is_file():
+            continue
+        try:
+            manifest = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception as exc:
+            errors.append(f"{candidate}: {exc}")
+            continue
+        if isinstance(manifest, dict) and isinstance(manifest.get("skills"), list):
+            return manifest
+        errors.append(f"{candidate}: missing skills list")
+    detail = "; ".join(errors) if errors else "no published manifest found"
+    raise RuntimeError(f"approved Claude skill manifest unavailable: {detail}")
+
+
+def _resolve_approved_skill_identifier(identifier: object) -> tuple[str, str] | None:
+    requested = str(identifier or "").strip().lstrip("/")
+    if not requested:
+        return None
+    manifest = _load_approved_skills_manifest()
+    plugin_name = str((manifest.get("plugin") or {}).get("name") or "").strip()
+    for item in manifest.get("skills", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        source_slug = Path(str(item.get("source_path") or "")).name
+        aliases = {
+            name,
+            source_slug,
+            *(
+                str(value or "").strip()
+                for value in item.get("legacy_names", [])
+            ),
+        }
+        if name and requested in aliases:
+            qualified = f"{plugin_name}:{name}" if plugin_name else name
+            return name, qualified
+    return None
+
+
+def _approved_skill_commands() -> dict[str, dict[str, Any]]:
+    manifest = _load_approved_skills_manifest()
+    commands: dict[str, dict[str, Any]] = {}
+    for item in manifest.get("skills", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        commands[f"/{name}"] = {
+            "name": name,
+            "description": str(item.get("description") or "").strip(),
+            "skill_dir": str(item.get("plugin_path") or "").strip(),
+        }
+    return commands
+
+
 def _session_info(agent) -> dict:
     reasoning_config = getattr(agent, "reasoning_config", None)
     reasoning_effort = ""
@@ -1581,12 +1654,24 @@ def _session_info(agent) -> dict:
             )
     except Exception:
         pass
-    try:
-        from takyon_cli.banner import get_available_skills
+    if getattr(agent, "_takyon_primary_sdk", False):
+        try:
+            manifest = _load_approved_skills_manifest()
+            names = [
+                str(item.get("name") or "").strip()
+                for item in manifest.get("skills", [])
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            ]
+            info["skills"] = {"takyon": names}
+        except Exception:
+            info["skills"] = {}
+    else:
+        try:
+            from takyon_cli.banner import get_available_skills
 
-        info["skills"] = get_available_skills()
-    except Exception:
-        pass
+            info["skills"] = get_available_skills()
+        except Exception:
+            pass
     try:
         from tools.mcp_tool import get_mcp_status
 
@@ -2200,12 +2285,38 @@ def _terminate_isolated_turn_proc(proc) -> None:
         proc.wait(timeout=1.5)
         return
     except Exception:
-        pass
+        # The worker catches SIGTERM, kills its SDK process group, and then
+        # waits for any synchronous parent-owned tool to finish. Killing the
+        # worker here would orphan that side effect and its Node child.
+        threading.Thread(target=proc.wait, daemon=True).start()
+
+
+def _write_isolated_turn_input(session: dict, payload: dict[str, Any]) -> bool:
+    proc = session.get("takyon_turn_proc")
+    poll = getattr(proc, "poll", None)
+    if (
+        proc is None
+        or (callable(poll) and poll() is not None)
+        or proc.stdin is None
+    ):
+        return False
+    lock = session.get("takyon_turn_stdin_lock")
+    if lock is None:
+        return False
     try:
-        proc.kill()
-        proc.wait(timeout=1.5)
-    except Exception:
-        pass
+        with lock:
+            proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            proc.stdin.flush()
+        return True
+    except (BrokenPipeError, OSError, ValueError):
+        return False
+
+
+def _steer_primary_sdk_turn(session: dict, text: str) -> bool:
+    value = str(text or "")
+    if not value.strip() or len(value.encode("utf-8")) > 32 * 1024:
+        return False
+    return _write_isolated_turn_input(session, {"type": "steer", "text": value})
 
 
 def _build_isolated_turn_payload(
@@ -2220,6 +2331,8 @@ def _build_isolated_turn_payload(
     max_iterations_override: int | None = None,
     agent_config_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from plugins.takyon.operator_gateway import primary_interactive_epoch
+
     gateway_ctx = getattr(agent, "_takyon_operator_gateway_context", None)
     requested_provider = str(
         getattr(gateway_ctx, "requested_provider", "") or getattr(agent, "provider", "") or ""
@@ -2229,6 +2342,7 @@ def _build_isolated_turn_payload(
     ).strip()
     payload = {
         "session_key": str(session.get("session_key") or ""),
+        "invocation_epoch": primary_interactive_epoch(),
         "operator_user_id": operator_user_id,
         "business_slug": business_slug,
         "run_message": run_message,
@@ -2355,6 +2469,27 @@ def _forward_isolated_turn_event(
         _emit("tool.complete", sid, payload)
         return
     if event == "tool.progress":
+        event_type = str(payload.get("event_type") or "").strip()
+        if event_type.startswith("skill."):
+            skill_name = str(payload.get("name") or "Skill").strip()
+            skill_status = event_type.split(".", 1)[1] or "running"
+            detail = str(payload.get("preview") or "").strip()
+            _takyon_record_session_runtime_event(
+                session,
+                kind="ceo_turn",
+                status="trace",
+                detail=detail or f"{skill_name} {skill_status}.",
+                trace={
+                    "kind": "skill",
+                    "entry_key": f"skill:{skill_name}",
+                    "label": skill_name,
+                    "detail": detail or f"{skill_name} {skill_status}.",
+                    "status": "running" if skill_status == "started" else skill_status,
+                    "tool_name": "Skill",
+                    "skill_name": skill_name,
+                    "turn_key": str(session.get("takyon_active_turn_key") or "").strip(),
+                },
+            )
         _emit("tool.progress", sid, payload)
         return
     if event in {
@@ -2413,6 +2548,7 @@ def _run_isolated_gateway_turn(
         env=child_env,
     )
     session["takyon_turn_proc"] = proc
+    session["takyon_turn_stdin_lock"] = threading.Lock()
     session.pop("takyon_turn_interrupted", None)
     stderr_tail: list[str] = []
 
@@ -2431,8 +2567,8 @@ def _run_isolated_gateway_turn(
     final: dict[str, Any] | None = None
     try:
         assert proc.stdin is not None
-        proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        proc.stdin.flush()
+        if not _write_isolated_turn_input(session, payload):
+            raise RuntimeError("isolated turn input channel is unavailable")
         assert proc.stdout is not None
         for raw in proc.stdout:
             line = raw.strip()
@@ -2456,18 +2592,15 @@ def _run_isolated_gateway_turn(
                     dict(msg.get("payload") or {}),
                     timeout=int(msg.get("timeout") or 300),
                 )
-                proc.stdin.write(
-                    json.dumps(
-                        {
-                            "type": "response",
-                            "request_id": msg.get("request_id"),
-                            "value": answer,
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
-                proc.stdin.flush()
+                if not _write_isolated_turn_input(
+                    session,
+                    {
+                        "type": "response",
+                        "request_id": msg.get("request_id"),
+                        "value": answer,
+                    },
+                ):
+                    raise RuntimeError("isolated turn response channel is unavailable")
                 continue
             if kind == "result":
                 final = msg
@@ -2497,6 +2630,7 @@ def _run_isolated_gateway_turn(
         return final
     finally:
         session.pop("takyon_turn_proc", None)
+        session.pop("takyon_turn_stdin_lock", None)
         session.pop("takyon_turn_interrupted", None)
         try:
             if proc.stdin is not None:
@@ -2709,30 +2843,29 @@ def _takyon_is_skill_lab_host(
 
 
 def _takyon_skill_lab_catalog() -> list[dict[str, Any]]:
-    skills_root = Path(__file__).resolve().parents[1] / "skills" / "takyon"
+    manifest = _load_approved_skills_manifest()
     catalog: list[dict[str, Any]] = []
-    for skill_file in sorted(skills_root.glob("*/SKILL.md")):
-        try:
-            text = skill_file.read_text(encoding="utf-8")
-            meta = parse_frontmatter(text)[0]
-        except Exception:
-            meta = {}
-        skill_name = str(meta.get("name") or skill_file.parent.name).strip()
+    for item in manifest.get("skills", []):
+        if not isinstance(item, dict):
+            continue
+        skill_name = str(item.get("name") or "").strip()
         if not skill_name:
             continue
-        hermes_meta = ((meta.get("metadata") or {}).get("hermes") or {})
-        routing_meta = hermes_meta.get("routing") or {}
         catalog.append(
             {
                 "name": skill_name,
-                "slug": skill_file.parent.name,
-                "description": str(meta.get("description") or "").strip(),
-                "category": str(hermes_meta.get("category") or "").strip(),
-                "owns": str(routing_meta.get("owns") or "").strip(),
-                "path": str(skill_file),
+                "slug": Path(str(item.get("source_path") or skill_name)).name,
+                "description": str(item.get("description") or "").strip(),
+                "category": "approved",
+                "owns": ", ".join(
+                    str(value or "").strip()
+                    for value in item.get("produces", [])
+                    if str(value or "").strip()
+                ),
+                "path": str(item.get("plugin_path") or "").strip(),
             }
         )
-    return catalog
+    return sorted(catalog, key=lambda skill: skill["name"])
 
 
 def _build_takyon_skill_lab_prompt(
@@ -2740,31 +2873,33 @@ def _build_takyon_skill_lab_prompt(
     *,
     session_id: str | None = None,
 ) -> tuple[str, list[str], list[str]]:
-    from agent.skill_commands import build_preloaded_skills_prompt
-
     selected = _normalize_string_list(skill_identifiers)
     if not selected:
         return "", [], []
-    catalog = _takyon_skill_lab_catalog()
-    by_identifier: dict[str, str] = {}
-    for item in catalog:
-        name = str(item.get("name") or "").strip()
-        slug = str(item.get("slug") or "").strip()
-        path = str(item.get("path") or "").strip()
-        if not path:
+    del session_id
+    try:
+        manifest = _load_approved_skills_manifest()
+    except Exception:
+        return "", [], selected
+    plugin_name = str((manifest.get("plugin") or {}).get("name") or "").strip()
+    identifiers: dict[str, str] = {}
+    for item in manifest.get("skills", []):
+        if not isinstance(item, dict):
             continue
-        if name:
-            by_identifier.setdefault(name, path)
-        if slug:
-            by_identifier.setdefault(slug, path)
-    resolved_identifiers = [by_identifier.get(item, item) for item in selected]
-
-    skills_prompt, loaded_skills, missing_skills = build_preloaded_skills_prompt(
-        resolved_identifiers,
-        task_id=session_id,
-    )
+        name = str(item.get("name") or "").strip()
+        source_slug = Path(str(item.get("source_path") or "")).name
+        if not name:
+            continue
+        qualified = f"{plugin_name}:{name}" if plugin_name else name
+        for identifier in (name, source_slug, *item.get("legacy_names", [])):
+            value = str(identifier or "").strip()
+            if value:
+                identifiers.setdefault(value, qualified)
+    loaded_skills = [identifiers[item] for item in selected if item in identifiers]
+    missing_skills = [item for item in selected if item not in identifiers]
     session_note = (
         "You are in Takyon Skill Lab, a development test session for selected Takyon skills.\n"
+        f"Use these approved native skills when relevant: {', '.join(loaded_skills)}.\n"
         "If a dev business is already in scope, use the normal Takyon business rails for it.\n"
         "If no business is in scope, do not auto-bootstrap one just because a selected skill is normally business-scoped.\n"
         "If the active skill needs business state, credentials, receipts, or another authority gate, "
@@ -2772,48 +2907,7 @@ def _build_takyon_skill_lab_prompt(
         "Keep the session chat-like and truthful: use real tools when useful, stream normally, and let the "
         "tool/activity feed reflect what actually happened."
     )
-    parts = [session_note.strip()]
-    if skills_prompt.strip():
-        parts.append(skills_prompt.strip())
-    return "\n\n".join(parts).strip(), loaded_skills, missing_skills
-
-
-def _background_agent_kwargs(agent, task_id: str) -> dict:
-    cfg = _load_cfg()
-
-    return {
-        "base_url": getattr(agent, "base_url", None) or None,
-        "api_key": getattr(agent, "api_key", None) or None,
-        "provider": getattr(agent, "provider", None) or None,
-        "api_mode": getattr(agent, "api_mode", None) or None,
-        "acp_command": getattr(agent, "acp_command", None) or None,
-        "acp_args": getattr(agent, "acp_args", None) or None,
-        "model": getattr(agent, "model", None) or _resolve_model(),
-        "max_iterations": _cfg_max_turns(cfg, 25),
-        "enabled_toolsets": getattr(agent, "enabled_toolsets", None)
-        or _load_enabled_toolsets(),
-        "quiet_mode": True,
-        "verbose_logging": False,
-        "ephemeral_system_prompt": getattr(agent, "ephemeral_system_prompt", None)
-        or None,
-        "providers_allowed": getattr(agent, "providers_allowed", None),
-        "providers_ignored": getattr(agent, "providers_ignored", None),
-        "providers_order": getattr(agent, "providers_order", None),
-        "provider_sort": getattr(agent, "provider_sort", None),
-        "provider_require_parameters": getattr(
-            agent, "provider_require_parameters", False
-        ),
-        "provider_data_collection": getattr(agent, "provider_data_collection", None),
-        "openrouter_min_coding_score": getattr(agent, "openrouter_min_coding_score", None),
-        "session_id": task_id,
-        "reasoning_config": getattr(agent, "reasoning_config", None)
-        or _load_reasoning_config(),
-        "service_tier": getattr(agent, "service_tier", None) or _load_service_tier(),
-        "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
-        "platform": "tui",
-        "session_db": _get_db(),
-        "fallback_model": getattr(agent, "_fallback_model", None),
-    }
+    return session_note.strip(), loaded_skills, missing_skills
 
 
 def _reset_session_agent(sid: str, session: dict) -> dict:
@@ -2844,19 +2938,16 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
 
 
 def _make_agent(sid: str, key: str, session_id: str | None = None):
-    from plugins.takyon.operator_gateway import build_operator_gateway_agent
-    from takyon_cli.runtime_provider import resolve_runtime_provider
+    from plugins.takyon.operator_gateway import build_primary_agent_facade
 
     cfg = _load_cfg()
     agent_cfg = cfg.get("agent") or {}
     system_prompt = (agent_cfg.get("system_prompt", "") or "").strip()
     startup_skills = _parse_tui_skills_env()
     if startup_skills:
-        from agent.skill_commands import build_preloaded_skills_prompt
-
-        skills_prompt, _loaded_skills, missing_skills = build_preloaded_skills_prompt(
+        skills_prompt, _loaded_skills, missing_skills = _build_takyon_skill_lab_prompt(
             startup_skills,
-            task_id=session_id or key,
+            session_id=session_id or key,
         )
         if missing_skills:
             raise ValueError(f"Unknown skill(s): {', '.join(missing_skills)}")
@@ -2864,14 +2955,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
             system_prompt = "\n\n".join(
                 part for part in (system_prompt, skills_prompt) if part
             ).strip()
-    model, requested_provider = _resolve_startup_runtime()
-    runtime = resolve_runtime_provider(
-        requested=requested_provider,
-        target_model=model or None,
-    )
-    return build_operator_gateway_agent(
-        runtime=runtime,
-        model=model,
+    return build_primary_agent_facade(
         operator_user_id="",
         business_slug="",
         agent_kwargs={
@@ -2922,10 +3006,15 @@ def _init_session(
         "transport": current_transport() or _stdio_transport,
     }
     try:
-        _sessions[sid]["slash_worker"] = _SlashWorker(
-            key,
-            getattr(agent, "model", _resolve_model()),
-            operator_user_id=str(operator_user_id or "").strip(),
+        owner = str(operator_user_id or "").strip()
+        _sessions[sid]["slash_worker"] = (
+            _SlashWorker(
+                key,
+                getattr(agent, "model", _resolve_model()),
+                operator_user_id=owner,
+            )
+            if owner
+            else _SlashWorker(key, getattr(agent, "model", _resolve_model()))
         )
     except Exception:
         # Defer hard-failure to slash.exec; chat still works without slash worker.
@@ -2947,8 +3036,7 @@ def _init_session(
             "review.summary", _sid, {"text": str(message)}
         )
     except Exception:
-        # Bare AIAgents that don't expose the attribute (unlikely, but keep
-        # session startup resilient).
+        # Keep session startup resilient if a facade omits the callback.
         pass
     _wire_callbacks(sid)
     _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
@@ -3194,9 +3282,15 @@ def _resolve_session_operator_user_id(params: dict | None, transport) -> str:
         session_user = ""
     if session_user:
         return session_user
-    from plugins.takyon.core import operator_identity_mode
+    try:
+        from plugins.takyon.core import operator_identity_mode
 
-    if operator_identity_mode():
+        if operator_identity_mode():
+            return ""
+    except ImportError:
+        # Minimal slash-worker/test contexts may expose only the scoped CLI
+        # module; absence of the optional legacy process identity helper is not
+        # permission to synthesize an operator.
         return ""
     return str(os.getenv("TAKYON_OPERATOR_USER_ID") or "").strip()
 
@@ -3315,7 +3409,7 @@ def _(rid, params: dict) -> dict:
             )
 
     # Return the lightweight session immediately so Ink can paint the composer
-    # + skeleton panel, then build the real AIAgent just after this response is
+    # + skeleton panel, then build the SDK facade just after this response is
     # flushed.  This keeps startup responsive while still hydrating tools/skills
     # without requiring the user to submit a first prompt.
     def _deferred_build() -> None:
@@ -3469,19 +3563,32 @@ def _(rid, params: dict) -> dict:
             target, include_ancestors=True
         )
         messages = _history_to_messages(display_history)
-        tokens = _set_session_context(target, operator_user_id=operator_user_id)
+        tokens = (
+            _set_session_context(target, operator_user_id=operator_user_id)
+            if operator_user_id
+            else _set_session_context(target)
+        )
         try:
             agent = _make_agent(sid, target, session_id=target)
         finally:
             _clear_session_context(tokens)
-        _init_session(
-            sid,
-            target,
-            agent,
-            history,
-            cols=int(params.get("cols", 80)),
-            operator_user_id=operator_user_id,
-        )
+        if operator_user_id:
+            _init_session(
+                sid,
+                target,
+                agent,
+                history,
+                cols=int(params.get("cols", 80)),
+                operator_user_id=operator_user_id,
+            )
+        else:
+            _init_session(
+                sid,
+                target,
+                agent,
+                history,
+                cols=int(params.get("cols", 80)),
+            )
         if boot_business:
             try:
                 from plugins.takyon.cli import _slugify
@@ -3503,6 +3610,101 @@ def _(rid, params: dict) -> dict:
             "info": _session_info(agent),
         },
     )
+
+
+def _delete_primary_sdk_session_transcript(
+    *, session_key: str, operator_user_id: str
+) -> None:
+    """Delete the durable SDK transcript for one operator UI session."""
+
+    from plugins.takyon.claude_sdk_runtime import stable_sdk_session_id
+    from plugins.takyon.claude_sdk_sessions import PostgresClaudeSdkSessionStore
+
+    owner = str(operator_user_id or "").strip()
+    key = str(session_key or "").strip()
+    if not owner or not key:
+        raise RuntimeError("SDK transcript deletion requires operator and session scope")
+    PostgresClaudeSdkSessionStore(
+        operator_user_id=owner,
+        business_slug="",
+    ).delete_session_all_scopes(stable_sdk_session_id(key))
+
+
+def _reset_primary_sdk_transcript_for_history_edit(session: dict) -> None:
+    agent = session.get("agent")
+    if not getattr(agent, "_takyon_primary_sdk", False):
+        return
+    _delete_primary_sdk_session_transcript(
+        session_key=str(session.get("session_key") or ""),
+        operator_user_id=_takyon_operator_user_id(session),
+    )
+
+
+def _compact_primary_sdk_session(
+    session: dict,
+    *,
+    params: dict | None = None,
+    focus_topic: str | None = None,
+) -> dict[str, Any]:
+    """Compact one durable SDK transcript under its authenticated UI scope."""
+
+    agent = session.get("agent")
+    session_key = str(session.get("session_key") or "").strip()
+    if not session_key:
+        raise RuntimeError("manual SDK compaction requires an exact durable session key")
+
+    transport = current_transport() or session.get("transport") or _stdio_transport
+    authenticated_owner = _resolve_session_operator_user_id(params or {}, transport)
+    bound_owner = _takyon_operator_user_id(session)
+    if authenticated_owner and bound_owner and authenticated_owner != bound_owner:
+        raise RuntimeError("manual SDK compaction operator does not own this session")
+    owner = authenticated_owner or bound_owner
+    try:
+        owner = str(uuid.UUID(owner))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError(
+            "manual SDK compaction requires an authenticated operator"
+        ) from exc
+    if not bound_owner:
+        session["takyon_operator_user_id"] = owner
+        session.pop("takyon_store", None)
+
+    business = str(session.get("takyon_current_business") or "").strip()
+    from plugins.takyon.turn_runtime import _business_workspace_execution_context
+
+    if business:
+        workspace_context = _business_workspace_execution_context(
+            business,
+            operator_user_id=owner,
+        )
+    else:
+        global_workspace = (
+            get_takyon_home() / "runtime" / "operator-workspaces" / owner
+        )
+        global_workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+        global_workspace.chmod(0o700)
+        workspace_context = contextlib.nullcontext(global_workspace)
+
+    with workspace_context as workspace_home:
+        if workspace_home is None:
+            raise RuntimeError("manual SDK compaction workspace is unavailable")
+        workspace = str(Path(workspace_home).resolve())
+        tokens = _set_session_context(
+            session_key,
+            operator_user_id=owner,
+            workspace_root=workspace,
+            business_slug=business,
+        )
+        try:
+            return agent.compact_session(
+                session_id=session_key,
+                focus_topic=focus_topic,
+                operator_user_id=owner,
+                business_slug=business,
+                workspace_root=workspace,
+            )
+        finally:
+            _clear_session_context(tokens)
 
 
 @method("session.delete")
@@ -3536,6 +3738,25 @@ def _(rid, params: dict) -> dict:
     active = {s.get("session_key") for s in snapshot if s.get("session_key")}
     if target in active:
         return _err(rid, 4023, "cannot delete an active session")
+    operator_user_id = _resolve_session_operator_user_id(
+        params, current_transport() or _stdio_transport
+    )
+    if not operator_user_id:
+        from plugins.takyon.core import operator_identity_mode
+
+        if operator_identity_mode():
+            return _err(
+                rid,
+                4031,
+                "session deletion requires an authenticated operator",
+            )
+    if operator_user_id:
+        try:
+            _delete_primary_sdk_session_transcript(
+                session_key=str(target), operator_user_id=operator_user_id
+            )
+        except Exception as e:
+            return _err(rid, 5036, f"SDK transcript delete failed: {e}")
     sessions_dir = get_takyon_home() / "sessions"
     try:
         deleted = db.delete_session(target, sessions_dir=sessions_dir)
@@ -3749,7 +3970,7 @@ def _(rid, params: dict) -> dict:
         )
     removed = 0
     with session["history_lock"]:
-        history = session.get("history", [])
+        history = list(session.get("history", []))
         while history and history[-1].get("role") in {"assistant", "tool"}:
             history.pop()
             removed += 1
@@ -3757,6 +3978,8 @@ def _(rid, params: dict) -> dict:
             history.pop()
             removed += 1
         if removed:
+            _reset_primary_sdk_transcript_for_history_edit(session)
+            session["history"] = history
             session["history_version"] = int(session.get("history_version", 0)) + 1
     return _ok(rid, {"removed": removed})
 
@@ -3772,6 +3995,48 @@ def _(rid, params: dict) -> dict:
         )
     sid = params.get("session_id", "")
     focus_topic = str(params.get("focus_topic", "") or "").strip()
+    if getattr(session.get("agent"), "_takyon_primary_sdk", False):
+        agent = session["agent"]
+        with session["history_lock"]:
+            messages = list(session.get("history", []))
+        try:
+            receipt = _compact_primary_sdk_session(
+                session,
+                params=params,
+                focus_topic=focus_topic or None,
+            )
+        except Exception as exc:
+            return _err(rid, 5016, str(exc))
+        compact_receipt = receipt.get("compact_receipt") or {}
+        before_tokens = compact_receipt.get("pre_tokens")
+        after_tokens = compact_receipt.get("post_tokens")
+        token_line = ""
+        if before_tokens is not None and after_tokens is not None:
+            token_line = f"{before_tokens} → {after_tokens} provider-context tokens"
+        return _ok(
+            rid,
+            {
+                "status": "compacted",
+                "removed": 0,
+                "before_messages": len(messages),
+                "after_messages": len(messages),
+                "before_tokens": before_tokens,
+                "after_tokens": after_tokens,
+                "summary": {
+                    "headline": "SDK context compacted",
+                    "noop": False,
+                    "token_line": token_line,
+                    "note": (
+                        "The visible transcript is retained; the durable provider "
+                        "context now resumes from the compact boundary."
+                    ),
+                },
+                "compact_receipt": compact_receipt,
+                "usage": _get_usage(agent),
+                "info": _session_info(agent),
+                "messages": messages,
+            },
+        )
     try:
         from agent.manual_compression_feedback import summarize_manual_compression
         from agent.model_metadata import estimate_request_tokens_rough
@@ -4230,7 +4495,7 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Inject a user message into the next tool result without interrupting.
 
-    Mirrors AIAgent.steer(). Safe to call while a turn is running — the text
+    Safe to call while a turn is running — the text
     lands on the last tool result of the next tool batch and the model sees
     it on its next iteration. No interrupt, no new user turn, no role
     alternation violation.
@@ -4244,6 +4509,12 @@ def _(rid, params: dict) -> dict:
     agent = session.get("agent")
     if agent is None or not hasattr(agent, "steer"):
         return _err(rid, 4010, "agent does not support steer")
+    if getattr(agent, "_takyon_primary_sdk", False):
+        accepted = _steer_primary_sdk_turn(session, text)
+        return _ok(
+            rid,
+            {"status": "queued" if accepted else "rejected", "text": text},
+        )
     try:
         accepted = agent.steer(text)
     except Exception as exc:
@@ -4280,11 +4551,18 @@ def _(rid, params: dict) -> dict:
         if access_error:
             return _err(rid, 4041, access_error)
         session["takyon_current_business"] = requested_business
+    current_business = str(session.get("takyon_current_business") or "").strip()
+    skill_lab = session.get("takyon_skill_lab") if isinstance(session, dict) else None
+    if (
+        not current_business
+        and isinstance(skill_lab, dict)
+        and str(skill_lab.get("prompt") or "").strip()
+    ):
+        return _err(rid, 4004, "Skill Lab requires a selected business")
     with session["history_lock"]:
         if session.get("running"):
             return _err(rid, 4009, "session busy")
         session["running"] = True
-    skill_lab = session.get("takyon_skill_lab") if isinstance(session, dict) else None
     skill_lab_prompt = ""
     skill_lab_agent_overrides: dict[str, Any] | None = None
     if isinstance(skill_lab, dict):
@@ -4299,7 +4577,6 @@ def _(rid, params: dict) -> dict:
             skill_lab_agent_overrides = {
                 "ephemeral_system_prompt": combined_prompt or skill_lab_prompt
             }
-    current_business = str(session.get("takyon_current_business") or "").strip()
     _append_user_message_to_session_db(sid, session, text)
 
     _start_streaming_session_turn(
@@ -4603,9 +4880,6 @@ def _run_prompt_submit(
                 set_current_session_key,
             )
             from plugins.takyon.cli import (
-                _business_workspace_execution_context,
-                _operator_budget_finalize,
-                _operator_budget_reserve,
                 _resolved_operator_user_id,
             )
 
@@ -4670,10 +4944,14 @@ def _run_prompt_submit(
                     from takyon_cli.config import load_config as _tui_load_config
 
                     _cfg = _tui_load_config()
-                    _mode = decide_image_input_mode(
-                        _read_main_provider(),
-                        _read_main_model(),
-                        _cfg,
+                    _mode = (
+                        "text"
+                        if getattr(agent, "_takyon_primary_sdk", False)
+                        else decide_image_input_mode(
+                            _read_main_provider(),
+                            _read_main_model(),
+                            _cfg,
+                        )
                     )
                 except Exception as _img_exc:
                     print(
@@ -4742,118 +5020,63 @@ def _run_prompt_submit(
                         "status": "running",
                     },
                 )
-            if resolved_operator_user_id:
-                reservation_key, reserved_cents = _operator_budget_reserve(
-                    operator_user_id=resolved_operator_user_id,
-                    business_slug=current_business or None,
-                    reservation_key=f"tui-turn:{sid}:{uuid.uuid4().hex}",
-                )
-                turn_cost_before_usd = float(
-                    getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0
-                )
+            # Every provider call is reserved and settled once inside the
+            # Safebox SDK invocation envelope. A second dashboard-side hold
+            # would double-charge the same turn.
+            turn_cost_before_usd = (
+                0.0
+                if getattr(agent, "_takyon_primary_sdk", False)
+                else float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
+            )
 
             worker_usage = None
             turn_cost_after_usd = turn_cost_before_usd
-            original_agent_max_iterations = getattr(agent, "max_iterations", None)
-            if getattr(agent, "_takyon_operator_gateway", False):
-                worker_kwargs = {
-                    "operator_user_id": resolved_operator_user_id,
-                    "business_slug": current_business,
-                    "streamer": streamer,
-                }
-                if system_message_override:
-                    worker_kwargs["system_message_override"] = system_message_override
-                if max_iterations_override is not None:
-                    worker_kwargs["max_iterations_override"] = max_iterations_override
-                if isinstance(agent_config_overrides, dict) and agent_config_overrides:
-                    worker_kwargs["agent_config_overrides"] = dict(agent_config_overrides)
-                worker_result = _run_isolated_gateway_turn(
-                    sid,
-                    session,
-                    agent,
-                    run_message,
-                    list(history),
-                    **worker_kwargs,
-                )
-                result = worker_result.get("result")
-                worker_usage = (
-                    dict(worker_result.get("usage") or {})
+            if not getattr(agent, "_takyon_primary_sdk", False):
+                raise RuntimeError("TUI operator session is not bound to the primary SDK runtime")
+            worker_kwargs = {
+                "operator_user_id": resolved_operator_user_id,
+                "business_slug": current_business,
+                "streamer": streamer,
+            }
+            if system_message_override:
+                worker_kwargs["system_message_override"] = system_message_override
+            if max_iterations_override is not None:
+                worker_kwargs["max_iterations_override"] = max_iterations_override
+            if isinstance(agent_config_overrides, dict) and agent_config_overrides:
+                worker_kwargs["agent_config_overrides"] = dict(agent_config_overrides)
+            worker_result = _run_isolated_gateway_turn(
+                sid,
+                session,
+                agent,
+                run_message,
+                list(history),
+                **worker_kwargs,
+            )
+            result = worker_result.get("result")
+            worker_usage = (
+                dict(worker_result.get("usage") or {})
+                if isinstance(worker_result, dict)
+                else None
+            )
+            _apply_usage_snapshot(
+                agent,
+                worker_result.get("usage_snapshot")
+                if isinstance(worker_result, dict)
+                else None,
+                session_id=str(
+                    (worker_result.get("session_id") or "")
                     if isinstance(worker_result, dict)
-                    else None
-                )
-                _apply_usage_snapshot(
-                    agent,
-                    worker_result.get("usage_snapshot")
+                    else ""
+                ),
+            )
+            try:
+                turn_cost_after_usd = float(
+                    (worker_result.get("session_estimated_cost_usd"))
                     if isinstance(worker_result, dict)
-                    else None,
-                    session_id=str(
-                        (worker_result.get("session_id") or "")
-                        if isinstance(worker_result, dict)
-                        else ""
-                    ),
+                    else turn_cost_before_usd
                 )
-                try:
-                    turn_cost_after_usd = float(
-                        (worker_result.get("session_estimated_cost_usd"))
-                        if isinstance(worker_result, dict)
-                        else turn_cost_before_usd
-                    )
-                except (TypeError, ValueError):
-                    turn_cost_after_usd = turn_cost_before_usd
-            else:
-                def _stream(delta):
-                    payload = {"text": delta}
-                    if streamer and (r := streamer.feed(delta)) is not None:
-                        payload["rendered"] = r
-                    _emit("message.delta", sid, payload)
-
-                workspace_context = (
-                    _business_workspace_execution_context(
-                        current_business,
-                        operator_user_id=resolved_operator_user_id,
-                    )
-                    if current_business
-                    else contextlib.nullcontext(None)
-                )
-                with workspace_context as workspace_home:
-                    try:
-                        if max_iterations_override is not None:
-                            agent.max_iterations = int(max_iterations_override)
-                        session_tokens = _set_session_context(
-                            session["session_key"],
-                            operator_user_id=resolved_operator_user_id,
-                            workspace_root=str(workspace_home or ""),
-                            business_slug=current_business,
-                        )
-                        # Stream each model response (mid-loop assistant message) of a
-                        # business turn to the chat as its own bubble, so a multi-step
-                        # interactive turn reads like a live agent conversation — same
-                        # rail as the bootstrap/wake worker path. Display-only: the
-                        # interim hook only forwards text the loop already appended to
-                        # messages (never mutates context). Gated on current_business
-                        # and cleared in finally so it never leaks to a later turn.
-                        if current_business:
-                            agent.interim_assistant_callback = (
-                                lambda text, already_streamed=False: _takyon_record_ceo_turn_chat(
-                                    session, text
-                                )
-                            )
-                        run_kwargs = {
-                            "conversation_history": list(history),
-                            "stream_callback": _stream,
-                        }
-                        if system_message_override:
-                            run_kwargs["system_message"] = system_message_override
-                        result = agent.run_conversation(run_message, **run_kwargs)
-                    finally:
-                        if (
-                            max_iterations_override is not None
-                            and original_agent_max_iterations is not None
-                        ):
-                            agent.max_iterations = original_agent_max_iterations
-                        # Don't let the per-turn interim chat tap persist on the reused
-                        # session agent into a later (possibly non-business) turn.
-                        agent.interim_assistant_callback = None
+            except (TypeError, ValueError):
+                turn_cost_after_usd = turn_cost_before_usd
 
             last_reasoning = None
             status_note = None
@@ -4893,12 +5116,8 @@ def _run_prompt_submit(
                                 "but was not saved to session history."
                             )
 
-                # If auto-compression fired inside run_conversation(), agent.session_id
-                # may have rotated. Sync session_key before downstream title/goal/finalize
-                # handling uses it. Preserve pending_title (user intent) so it can be
-                # applied to the continuation. Restart slash worker so subsequent
-                # worker-backed commands (/title etc.) target the live session.
-                # Fix for #20001.
+                # Preserve compatibility with imported sessions whose runtime
+                # may already have a continuation id.
                 _sync_session_key_after_compress(
                     sid, session, clear_pending_title=False, restart_slash_worker=True,
                 )
@@ -5169,25 +5388,14 @@ def _run_prompt_submit(
                     )
                 ),
             )
-            if reservation_key:
-                try:
-                    billing_warning = _operator_budget_finalize(
-                        operator_user_id=resolved_operator_user_id,
-                        business_slug=str(session.get("takyon_current_business") or "").strip() or None,
-                        reservation_key=reservation_key,
-                        reserved_cents=reserved_cents,
-                        actual_cents=turn_actual_cents,
-                    )
-                except Exception as exc:
-                    _emit("error", sid, {"message": f"budget settlement failed: {exc}"})
-                if billing_warning:
-                    _emit("status.update", sid, {"kind": "budget", "text": billing_warning})
+            if turn_actual_cents:
                 _emit(
                     "takyon.operator.account",
                     sid,
                     {
                         "actual_cents": turn_actual_cents,
-                        "reserved_cents": reserved_cents,
+                        "reserved_cents": 0,
+                        "billing_mode": "provider_broker",
                     },
                 )
             try:
@@ -5408,33 +5616,26 @@ def _(rid, params: dict) -> dict:
             task_id, operator_user_id=_takyon_operator_user_id(session)
         )
         try:
-            from run_agent import AIAgent
-
-            bg_agent = AIAgent(**_background_agent_kwargs(session["agent"], task_id))
-            parent_agent = session["agent"]
-            if getattr(parent_agent, "_takyon_operator_gateway", False):
-                from plugins.takyon.operator_gateway import enable_operator_gateway
-                from takyon_cli.runtime_provider import resolve_runtime_provider
-
-                context = getattr(parent_agent, "_takyon_operator_gateway_context", None)
-                runtime = resolve_runtime_provider(
-                    requested=getattr(context, "requested_provider", None),
-                    target_model=getattr(bg_agent, "model", None),
-                    explicit_base_url=getattr(context, "upstream_base_url", None) or None,
+            operator_user_id = _takyon_operator_user_id(session)
+            business_slug = str(session.get("takyon_current_business") or "").strip()
+            if not operator_user_id or not business_slug:
+                raise RuntimeError(
+                    "background SDK turns require an operator-owned business scope"
                 )
-                enable_operator_gateway(
-                    bg_agent,
-                    runtime,
-                    pinned_model=getattr(context, "model", ""),
-                    operator_user_id=getattr(context, "operator_user_id", ""),
-                    business_slug=getattr(context, "business_slug", ""),
-                    workspace_root=getattr(context, "workspace_root", ""),
-                )
-
-            result = bg_agent.run_conversation(
-                user_message=text,
-                task_id=task_id,
+            background_session = dict(session)
+            background_session["session_key"] = task_id
+            background_session.pop("takyon_turn_proc", None)
+            worker_result = _run_isolated_gateway_turn(
+                parent,
+                background_session,
+                session["agent"],
+                text,
+                [],
+                operator_user_id=operator_user_id,
+                business_slug=business_slug,
+                streamer=None,
             )
+            result = worker_result.get("result") if isinstance(worker_result, dict) else {}
             _emit(
                 "background.complete",
                 parent,
@@ -6047,6 +6248,17 @@ def _(rid, params: dict) -> dict:
 @method("reload.mcp")
 def _(rid, params: dict) -> dict:
     session = _sessions.get(params.get("session_id", ""))
+    if session and getattr(session.get("agent"), "_takyon_primary_sdk", False):
+        return _ok(
+            rid,
+            {
+                "status": "immutable",
+                "message": (
+                    "Primary SDK tools and MCP bindings are immutable for the "
+                    "published runtime release; publish and deploy a new release to change them."
+                ),
+            },
+        )
     try:
         # Gate: /reload-mcp invalidates the prompt cache for this session.
         # Respect the ``approvals.mcp_reload_confirm`` config toggle — if
@@ -6235,14 +6447,19 @@ def _(rid, params: dict) -> dict:
 
         skill_count = 0
         try:
-            from agent.skill_commands import scan_skill_commands
-
-            for k, info in sorted(scan_skill_commands().items()):
+            skill_bucket = "Approved skills"
+            if skill_bucket not in cat_map:
+                cat_map[skill_bucket] = []
+                cat_order.append(skill_bucket)
+            for k, info in sorted(_approved_skill_commands().items()):
                 d = str(info.get("description", "Skill"))
-                all_pairs.append([k, d[:120] + ("…" if len(d) > 120 else "")])
+                short = d[:120] + ("…" if len(d) > 120 else "")
+                all_pairs.append([k, short])
+                cat_map[skill_bucket].append([k, short])
+                canon[k.lower()] = k
                 skill_count += 1
         except Exception as e:
-            warning = f"skill discovery unavailable: {e}"
+            warning = f"approved skill manifest unavailable: {e}"
 
         for cat in cat_order:
             categories.append({"name": cat, "pairs": cat_map[cat]})
@@ -9372,7 +9589,11 @@ def _takyon_detached_shell_target(line: str, current_business: str | None) -> tu
         except Exception:
             return None
         if auto_start and not no_auto and slug:
-            return None
+            return (
+                "create",
+                slug,
+                "/" + shlex.join(["create", *tokens[1:]]),
+            )
 
     return None
 
@@ -12243,9 +12464,12 @@ def _(rid, params: dict) -> dict:
                     "to see files, blockers, and deliverables."
                 )
             )
+            if detached_kind == "create" and target_business:
+                session["takyon_current_business"] = target_business
             result: dict[str, Any] = {
                 "output": message,
                 **_takyon_scope_payload(session),
+                "business": target_business or current_business or "",
             }
             return _ok(
                 rid,
@@ -12371,6 +12595,25 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"type": "alias", "target": qc.get("target", "")})
 
     try:
+        resolved_skill = _resolve_approved_skill_identifier(name)
+    except Exception:
+        resolved_skill = None
+    if resolved_skill:
+        approved_name, qualified_name = resolved_skill
+        instruction = str(arg or "").strip() or "Follow the skill instructions for this turn."
+        return _ok(
+            rid,
+            {
+                "type": "skill",
+                "message": (
+                    f"Invoke the approved native skill `{qualified_name}` for this turn. "
+                    f"Operator instruction: {instruction}"
+                ),
+                "name": approved_name,
+            },
+        )
+
+    try:
         from takyon_cli.plugins import (
             get_plugin_command_handler,
             resolve_plugin_command_result,
@@ -12380,30 +12623,6 @@ def _(rid, params: dict) -> dict:
         if handler:
             result = resolve_plugin_command_result(handler(arg))
             return _ok(rid, {"type": "plugin", "output": str(result or "")})
-    except Exception:
-        pass
-
-    try:
-        from agent.skill_commands import (
-            scan_skill_commands,
-            build_skill_invocation_message,
-        )
-
-        cmds = scan_skill_commands()
-        key = f"/{name}"
-        if key in cmds:
-            msg = build_skill_invocation_message(
-                key, arg, task_id=session.get("session_key", "") if session else ""
-            )
-            if msg:
-                return _ok(
-                    rid,
-                    {
-                        "type": "skill",
-                        "message": msg,
-                        "name": cmds[key].get("name", name),
-                    },
-                )
     except Exception:
         pass
 
@@ -12446,6 +12665,7 @@ def _(rid, params: dict) -> dict:
         # Truncate history: remove everything from the last user message onward
         # (mirrors CLI retry_last() which strips the failed exchange)
         with session["history_lock"]:
+            _reset_primary_sdk_transcript_for_history_edit(session)
             session["history"] = history[:last_user_idx]
             session["history_version"] = int(session.get("history_version", 0)) + 1
         return _ok(rid, {"type": "send", "message": content})
@@ -12454,6 +12674,15 @@ def _(rid, params: dict) -> dict:
         if not arg:
             return _err(rid, 4004, "usage: /steer <prompt>")
         agent = session.get("agent") if session else None
+        if agent and getattr(agent, "_takyon_primary_sdk", False):
+            if _steer_primary_sdk_turn(session, arg):
+                return _ok(
+                    rid,
+                    {
+                        "type": "exec",
+                        "output": f"⏩ Steer queued — applied to the active SDK turn: {arg[:80]}{'...' if len(arg) > 80 else ''}",
+                    },
+                )
         if agent and hasattr(agent, "steer"):
             try:
                 accepted = agent.steer(arg)
@@ -12467,8 +12696,16 @@ def _(rid, params: dict) -> dict:
                     )
             except Exception:
                 pass
-        # Fallback: no active run, treat as next-turn message
-        return _ok(rid, {"type": "send", "message": arg})
+        return _ok(
+            rid,
+            {
+                "type": "send",
+                "notice": (
+                    "No active SDK turn accepted steering; this was submitted as the next turn."
+                ),
+                "message": arg,
+            },
+        )
 
     if name == "goal":
         if not session:
@@ -12984,12 +13221,9 @@ def _(rid, params: dict) -> dict:
         from prompt_toolkit.document import Document
         from prompt_toolkit.formatted_text import to_plain_text
 
-        from agent.skill_commands import get_skill_commands
-        from agent.skill_bundles import get_skill_bundles
-
         completer = SlashCommandCompleter(
-            skill_commands_provider=lambda: get_skill_commands(),
-            skill_bundles_provider=lambda: get_skill_bundles(),
+            skill_commands_provider=_approved_skill_commands,
+            skill_bundles_provider=lambda: {},
         )
         doc = Document(text, len(text))
         items = [
@@ -13249,6 +13483,18 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
             agent.ephemeral_system_prompt = new_prompt or None
             agent._cached_system_prompt = None
         elif name == "compress" and agent:
+            if getattr(agent, "_takyon_primary_sdk", False):
+                receipt = _compact_primary_sdk_session(
+                    session,
+                    focus_topic=arg or None,
+                )
+                boundary = receipt.get("compact_receipt") or {}
+                before = boundary.get("pre_tokens")
+                after = boundary.get("post_tokens")
+                _emit("session.info", sid, _session_info(agent))
+                if before is not None and after is not None:
+                    return f"primary SDK context compacted: {before} → {after} tokens"
+                return "primary SDK context compacted"
             _compress_session_history(session, arg)
             _sync_session_key_after_compress(sid, session)
             _emit("session.info", sid, _session_info(agent))
@@ -13260,6 +13506,8 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
                 agent.service_tier = None
             _emit("session.info", sid, _session_info(agent))
         elif name == "reload-mcp" and agent and hasattr(agent, "reload_mcp_tools"):
+            if getattr(agent, "_takyon_primary_sdk", False):
+                return "primary SDK tools are immutable for the published runtime release"
             agent.reload_mcp_tools()
         elif name == "stop":
             from tools.process_registry import process_registry
@@ -13423,15 +13671,15 @@ def _(rid, params: dict) -> dict:
             )
 
     try:
-        from agent.skill_commands import get_skill_commands
-
-        _cmd_key = f"/{_cmd_base}"
-        if _cmd_key in get_skill_commands():
-            return _err(
-                rid, 4018, f"skill command: use command.dispatch for {_cmd_key}"
-            )
+        resolved_skill = _resolve_approved_skill_identifier(_cmd_base)
     except Exception:
-        pass
+        resolved_skill = None
+    if resolved_skill:
+        return _err(
+            rid,
+            4018,
+            f"skill command: use command.dispatch for /{resolved_skill[0]}",
+        )
 
     plugin_handler = None
     resolve_plugin_command_result = None
@@ -13458,6 +13706,18 @@ def _(rid, params: dict) -> dict:
     structured = _structured_slash_result(session, _cmd_base, _cmd_arg)
     if structured is not None:
         return _ok(rid, structured)
+
+    if (
+        getattr(session.get("agent"), "_takyon_primary_sdk", False)
+        and _cmd_base in {"compress", "reload-mcp"}
+    ):
+        # These are primary-runtime control operations, not legacy CLI
+        # commands. Never let the slash worker mutate a second transcript or
+        # reload ambient MCP configuration before the SDK disposition runs.
+        output = _mirror_slash_side_effects(
+            params.get("session_id", ""), session, cmd
+        )
+        return _ok(rid, {"output": output or "(no output)"})
 
     worker = session.get("slash_worker")
     if not worker:
@@ -14450,24 +14710,22 @@ def _(rid, params: dict) -> dict:
 @method("skills.reload")
 def _(rid, params: dict) -> dict:
     try:
-        from agent.skill_commands import reload_skills
-
-        result = reload_skills()
-        added = result.get("added") or []
-        removed = result.get("removed") or []
-        total = int(result.get("total") or 0)
-
-        lines = ["Reloading skills..."]
-        if not added and not removed:
-            lines.append("No new skills detected.")
-        if added:
-            lines.append("Added skills:")
-            lines.extend(f"  - {item.get('name', '')}" for item in added)
-        if removed:
-            lines.append("Removed skills:")
-            lines.extend(f"  - {item.get('name', '')}" for item in removed)
-        lines.append(f"{total} skill(s) available")
-        return _ok(rid, {"output": "\n".join(lines), "result": result})
+        commands = _approved_skill_commands()
+        result = {
+            "immutable": True,
+            "total": len(commands),
+            "skills": [info["name"] for info in commands.values()],
+        }
+        return _ok(
+            rid,
+            {
+                "output": (
+                    f"{len(commands)} approved skill(s) are active from the published "
+                    "Claude plugin; install or reload requires a new published runtime release."
+                ),
+                "result": result,
+            },
+        )
     except Exception as e:
         return _err(rid, 5025, str(e))
 

@@ -1117,6 +1117,8 @@ def mint_operator_session_token(
     session_token: str | None = None,
     max_cost_microusd: int = _OPERATOR_SESSION_DEFAULT_MAX_COST_MICROUSD,
     ttl_seconds: int | None = None,
+    invocation_id: str | None = None,
+    max_total_cost_microusd: int | None = None,
 ) -> str:
     """Mint a SESSION-scoped operator capability (audience ``operator.session``) for one CEO/coding-worker
     run and return the token.
@@ -1158,7 +1160,23 @@ def mint_operator_session_token(
         body["session_token"] = session
     if ttl_seconds is not None:
         body["ttl_seconds"] = int(ttl_seconds)
+    if invocation_id is not None or max_total_cost_microusd is not None:
+        body["invocation_id"] = str(invocation_id or "")
+        body["max_total_cost_microusd"] = int(max_total_cost_microusd or 0)
     result = _remote_json("POST", "/v1/operator/session-token", body, timeout=10.0)
+    if invocation_id is not None or max_total_cost_microusd is not None:
+        if not isinstance(result, dict) or (
+            str(result.get("invocation_id") or "") != str(invocation_id or "")
+            or int(result.get("max_total_cost_microusd") or 0)
+            != int(max_total_cost_microusd or 0)
+            or int(result.get("max_cost_microusd") or 0)
+            != int(max_cost_microusd)
+        ):
+            raise RemoteSafeboxError(
+                "Safebox did not bind the requested SDK invocation envelope",
+                status_code=502,
+                payload={"detail": "invocation_envelope_mismatch"},
+            )
     token = str((result or {}).get("token") or "").strip() if isinstance(result, dict) else ""
     if not token:
         raise RemoteSafeboxError(

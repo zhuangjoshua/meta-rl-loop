@@ -146,6 +146,22 @@ def test_takyon_create_shell_exec_returns_before_background_bootstrap(server, mo
     fake_cli._handle_shell_line = fake_handle_shell_line
     fake_cli._record_shell_turn = fake_record_shell_turn
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+
+    class FakeProcess:
+        def __init__(self, *args, **kwargs):
+            ran.set()
+            self.stdout = iter(["create finished\n"])
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+    monkeypatch.setattr(server.subprocess, "Popen", FakeProcess)
     monkeypatch.setattr(
         server,
         "_takyon_scope_payload",
@@ -163,7 +179,7 @@ def test_takyon_create_shell_exec_returns_before_background_bootstrap(server, mo
     assert response["result"]["output"].startswith("Create started for business:latexflow")
     assert response["result"]["business"] == "latexflow"
     assert server._sessions[sid]["takyon_current_business"] == "latexflow"
-    assert ran.is_set()
+    assert ran.wait(1)
 
 
 def test_takyon_create_from_global_rejects_existing_normalized_slug(server, monkeypatch):
@@ -1608,15 +1624,11 @@ def test_slash_exec_rejects_skill_commands(server):
     sid = "test-session"
     server._sessions[sid] = {"session_key": sid, "agent": None}
 
-    # Mock scan_skill_commands to return a known skill
-    fake_skills = {"/takyon-agent-dev": {"name": "takyon-agent-dev", "description": "Dev workflow"}}
-
-    with patch("agent.skill_commands.get_skill_commands", return_value=fake_skills):
-        resp = server.handle_request({
-            "id": "r1",
-            "method": "slash.exec",
-            "params": {"command": "takyon-agent-dev", "session_id": sid},
-        })
+    resp = server.handle_request({
+        "id": "r1",
+        "method": "slash.exec",
+        "params": {"command": "design-taste-frontend", "session_id": sid},
+    })
 
     # Should return an error so the TUI's .catch() fires command.dispatch
     assert "error" in resp
@@ -1902,22 +1914,17 @@ def test_command_dispatch_returns_skill_payload(server):
     sid = "test-session"
     server._sessions[sid] = {"session_key": sid}
 
-    fake_skills = {"/takyon-agent-dev": {"name": "takyon-agent-dev", "description": "Dev workflow"}}
-    fake_msg = "Loaded skill content here"
-
-    with patch("agent.skill_commands.scan_skill_commands", return_value=fake_skills), \
-         patch("agent.skill_commands.build_skill_invocation_message", return_value=fake_msg):
-        resp = server.handle_request({
-            "id": "r2",
-            "method": "command.dispatch",
-            "params": {"name": "takyon-agent-dev", "session_id": sid},
-        })
+    resp = server.handle_request({
+        "id": "r2",
+        "method": "command.dispatch",
+        "params": {"name": "design-taste-frontend", "session_id": sid},
+    })
 
     assert "error" not in resp
     result = resp["result"]
     assert result["type"] == "skill"
-    assert result["message"] == fake_msg
-    assert result["name"] == "takyon-agent-dev"
+    assert "takyon-approved-skills:design-taste-frontend" in result["message"]
+    assert result["name"] == "design-taste-frontend"
 
 
 def test_command_dispatch_awaits_async_plugin_handler(server):

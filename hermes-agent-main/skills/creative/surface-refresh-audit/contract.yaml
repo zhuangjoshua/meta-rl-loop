@@ -1,0 +1,3 @@
+schema_version: 1
+requires: [business.state.read, business.files.read, product.source.edit]
+produces: [product.surface]

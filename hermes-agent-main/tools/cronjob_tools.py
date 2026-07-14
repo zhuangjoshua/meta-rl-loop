@@ -231,6 +231,32 @@ def _normalize_optional_job_value(value: Optional[Any], *, strip_trailing_slash:
     return text or None
 
 
+def _session_business_scope() -> Optional[str]:
+    """Capture the exact current business without exposing scope as model input."""
+
+    try:
+        from gateway.session_context import get_session_env
+
+        business = str(
+            get_session_env("TAKYON_SESSION_BUSINESS_SLUG", "") or ""
+        ).strip()
+    except Exception:
+        business = ""
+    return business or None
+
+
+def _session_operator_scope() -> Optional[str]:
+    """Capture the authenticated operator for root-scoped scheduled turns."""
+
+    try:
+        from gateway.session_context import get_session_env
+
+        owner = str(get_session_env("TAKYON_SESSION_USER_ID", "") or "").strip()
+    except Exception:
+        owner = ""
+    return owner or None
+
+
 def _normalize_deliver_param(value: Any) -> Optional[str]:
     """Normalize a user-supplied ``deliver`` value to the canonical string form.
 
@@ -327,6 +353,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["workdir"] = job["workdir"]
     if job.get("profile"):
         result["profile"] = job["profile"]
+    if job.get("business"):
+        result["business"] = job["business"]
     return result
 
 
@@ -418,6 +446,8 @@ def cronjob(
                 workdir=_normalize_optional_job_value(workdir),
                 profile=_normalize_optional_job_value(profile),
                 no_agent=_no_agent,
+                business=_session_business_scope(),
+                operator_user_id=_session_operator_scope(),
             )
             return json.dumps(
                 {
