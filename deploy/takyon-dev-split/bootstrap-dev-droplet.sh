@@ -49,20 +49,12 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TREE="$ROOT_DIR/hermes-agent-main"
 STORE="${TAKYON_DEV_STORE:-$(cd "$ROOT_DIR/.." && pwd)/takyon/.takyon-dev-safebox/.env}"
 KEY="${TAKYON_DEV_KEY:-$HOME/.ssh/takyon_dev_split}"
-SUBUSER_SYNC_KEY="${TAKYON_DEV_SUBUSER_SYNC_KEY:-$HOME/.ssh/takyon_dev_subuser_sync}"
-SUBUSER_HOSTS="${TAKYON_DEV_SUBUSER_HOSTS:-}"
 OPERATOR_NODE="${TAKYON_DEV_OPERATOR_NODE:-takyon-dev-operator}"
 OPERATOR_VPC_IP="${TAKYON_DEV_OPERATOR_VPC_IP:-}"
 SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "root@$HOST")
 
 [[ -f "$STORE" ]] || { echo "dev store not found: $STORE" >&2; exit 1; }
 [[ -f "$KEY" ]] || { echo "dev ssh key not found: $KEY" >&2; exit 1; }
-if [[ "$ROLE" == "operator" || "$ROLE" == "subuser" ]]; then
-  if [[ ! -f "$SUBUSER_SYNC_KEY" || ! -f "$SUBUSER_SYNC_KEY.pub" ]]; then
-    mkdir -p "$(dirname "$SUBUSER_SYNC_KEY")"
-    ssh-keygen -q -t ed25519 -N '' -C 'takyon-dev-operator-to-subuser' -f "$SUBUSER_SYNC_KEY"
-  fi
-fi
 case "$ROLE" in subuser|safebox|operator) ;; *) echo "role must be subuser|safebox|operator" >&2; exit 1;; esac
 if [[ "$ROLE" == "safebox" ]]; then
   [[ -n "$OPERATOR_VPC_IP" ]] || { echo "TAKYON_DEV_OPERATOR_VPC_IP is required for safebox parity" >&2; exit 1; }
@@ -81,7 +73,6 @@ echo "→ [$NODE_NAME] preparing host"
 "
 
 if [[ "$ROLE" == "operator" ]]; then
-  [[ -n "$SUBUSER_HOSTS" ]] || { echo "TAKYON_DEV_SUBUSER_HOSTS is required for operator publish parity" >&2; exit 1; }
   [[ -x "$PREPARE_PRIMARY_AGENT_RUNTIME" ]] || { echo "Agent SDK runtime helper not found: $PREPARE_PRIMARY_AGENT_RUNTIME" >&2; exit 1; }
   echo "→ [$NODE_NAME] operator host prep (Node + Chromium + docker broker + user/linger) — mirrors prod bootstrap-host.sh"
   "${SSH[@]}" "set -euo pipefail
@@ -218,9 +209,6 @@ elif [[ "$ROLE" == "operator" ]]; then
     printf 'TAKYON_DEV_MIGRATION_DATABASE_URL=%s\n' "$(store_get TAKYON_DEV_MIGRATION_DATABASE_URL)"
     printf 'TAKYON_SAFEBOX_TOKEN=%s\n' "$(store_get TAKYON_DEV_SAFEBOX_TOKEN)"
     printf 'TAKYON_SAFEBOX_OPERATOR_TOKEN=%s\n' "$(store_get TAKYON_SAFEBOX_OPERATOR_TOKEN)"
-    printf 'TAKYON_SUBUSER_VPS_HOSTS=%s\n' "$SUBUSER_HOSTS"
-    printf 'TAKYON_SUBUSER_VPS_USER=root\n'
-    printf 'TAKYON_SUBUSER_VPS_SSH_KEY=/opt/takyon/secrets/takyon-subuser-sync.key\n'
   } > "$TMPENV"
 else
   # Dev safebox = the dev store minus infra-only aliases (DO token, ssh cidr, mac-local safebox
@@ -241,10 +229,6 @@ scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
 rm -f "$TMPENV"; trap - EXIT
 
 if [[ "$ROLE" == "operator" ]]; then
-  "${SSH[@]}" "install -d -o takyon -g takyon -m 0700 /opt/takyon/secrets"
-  scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-    "$SUBUSER_SYNC_KEY" "root@$HOST:/opt/takyon/secrets/takyon-subuser-sync.key"
-  "${SSH[@]}" "chown takyon:takyon /opt/takyon/secrets/takyon-subuser-sync.key; chmod 0600 /opt/takyon/secrets/takyon-subuser-sync.key"
   # The CEO runtime config ($TAKYON_HOME/config.yaml — model.provider/default, etc.) is NOT part of
   # the runtime tree; the Mac rail copies it at launch, so the droplet needs it installed here or the
   # worker's ceo_bootstrap fails with "model config missing model.provider, model.default".
@@ -299,17 +283,6 @@ if [[ "$ROLE" == "operator" ]]; then
 fi
 
 if [[ "$ROLE" == "subuser" ]]; then
-  echo "→ [$NODE_NAME] operator-to-subuser publish key"
-  scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-    "$SUBUSER_SYNC_KEY.pub" "root@$HOST:/root/takyon-dev-subuser-sync.pub"
-  "${SSH[@]}" "set -euo pipefail
-    install -d -m 0700 /root/.ssh
-    touch /root/.ssh/authorized_keys
-    chmod 0600 /root/.ssh/authorized_keys
-    key=\$(cat /root/takyon-dev-subuser-sync.pub)
-    grep -qxF \"\$key\" /root/.ssh/authorized_keys || printf '%s\n' \"\$key\" >> /root/.ssh/authorized_keys
-    rm -f /root/takyon-dev-subuser-sync.pub
-  "
   echo "→ [$NODE_NAME] caddy front (:80 → loopback uvicorn, prod topology; node-identity header)"
   TMPCADDY="$(mktemp)"
   sed -e "s/__NODE_NAME__/$NODE_NAME/g" "$SCRIPT_DIR/Caddyfile.dev" > "$TMPCADDY"

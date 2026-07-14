@@ -1082,12 +1082,10 @@ class EnvironmentProvisioner:
                 f"{len(replicas)}/{expected_count} subuser replicas",
             )
 
-        subuser_hosts = ",".join(str(rep["private_ip"]) for rep in replicas)
         common_env = {
             **os.environ,
             "TAKYON_DEV_STORE": str(store_path),
             "TAKYON_DEV_KEY": str(key_path),
-            "TAKYON_DEV_SUBUSER_HOSTS": subuser_hosts,
             "TAKYON_DEV_OPERATOR_NODE": str(operator_host["name"]),
             "TAKYON_DEV_OPERATOR_VPC_IP": str(operator_host["private_ip"]),
         }
@@ -2975,101 +2973,77 @@ class EnvironmentProvisioner:
                 return False, f"Agent SDK runtime failed: {(prepared.stderr or prepared.stdout or '').strip()[-240:]}"
             return True, "host-owned runtime dependencies and Agent SDK ready"
 
-        def _ensure_subuser_publish_rail(
+        def _sync_product_sites_from_operator(
             operator_ip: str, replica_blocks: list[Mapping[str, Any]]
         ) -> "tuple[bool, str]":
-            """Give the operator a role-scoped key that reaches only dev subuser replicas."""
-            sync_key = Path(str(
-                (self.manifest.get("droplets") or {}).get("subuser_sync_private_key_path")
-                or "~/.ssh/takyon_dev_subuser_sync"
-            )).expanduser()
-            sync_key.parent.mkdir(parents=True, exist_ok=True)
-            if not sync_key.is_file() or not Path(str(sync_key) + ".pub").is_file():
-                generated = subprocess.run(
-                    [
-                        "ssh-keygen", "-q", "-t", "ed25519", "-N", "",
-                        "-C", "takyon-dev-operator-to-subuser", "-f", str(sync_key),
-                    ],
-                    capture_output=True, text=True, timeout=30,
-                )
-                if generated.returncode != 0:
-                    return False, f"subuser publish key generation failed: {(generated.stderr or '').strip()[-200:]}"
-            public_key_path = Path(str(sync_key) + ".pub")
+            """Mirror production's tracked Mac relay: operator cache -> every subuser replica."""
+            relay = staged / "product-sites"
+            relay.mkdir(parents=True, exist_ok=True)
+            pulled = subprocess.run(
+                [
+                    "rsync", "-rt", "--delete", "--exclude=._*", "--exclude=.DS_Store",
+                    "-e", "ssh " + " ".join(ssh_base),
+                    f"root@{operator_ip}:/opt/takyon/.takyon/product-sites/", f"{relay}/",
+                ],
+                capture_output=True, text=True, timeout=300,
+                env={**os.environ, "COPYFILE_DISABLE": "1"},
+            )
+            if pulled.returncode != 0:
+                return False, f"operator product-site pull failed: {(pulled.stderr or '').strip()[-200:]}"
             for rep in replica_blocks:
                 rep_ip = str(rep.get("public_ip") or "").strip()
                 if not rep_ip:
                     return False, "subuser replica is missing a public IP"
-                copied = subprocess.run(
-                    ["scp", *ssh_base, str(public_key_path), f"root@{rep_ip}:/root/takyon-dev-subuser-sync.pub"],
-                    capture_output=True, text=True, timeout=60,
+                synced = subprocess.run(
+                    [
+                        "rsync", "-rt", "--delete", "--exclude=._*", "--exclude=.DS_Store",
+                        "-e", "ssh " + " ".join(ssh_base),
+                        f"{relay}/", f"root@{rep_ip}:/opt/takyon/.takyon/product-sites/",
+                    ],
+                    capture_output=True, text=True, timeout=300,
+                    env={**os.environ, "COPYFILE_DISABLE": "1"},
                 )
-                if copied.returncode != 0:
-                    return False, f"publish public-key sync failed for {rep_ip}: {(copied.stderr or '').strip()[-200:]}"
-                installed = subprocess.run(
+                if synced.returncode != 0:
+                    return False, f"product-site sync failed for {rep_ip}: {(synced.stderr or '').strip()[-200:]}"
+                secured = subprocess.run(
                     [
                         "ssh", *ssh_base, f"root@{rep_ip}",
-                        "set -euo pipefail; install -d -m 0700 /root/.ssh; "
-                        "touch /root/.ssh/authorized_keys; chmod 0600 /root/.ssh/authorized_keys; "
-                        "key=$(cat /root/takyon-dev-subuser-sync.pub); "
-                        "grep -qxF \"$key\" /root/.ssh/authorized_keys || "
-                        "printf '%s\\n' \"$key\" >> /root/.ssh/authorized_keys; "
-                        "rm -f /root/takyon-dev-subuser-sync.pub",
+                        "chown -R takyon:takyon /opt/takyon/.takyon/product-sites",
                     ],
                     capture_output=True, text=True, timeout=60,
                 )
-                if installed.returncode != 0:
-                    return False, f"publish public-key install failed for {rep_ip}: {(installed.stderr or '').strip()[-200:]}"
+                if secured.returncode != 0:
+                    return False, f"product-site ownership failed for {rep_ip}: {(secured.stderr or '').strip()[-200:]}"
 
-            copied_private = subprocess.run(
-                [
-                    "scp", *ssh_base, str(sync_key),
-                    f"root@{operator_ip}:/opt/takyon/takyon-subuser-sync.key",
-                ],
-                capture_output=True, text=True, timeout=60,
-            )
-            if copied_private.returncode != 0:
-                return False, f"operator publish-key sync failed: {(copied_private.stderr or '').strip()[-200:]}"
-            hosts = ",".join(str(rep.get("private_ip") or "").strip() for rep in replica_blocks)
-            if not all(str(rep.get("private_ip") or "").strip() for rep in replica_blocks):
-                return False, "subuser replica is missing a private VPC IP"
-            configured = subprocess.run(
+            # Retire the abandoned direct operator->subuser SSH experiment. Production publishing
+            # is relayed by the tracked deploy machine because the host firewalls admit SSH only
+            # from the operator workstation.
+            cleaned = subprocess.run(
                 [
                     "ssh", *ssh_base, f"root@{operator_ip}",
-                    "python3 - /opt/takyon/.takyon/.env "
-                    f"{hosts!r} /opt/takyon/secrets/takyon-subuser-sync.key",
+                    "python3 - /opt/takyon/.takyon/.env",
                 ],
                 input=(
                     "from pathlib import Path\n"
                     "import sys\n"
-                    "path=Path(sys.argv[1]); hosts=sys.argv[2]; key_path=sys.argv[3]\n"
-                    "updates={'TAKYON_SUBUSER_VPS_HOSTS':hosts,'TAKYON_SUBUSER_VPS_USER':'root',"
-                    "'TAKYON_SUBUSER_VPS_SSH_KEY':key_path}\n"
+                    "path=Path(sys.argv[1])\n"
+                    "updates={'TAKYON_SUBUSER_VPS_HOSTS','TAKYON_SUBUSER_VPS_USER',"
+                    "'TAKYON_SUBUSER_VPS_SSH_KEY'}\n"
                     "lines=path.read_text().splitlines() if path.exists() else []\n"
                     "kept=[line for line in lines if line.split('=',1)[0] not in updates]\n"
-                    "kept.extend(f'{key}={value}' for key,value in updates.items())\n"
                     "path.write_text('\\n'.join(kept)+'\\n')\n"
                 ),
                 capture_output=True, text=True, timeout=60,
             )
-            if configured.returncode != 0:
-                return False, f"operator publish env failed: {(configured.stderr or '').strip()[-200:]}"
-            secured = subprocess.run(
-                [
-                    "ssh", *ssh_base, f"root@{operator_ip}",
-                    "set -euo pipefail; install -d -o takyon -g takyon -m 0700 /opt/takyon/secrets; "
-                    "mv /opt/takyon/takyon-subuser-sync.key /opt/takyon/secrets/takyon-subuser-sync.key; "
-                    "chown takyon:takyon /opt/takyon/secrets/takyon-subuser-sync.key /opt/takyon/.takyon/.env; "
-                    "chmod 0600 /opt/takyon/secrets/takyon-subuser-sync.key /opt/takyon/.takyon/.env; "
-                    "runuser -u takyon -- ssh -i /opt/takyon/secrets/takyon-subuser-sync.key "
-                    "-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "
-                    "-o ConnectTimeout=10 "
-                    f"root@{str(replica_blocks[0].get('private_ip') or '').strip()} true",
-                ],
-                capture_output=True, text=True, timeout=60,
+            if cleaned.returncode != 0:
+                return False, f"operator publish-env cleanup failed: {(cleaned.stderr or '').strip()[-200:]}"
+            subprocess.run(
+                ["ssh", *ssh_base, f"root@{operator_ip}",
+                 "rm -f /opt/takyon/secrets/takyon-subuser-sync.key"],
+                capture_output=True, text=True, timeout=30,
             )
-            if secured.returncode != 0:
-                return False, f"operator-to-subuser publish proof failed: {(secured.stderr or '').strip()[-200:]}"
-            return True, f"operator publish key reaches {len(replica_blocks)} subuser replica(s)"
+            site_count = sum(1 for path in relay.iterdir() if path.is_dir())
+            return True, f"relayed {site_count} product site(s) to {len(replica_blocks)} replica(s)"
 
         def _restart(ip: str, services: "list[str]") -> "tuple[bool, str]":
             remote = (
@@ -3155,11 +3129,11 @@ class EnvironmentProvisioner:
             return ProvisionResult(self.name, "deploy", tuple(receipts))
 
         declared_operator_ip = str(((ds.get("operator") or {}).get("public_ip") or "")).strip()
-        publish_ready, publish_why = _ensure_subuser_publish_rail(
+        publish_ready, publish_why = _sync_product_sites_from_operator(
             declared_operator_ip, replicas,
         ) if declared_operator_ip and replicas else (False, "operator or replicas missing")
         receipts.append(StepReceipt(
-            "subuser_publish",
+            "product_sites",
             STATUS_EXISTS if publish_ready else STATUS_ERROR,
             "deploy",
             publish_why,

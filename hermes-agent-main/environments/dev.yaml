@@ -223,7 +223,6 @@ droplets:
   safebox_token_alias: TAKYON_DEV_SAFEBOX_TOKEN        # shared transport token (kept valid)
   env_file: /opt/takyon/.takyon/.env                   # replica env the scoped creds land in
   node_tokens_file: /opt/takyon/.takyon/safebox/node_tokens.json  # digests only, never values
-  subuser_sync_private_key_path: ~/.ssh/takyon_dev_subuser_sync
 
 # (f4) VPC load balancer fronting the replicas BY ROLE TAG (takyon-env-dev-subuser): a future
 #      replica joins by tag, no LB edit. Targets each replica's Caddy on :80 (prod topology:
