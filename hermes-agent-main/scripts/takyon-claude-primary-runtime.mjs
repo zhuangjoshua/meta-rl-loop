@@ -1316,7 +1316,19 @@ export async function runPrimaryAgentTurn(configuration, { sdk = null } = {}) {
       actualModels.add(reportedModel);
       if (reportedModel !== prepared.broker.model) {
         prepared.options.abortController.abort();
-        fail("actual_model_mismatch", `SDK used model ${reportedModel}; expected ${prepared.broker.model}`);
+        const contentTypes = Array.isArray(message?.message?.content)
+          ? message.message.content.map((block) => cleanString(block?.type)).filter(Boolean)
+          : [];
+        fail(
+          "actual_model_mismatch",
+          `SDK used model ${reportedModel}; expected ${prepared.broker.model}; `
+            + `assistant_shape=${JSON.stringify({
+              role: cleanString(message?.message?.role),
+              stop_reason: cleanString(message?.message?.stop_reason),
+              parent_tool_use_id: cleanString(message?.parent_tool_use_id),
+              content_types: contentTypes,
+            })}`
+        );
       }
     }
     const observedToolUses = toolUses(message);
