@@ -712,14 +712,14 @@ class _SdkInvocationEnvelope:
         *,
         call_id: str | None = None,
     ) -> dict[str, Any]:
-        from .safebox_app import _safebox_db_conn
+        from .safebox_app import _safebox_authority_transaction, _safebox_db_conn
 
         invocation_id = str(auth.invocation_id or "").strip()
         call = str(call_id or uuid.uuid4())
         estimate = max(0, int(estimate_microusd))
         if not invocation_id:
             raise RuntimeError("operator_sdk_invocation_missing")
-        with _safebox_db_conn() as conn, conn.transaction():
+        with _safebox_db_conn() as conn, _safebox_authority_transaction(conn):
             row = conn.execute(
                 "select owner_user_id::text, coalesce(business_slug, ''), "
                 "total_ceiling_microusd, per_call_ceiling_microusd, "
@@ -802,7 +802,7 @@ class _SdkInvocationEnvelope:
         }
 
     def settle(self, claim: Mapping[str, Any], actual_microusd: int) -> None:
-        from .safebox_app import _safebox_db_conn
+        from .safebox_app import _safebox_authority_transaction, _safebox_db_conn
 
         estimate = int(claim["estimate_microusd"])
         actual = int(actual_microusd)
@@ -812,7 +812,7 @@ class _SdkInvocationEnvelope:
             raise RuntimeError(
                 "operator_sdk_invocation_actual_exceeds_reserved_estimate"
             )
-        with _safebox_db_conn() as conn, conn.transaction():
+        with _safebox_db_conn() as conn, _safebox_authority_transaction(conn):
             row = conn.execute(
                 "select estimate_microusd, actual_microusd, status "
                 "from operator_sdk_invocation_calls "
@@ -836,9 +836,9 @@ class _SdkInvocationEnvelope:
             )
 
     def release(self, claim: Mapping[str, Any]) -> None:
-        from .safebox_app import _safebox_db_conn
+        from .safebox_app import _safebox_authority_transaction, _safebox_db_conn
 
-        with _safebox_db_conn() as conn, conn.transaction():
+        with _safebox_db_conn() as conn, _safebox_authority_transaction(conn):
             row = conn.execute(
                 "select status from operator_sdk_invocation_calls "
                 "where invocation_id = %s::uuid and call_id = %s::uuid for update",

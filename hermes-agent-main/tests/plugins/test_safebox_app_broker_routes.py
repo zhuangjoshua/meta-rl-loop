@@ -170,7 +170,13 @@ class _OwnerConn:
     def __init__(self, owner):
         self._owner = owner
 
+    @contextlib.contextmanager
+    def transaction(self):
+        yield
+
     def execute(self, sql, params=None):
+        if "set_config('takyon.rls_bypass'" in str(sql):
+            return _OwnerCursor(("1",))
         if "from users where auth0_sub" in str(sql):
             return _OwnerCursor((self._owner,))
         return _OwnerCursor({"owner_user_id": self._owner})

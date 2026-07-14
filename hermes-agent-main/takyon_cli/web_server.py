@@ -1810,6 +1810,12 @@ def _operator_reservation_stale_seconds() -> int:
     return 86400
 
 
+# A dashboard read must not turn a historical hold backlog into unbounded
+# Safebox calls; later reads continue draining the oldest unresolved holds.
+_OPERATOR_RESERVATION_CLEANUP_BATCH_SIZE = 25
+_OPERATOR_RESERVATION_CLEANUP_LOCK = threading.Lock()
+
+
 def _job_reservation_job_id(reservation_key: str) -> str:
     key = str(reservation_key or "").strip()
     if not key.startswith("job:"):
@@ -1854,8 +1860,10 @@ def _release_stale_operator_reservations(conn, user_id: str) -> int:
         "    where f.reservation_key = r.reservation_key "
         "      and f.kind in ('settle', 'release')"
         "  ) "
-        "group by r.reservation_key",
-        (operator_user_id,),
+        "group by r.reservation_key "
+        "order by min(r.created_at), r.reservation_key "
+        "limit %s",
+        (operator_user_id, _OPERATOR_RESERVATION_CLEANUP_BATCH_SIZE),
     ).fetchall()
     released = 0
     for row in rows:
@@ -1898,6 +1906,67 @@ def _release_stale_operator_reservations(conn, user_id: str) -> int:
         except billing.UnknownReservation:
             continue
     return released
+
+
+def _run_stale_operator_reservation_cleanup(
+    runtime_database_url: str,
+    operator_user_id: str,
+) -> None:
+    """Drain one bounded batch on an independent connection, keeping failures conservative."""
+    conn = None
+    try:
+        import psycopg
+
+        conn = psycopg.connect(runtime_database_url, autocommit=True)
+        released = _release_stale_operator_reservations(conn, operator_user_id)
+        if released:
+            _log.info(
+                "released %s stale operator reservation(s) for operator %s",
+                released,
+                operator_user_id,
+            )
+    except Exception as exc:  # noqa: BLE001 - a failed cleanup leaves holds intact
+        _log.warning(
+            "stale operator reservation cleanup failed for %s: %s",
+            operator_user_id,
+            exc,
+        )
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        finally:
+            _OPERATOR_RESERVATION_CLEANUP_LOCK.release()
+
+
+def _schedule_stale_operator_reservation_cleanup(
+    runtime_database_url: str,
+    operator_user_id: str,
+) -> bool:
+    """Start one process-local background drainer; contenders render without waiting."""
+    url = str(runtime_database_url or "").strip()
+    user_id = str(operator_user_id or "").strip()
+    if not url or not user_id:
+        return False
+    if not _OPERATOR_RESERVATION_CLEANUP_LOCK.acquire(blocking=False):
+        return False
+    try:
+        thread = threading.Thread(
+            target=_run_stale_operator_reservation_cleanup,
+            args=(url, user_id),
+            name="takyon-operator-reservation-cleanup",
+            daemon=True,
+        )
+        thread.start()
+    except Exception as exc:  # noqa: BLE001 - thread-start failure must release the lane
+        _OPERATOR_RESERVATION_CLEANUP_LOCK.release()
+        _log.warning(
+            "could not schedule stale operator reservation cleanup for %s: %s",
+            user_id,
+            exc,
+        )
+        return False
+    return True
 
 
 def _release_stale_tui_turn_reservations(conn, user_id: str) -> int:
@@ -3982,14 +4051,14 @@ async def get_status():
 @app.get("/api/takyon/operator/account")
 async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
     """Read-only operator billing snapshot for the dashboard UI."""
-    principal = _resolve_dashboard_request_principal(request)
+    principal = await asyncio.to_thread(_resolve_dashboard_request_principal, request)
     if principal is None:
         return {
             "available": False,
             "reason": "operator_principal_unavailable",
         }
 
-    return _takyon_operator_account_payload(request, principal)
+    return await asyncio.to_thread(_takyon_operator_account_payload, request, principal)
 
 
 def _operator_plans_summary() -> list[dict[str, Any]]:
@@ -4055,13 +4124,9 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
 
         conn = psycopg.connect(url, autocommit=True)
         try:
-            released = _release_stale_operator_reservations(conn, str(principal.user_id))
-            if released:
-                _log.info(
-                    "released %s stale operator reservation(s) for operator %s",
-                    released,
-                    principal.user_id,
-                )
+            _schedule_stale_operator_reservation_cleanup(
+                url, str(principal.user_id)
+            )
             subscription_state = sync_operator_subscription_allowance(
                 conn,
                 str(principal.user_id),
@@ -4964,7 +5029,7 @@ def _read_takyon_business_home(operator_user_id: str, business: str) -> dict[str
 
 @app.get("/api/takyon/operator/home")
 async def get_takyon_operator_home(request: Request) -> dict[str, Any]:
-    principal = _resolve_dashboard_request_principal(request)
+    principal = await asyncio.to_thread(_resolve_dashboard_request_principal, request)
     if principal is None:
         reason = "auth0_login_required" if _auth0_required_for_host(request.headers) else "operator_principal_unavailable"
         return {
@@ -4973,8 +5038,10 @@ async def get_takyon_operator_home(request: Request) -> dict[str, Any]:
             "account": {"available": False, "reason": reason},
             "reason": reason,
         }
-    businesses = _takyon_operator_businesses_payload(principal)
-    account = _takyon_operator_account_payload(request, principal)
+    businesses, account = await asyncio.gather(
+        asyncio.to_thread(_takyon_operator_businesses_payload, principal),
+        asyncio.to_thread(_takyon_operator_account_payload, request, principal),
+    )
     return {
         "available": bool(businesses.get("available") or account.get("available")),
         "businesses": businesses.get("businesses", []),
@@ -5180,14 +5247,14 @@ async def get_takyon_operator_businesses(request: Request) -> dict[str, Any]:
     This stays deliberately separate from session/workspace scope hydration so
     a failed business open cannot erase the global portfolio list.
     """
-    principal = _resolve_dashboard_request_principal(request)
+    principal = await asyncio.to_thread(_resolve_dashboard_request_principal, request)
     if principal is None:
         return {
             "available": False,
             "businesses": [],
             "reason": "operator_principal_unavailable",
         }
-    return _takyon_operator_businesses_payload(principal)
+    return await asyncio.to_thread(_takyon_operator_businesses_payload, principal)
 
 
 @app.get("/api/takyon/businesses/{slug}/file")

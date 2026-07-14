@@ -1054,6 +1054,10 @@ def test_operator_session_token_mint_roundtrips(client, monkeypatch):
     import contextlib
 
     class _OwnerConn:
+        @contextlib.contextmanager
+        def transaction(self):
+            yield
+
         def execute(self, sql, params=None):
             class _C:
                 def fetchone(self_inner):

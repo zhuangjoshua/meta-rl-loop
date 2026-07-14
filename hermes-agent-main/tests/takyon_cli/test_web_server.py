@@ -597,10 +597,15 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
         allowance_period_start=None,
         allowance_resets_at=None,
     )
+    scheduled_cleanup = []
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
     monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda **_kwargs: "postgres://runtime")
-    monkeypatch.setattr(web_server, "_release_stale_operator_reservations", lambda _conn, _uid: 0)
+    monkeypatch.setattr(
+        web_server,
+        "_schedule_stale_operator_reservation_cleanup",
+        lambda url, uid: scheduled_cleanup.append((url, uid)) or True,
+    )
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
     monkeypatch.setattr(psycopg, "connect", lambda *_args, **_kwargs: _Conn())
     monkeypatch.setattr(billing, "get_billing_balances", lambda _conn, _uid: balances)
@@ -657,6 +662,250 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
     assert result["spendable_cents"] == 1900
     assert result["spendable_cents"] == result["allowance_remaining_cents"]
     assert result["owned_business_count"] == 2
+    assert scheduled_cleanup == [("postgres://runtime", "user-123")]
+
+
+def test_release_stale_operator_reservations_uses_bounded_oldest_batch(monkeypatch):
+    import plugins.takyon.billing as billing
+    import takyon_cli.web_server as web_server
+
+    class _OldTimestamp:
+        @staticmethod
+        def timestamp():
+            return 0.0
+
+    class _Result:
+        @staticmethod
+        def fetchall():
+            return [("inline:old", _OldTimestamp())]
+
+    class _Conn:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, query, params):
+            self.calls.append((query, params))
+            return _Result()
+
+    conn = _Conn()
+    released = []
+    monkeypatch.setattr(web_server, "_running_tui_turn_session_ids", set)
+    monkeypatch.setattr(
+        billing, "release_reservation", lambda _conn, key: released.append(key)
+    )
+
+    count = web_server._release_stale_operator_reservations(conn, "user-123")
+
+    assert count == 1
+    assert released == ["inline:old"]
+    query, params = conn.calls[0]
+    assert "order by min(r.created_at), r.reservation_key" in query
+    assert "limit %s" in query
+    assert params == (
+        "user-123",
+        web_server._OPERATOR_RESERVATION_CLEANUP_BATCH_SIZE,
+    )
+    assert web_server._OPERATOR_RESERVATION_CLEANUP_BATCH_SIZE == 25
+
+
+def test_operator_account_cleanup_is_single_drainer_and_unlocks_after_failure(monkeypatch):
+    import psycopg
+    import takyon_cli.web_server as web_server
+
+    cleanup_lock = threading.Lock()
+    cleanup_started = threading.Event()
+    finish_cleanup = threading.Event()
+    connection_closed = threading.Event()
+    connections = []
+
+    class _Conn:
+        def close(self):
+            connection_closed.set()
+
+    def _connect(*_args, **_kwargs):
+        conn = _Conn()
+        connections.append(conn)
+        return conn
+
+    def _fail_cleanup(_conn, _user_id):
+        cleanup_started.set()
+        assert finish_cleanup.wait(timeout=2)
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(web_server, "_OPERATOR_RESERVATION_CLEANUP_LOCK", cleanup_lock)
+    monkeypatch.setattr(psycopg, "connect", _connect)
+    monkeypatch.setattr(web_server, "_release_stale_operator_reservations", _fail_cleanup)
+
+    assert web_server._schedule_stale_operator_reservation_cleanup(
+        "postgres://runtime", "user-123"
+    ) is True
+    assert cleanup_started.wait(timeout=2)
+    assert web_server._schedule_stale_operator_reservation_cleanup(
+        "postgres://runtime", "user-123"
+    ) is False
+
+    finish_cleanup.set()
+    assert connection_closed.wait(timeout=2)
+    deadline = time.monotonic() + 2
+    while cleanup_lock.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert len(connections) == 1
+    assert cleanup_lock.acquire(blocking=False) is True
+    cleanup_lock.release()
+
+
+def test_operator_dashboard_reads_run_principal_and_payloads_off_event_loop(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+    principal_threads = []
+    account_threads = []
+    business_threads = []
+
+    def _fake_principal(_request):
+        principal_threads.append(threading.get_ident())
+        return principal
+
+    def _fake_account(_request, _principal):
+        account_threads.append(threading.get_ident())
+        assert _principal is principal
+        return {"available": True}
+
+    def _fake_businesses(_principal):
+        business_threads.append(threading.get_ident())
+        assert _principal is principal
+        return {
+            "available": True,
+            "businesses": [],
+            "owned_business_count": 1,
+        }
+
+    monkeypatch.setattr(
+        web_server, "_resolve_dashboard_request_principal", _fake_principal
+    )
+    monkeypatch.setattr(web_server, "_takyon_operator_account_payload", _fake_account)
+    monkeypatch.setattr(
+        web_server,
+        "_takyon_operator_businesses_payload",
+        _fake_businesses,
+    )
+    request = types.SimpleNamespace(headers={})
+
+    async def _exercise():
+        event_loop_thread = threading.get_ident()
+        account = await web_server.get_takyon_operator_account(request)
+        home = await web_server.get_takyon_operator_home(request)
+        businesses = await web_server.get_takyon_operator_businesses(request)
+        return event_loop_thread, account, home, businesses
+
+    event_loop_thread, account, home, businesses = asyncio.run(_exercise())
+
+    assert account == {"available": True}
+    assert home["account"] == {"available": True}
+    assert businesses["available"] is True
+    assert len(principal_threads) == 3
+    assert len(account_threads) == 2
+    assert len(business_threads) == 2
+    assert all(
+        thread_id != event_loop_thread
+        for thread_id in principal_threads + account_threads + business_threads
+    )
+
+
+def test_healthz_stays_responsive_while_operator_home_chain_is_blocked(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+    principal_started = threading.Event()
+    principal_release = threading.Event()
+    businesses_started = threading.Event()
+    businesses_release = threading.Event()
+    account_started = threading.Event()
+    account_release = threading.Event()
+    controller_results = []
+
+    def _blocked_principal(_request):
+        principal_started.set()
+        assert principal_release.wait(timeout=2)
+        return principal
+
+    def _blocked_businesses(_principal):
+        businesses_started.set()
+        assert businesses_release.wait(timeout=2)
+        return {
+            "available": True,
+            "businesses": [{"slug": "alpha"}],
+            "owned_business_count": 1,
+        }
+
+    def _blocked_account(_request, _principal):
+        account_started.set()
+        assert account_release.wait(timeout=2)
+        return {"available": True}
+
+    monkeypatch.setattr(
+        web_server, "_resolve_dashboard_request_principal", _blocked_principal
+    )
+    monkeypatch.setattr(
+        web_server, "_takyon_operator_businesses_payload", _blocked_businesses
+    )
+    monkeypatch.setattr(web_server, "_takyon_operator_account_payload", _blocked_account)
+
+    def _release_blocked_stages():
+        controller_results.append(principal_started.wait(timeout=2))
+        time.sleep(0.35)
+        principal_release.set()
+        controller_results.append(businesses_started.wait(timeout=2))
+        controller_results.append(account_started.wait(timeout=2))
+        time.sleep(0.35)
+        businesses_release.set()
+        account_release.set()
+
+    controller = threading.Thread(target=_release_blocked_stages, daemon=True)
+    controller.start()
+
+    async def _exercise():
+        stop_probe = asyncio.Event()
+        health_ticks = []
+
+        async def _probe_health():
+            loop = asyncio.get_running_loop()
+            while not stop_probe.is_set():
+                assert await web_server.healthz() == {
+                    "status": "ok",
+                    "role": web_server._host_role(),
+                }
+                health_ticks.append(loop.time())
+                await asyncio.sleep(0.01)
+
+        home_task = asyncio.create_task(
+            web_server.get_takyon_operator_home(types.SimpleNamespace(headers={}))
+        )
+        probe_task = asyncio.create_task(_probe_health())
+        home = await home_task
+        stop_probe.set()
+        await probe_task
+        return home, health_ticks
+
+    home, health_ticks = asyncio.run(_exercise())
+    controller.join(timeout=2)
+
+    assert controller_results == [True, True, True]
+    assert not controller.is_alive()
+    assert home["available"] is True
+    assert len(health_ticks) >= 20
+    assert max(
+        later - earlier for earlier, later in zip(health_ticks, health_ticks[1:])
+    ) < 0.2
 
 
 def test_operator_account_read_failure_keeps_operator_plans(monkeypatch):

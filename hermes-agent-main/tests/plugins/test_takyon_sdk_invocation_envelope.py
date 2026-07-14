@@ -6,6 +6,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -42,12 +43,33 @@ class _EnvelopeConn:
         self.active = active
         self.calls: dict[str, dict] = {}
         self.fail_next_settle = False
+        self.local_bypass_count = 0
+        self._transaction_depth = 0
+        self._local_bypass = False
 
+    @contextmanager
     def transaction(self):
-        return self.lock
+        with self.lock:
+            previous = self._local_bypass
+            if self._transaction_depth == 0:
+                # Model a transaction-pool backend carrying an explicit bypass=0 from a prior user.
+                self._local_bypass = False
+            self._transaction_depth += 1
+            try:
+                yield
+            finally:
+                self._transaction_depth -= 1
+                self._local_bypass = previous
 
     def execute(self, sql, params=()):
         normalized = " ".join(str(sql).split()).lower()
+        if normalized.startswith("select set_config('takyon.rls_bypass', '1', true)"):
+            assert self._transaction_depth > 0
+            self._local_bypass = True
+            self.local_bypass_count += 1
+            return _Cursor(("1",))
+        if not self._local_bypass:
+            raise PermissionError("simulated transaction-pool RLS refusal")
         if normalized.startswith("select owner_user_id::text"):
             if str(params[0]) != self.invocation_id:
                 return _Cursor(None)
@@ -105,12 +127,37 @@ class _InvocationMintConn:
     def __init__(self):
         self.lock = threading.RLock()
         self.row = None
+        self.business_owner = ""
+        self.local_bypass_count = 0
+        self._transaction_depth = 0
+        self._local_bypass = False
 
+    @contextmanager
     def transaction(self):
-        return self.lock
+        with self.lock:
+            previous = self._local_bypass
+            if self._transaction_depth == 0:
+                self._local_bypass = False
+            self._transaction_depth += 1
+            try:
+                yield
+            finally:
+                self._transaction_depth -= 1
+                self._local_bypass = previous
 
     def execute(self, sql, params=()):
         normalized = " ".join(str(sql).split()).lower()
+        if normalized.startswith("select set_config('takyon.rls_bypass', '1', true)"):
+            assert self._transaction_depth > 0
+            self._local_bypass = True
+            self.local_bypass_count += 1
+            return _Cursor(("1",))
+        if not self._local_bypass:
+            raise PermissionError("simulated transaction-pool RLS refusal")
+        if normalized.startswith("select id from users where auth0_sub"):
+            return _Cursor((self.business_owner,))
+        if normalized.startswith("select owner_user_id from businesses"):
+            return _Cursor((self.business_owner,))
         if normalized.startswith("insert into operator_sdk_invocations"):
             if self.row is None:
                 invocation, owner, business, total, per_call, expires = params
@@ -227,6 +274,132 @@ def test_same_scope_retry_can_renew_expiry_without_resetting_envelope() -> None:
     )
     assert renewed_expiry == now + 3600
     assert tuple(conn.row[:5]) == original_scope
+    assert conn.local_bypass_count == 2
+
+
+def test_sdk_mint_pins_ownership_proof_and_envelope_to_local_rls_authority(
+    monkeypatch,
+) -> None:
+    conn = _InvocationMintConn()
+    conn.business_owner = str(uuid.uuid4())
+
+    @contextmanager
+    def factory():
+        yield conn
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", factory)
+    monkeypatch.setenv(safebox_app._CAP_SIGNING_KEY_ENV, "test-signing-key")
+    invocation_id = str(uuid.uuid4())
+    now = int(time.time())
+    token = safebox_app._mint_capability_token(
+        business="acme",
+        action="operator.session",
+        max_cost_microusd=50,
+        session_token=None,
+        operator_user_id=conn.business_owner,
+        audience="operator.session",
+        ttl_seconds=60,
+        now=now,
+        invocation_id=invocation_id,
+        max_total_cost_microusd=100,
+    )
+
+    scope, _, _ = verify_capability(
+        token,
+        signing_key=b"test-signing-key",
+        expected_audience="operator.session",
+        now=now + 1,
+    )
+    assert scope.invocation_id == invocation_id
+    assert scope.takyon_user_id == conn.business_owner
+    assert conn.local_bypass_count == 2
+
+
+def test_non_invocation_mint_still_pins_authorization_to_local_rls_authority(
+    monkeypatch,
+) -> None:
+    conn = _InvocationMintConn()
+    conn.business_owner = str(uuid.uuid4())
+
+    @contextmanager
+    def factory():
+        yield conn
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", factory)
+    monkeypatch.setenv(safebox_app._CAP_SIGNING_KEY_ENV, "test-signing-key")
+    safebox_app._mint_capability_token(
+        business="acme",
+        action="operator.session",
+        max_cost_microusd=50,
+        session_token=None,
+        operator_user_id=conn.business_owner,
+        audience="operator.session",
+        ttl_seconds=60,
+        now=int(time.time()),
+    )
+
+    assert conn.row is None
+    assert conn.local_bypass_count == 1
+
+
+def test_root_sdk_mint_pins_user_proof_and_envelope_atomically(monkeypatch) -> None:
+    conn = _InvocationMintConn()
+    conn.business_owner = str(uuid.uuid4())
+    connection_count = 0
+
+    @contextmanager
+    def factory():
+        nonlocal connection_count
+        connection_count += 1
+        yield conn
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", factory)
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "auth0_verify_session",
+        lambda **_kwargs: {"sub": "auth0|owner"},
+    )
+    monkeypatch.setenv(safebox_app._SAFEBOX_TOKEN_ENV, "internal-token")
+    monkeypatch.setenv(safebox_app._OPERATOR_TOKEN_ENV, "operator-token")
+    monkeypatch.setenv(safebox_app._OPERATOR_CLIENTS_ENV, "testclient")
+    monkeypatch.setenv(safebox_app._CAP_SIGNING_KEY_ENV, "test-signing-key")
+    endpoint = next(
+        route.endpoint
+        for route in safebox_app.build_safebox_app().routes
+        if getattr(route, "path", "") == "/v1/operator/session-token"
+    )
+    invocation_id = str(uuid.uuid4())
+    result = endpoint(
+        SimpleNamespace(
+            client=SimpleNamespace(host="testclient"),
+            headers={safebox_app._OPERATOR_TOKEN_HEADER: "operator-token"},
+        ),
+        safebox_app._OperatorSessionTokenBody(
+            business="",
+            session_token="dashboard-session",
+            operator_user_id=conn.business_owner,
+            max_cost_microusd=50,
+            invocation_id=invocation_id,
+            max_total_cost_microusd=100,
+        ),
+        authorization="Bearer internal-token",
+    )
+
+    assert result["invocation_id"] == invocation_id
+    assert connection_count == 1
+    assert conn.local_bypass_count == 2
+
+
+def test_invocation_claim_and_finalizers_pin_transaction_local_rls_authority(
+    envelope_db,
+) -> None:
+    envelope = safebox_provider_proxy._SdkInvocationEnvelope()
+    claim = envelope.claim(_auth(envelope_db), 40)
+    envelope.settle(claim, 25)
+    released = envelope.claim(_auth(envelope_db), 30)
+    envelope.release(released)
+
+    assert envelope_db.local_bypass_count == 4
 
 
 def test_concurrent_claims_are_serialized_under_one_total(envelope_db) -> None:

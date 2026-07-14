@@ -998,6 +998,22 @@ def _safebox_db_conn():
         raw_conn.close()
 
 
+@contextmanager
+def _safebox_authority_transaction(conn):
+    """Pin Safebox RLS authority to the transaction-pool backend doing the work.
+
+    The production Safebox DSN uses a transaction pooler.  The session-scoped GUC set when the
+    connection opens can therefore land on a different backend from a later statement.  SET LOCAL
+    inside the transaction keeps the ownership proof and authority write on one backend.  The
+    database's trusted-role gate remains authoritative: setting this GUC cannot grant an app role
+    bypass authority.
+    """
+
+    with conn.transaction():
+        conn.execute("select set_config('takyon.rls_bypass', '1', true)")
+        yield
+
+
 class _UsageLedgerAdapter:
     """Ledger the broker reserves/settles/releases against, keyed on the AUTHORITATIVE scope.
 
@@ -3016,36 +3032,42 @@ def _mint_capability_token(
         # never neither.
         raise HTTPException(status_code=400, detail="ambiguous_identity")
 
+    def _authorize(conn):
+        if has_session:
+            return authorize_product_call(
+                conn,
+                business_slug=business,
+                session_token=str(session_token or ""),
+                action=action,
+                max_cost_microusd=int(max_cost_microusd),
+            )
+        return authorize_operator_call(
+            conn,
+            business_slug=business,
+            operator_user_id=str(operator_user_id or ""),
+            action=action,
+            max_cost_microusd=int(max_cost_microusd),
+        )
+
     try:
         with _safebox_db_conn() as conn:
-            if has_session:
-                scope = authorize_product_call(
-                    conn,
-                    business_slug=business,
-                    session_token=str(session_token or ""),
-                    action=action,
-                    max_cost_microusd=int(max_cost_microusd),
-                )
-            else:
-                scope = authorize_operator_call(
-                    conn,
-                    business_slug=business,
-                    operator_user_id=str(operator_user_id or ""),
-                    action=action,
-                    max_cost_microusd=int(max_cost_microusd),
-                )
-            if invocation_id is not None:
-                scope = replace(
-                    scope,
-                    invocation_id=str(invocation_id),
-                    max_total_cost_microusd=int(max_total_cost_microusd or 0),
-                )
-                effective_expires_at = _ensure_operator_sdk_invocation(
-                    conn,
-                    scope=scope,
-                    expires_at=int(now) + int(ttl_seconds),
-                )
-                ttl_seconds = max(1, int(effective_expires_at) - int(now))
+            # Every authorization proof reads RLS-protected identity/ownership state. Pin it to the
+            # same transaction-pool backend even when no SDK invocation envelope is requested.
+            with _safebox_authority_transaction(conn):
+                scope = _authorize(conn)
+                if invocation_id is not None:
+                    # The ownership proof and immutable invocation-envelope write remain atomic.
+                    scope = replace(
+                        scope,
+                        invocation_id=str(invocation_id),
+                        max_total_cost_microusd=int(max_total_cost_microusd or 0),
+                    )
+                    effective_expires_at = _ensure_operator_sdk_invocation(
+                        conn,
+                        scope=scope,
+                        expires_at=int(now) + int(ttl_seconds),
+                    )
+                    ttl_seconds = max(1, int(effective_expires_at) - int(now))
     except AuthzError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -3082,7 +3104,7 @@ def _ensure_operator_sdk_invocation(
     except (ValueError, TypeError, AttributeError) as exc:
         raise HTTPException(status_code=400, detail="invalid_invocation_id") from exc
     business = str(scope.business_slug or "").strip() or None
-    with conn.transaction():
+    with _safebox_authority_transaction(conn):
         conn.execute(
             "insert into operator_sdk_invocations "
             "(invocation_id, owner_user_id, business_slug, total_ceiling_microusd, "
@@ -5658,56 +5680,72 @@ def build_safebox_app() -> FastAPI:
             )
         else:
             requested_user_id = str(body.operator_user_id or "").strip()
-            resolved_user_id = ""
-            session_user = safebox.auth0_verify_session(
-                session_token=str(body.session_token or ""),
-            )
-            if isinstance(session_user, dict):
-                auth0_sub = str(session_user.get("sub") or "").strip()
-                if not auth0_sub:
-                    raise HTTPException(status_code=403, detail="operator_root_session_required")
-                with _safebox_db_conn() as conn:
-                    row = conn.execute(
-                        "select id from users where auth0_sub = %s",
-                        (auth0_sub,),
-                    ).fetchone()
-                if row is None:
-                    raise HTTPException(status_code=404, detail="operator_user_not_found")
-                resolved_user_id = str(_db_row_value(row, 0, "id") or "").strip()
-                if not requested_user_id or requested_user_id != resolved_user_id:
-                    raise HTTPException(status_code=403, detail="operator_user_mismatch")
-            else:
-                from . import control_plane
-
-                with _safebox_db_conn() as conn:
-                    principal = control_plane.resolve_user_principal(
-                        conn,
-                        requested_user_id,
-                        key_id="operator-root-local",
-                    )
-                if principal is None:
-                    raise HTTPException(status_code=403, detail="operator_root_session_required")
-                resolved_user_id = str(getattr(principal, "user_id", "") or "").strip()
             signing_key = _cap_signing_key()
             if not signing_key:
                 raise HTTPException(status_code=503, detail="capability_signing_unconfigured")
-            scope = CapabilityScope(
-                    takyon_user_id=resolved_user_id,
-                    business_slug="",
-                    app_user_id=None,
-                    action=_OPERATOR_SESSION_AUDIENCE,
-                    max_cost_microusd=int(body.max_cost_microusd),
-                    invocation_id=invocation_id,
-                    max_total_cost_microusd=invocation_total,
-                )
-            if invocation_id is not None:
-                with _safebox_db_conn() as conn:
-                    effective_expires_at = _ensure_operator_sdk_invocation(
-                        conn,
-                        scope=scope,
-                        expires_at=now + ttl_seconds,
+            session_user = safebox.auth0_verify_session(
+                session_token=str(body.session_token or ""),
+            )
+            with _safebox_db_conn() as conn:
+                # Root identity proof and invocation-envelope creation use one connection, one
+                # transaction-pool backend, and one transaction-local trusted-role RLS bypass.
+                with _safebox_authority_transaction(conn):
+                    if isinstance(session_user, dict):
+                        auth0_sub = str(session_user.get("sub") or "").strip()
+                        if not auth0_sub:
+                            raise HTTPException(
+                                status_code=403,
+                                detail="operator_root_session_required",
+                            )
+                        row = conn.execute(
+                            "select id from users where auth0_sub = %s",
+                            (auth0_sub,),
+                        ).fetchone()
+                        if row is None:
+                            raise HTTPException(
+                                status_code=404,
+                                detail="operator_user_not_found",
+                            )
+                        resolved_user_id = str(
+                            _db_row_value(row, 0, "id") or ""
+                        ).strip()
+                        if not requested_user_id or requested_user_id != resolved_user_id:
+                            raise HTTPException(
+                                status_code=403,
+                                detail="operator_user_mismatch",
+                            )
+                    else:
+                        from . import control_plane
+
+                        principal = control_plane.resolve_user_principal(
+                            conn,
+                            requested_user_id,
+                            key_id="operator-root-local",
+                        )
+                        if principal is None:
+                            raise HTTPException(
+                                status_code=403,
+                                detail="operator_root_session_required",
+                            )
+                        resolved_user_id = str(
+                            getattr(principal, "user_id", "") or ""
+                        ).strip()
+                    scope = CapabilityScope(
+                        takyon_user_id=resolved_user_id,
+                        business_slug="",
+                        app_user_id=None,
+                        action=_OPERATOR_SESSION_AUDIENCE,
+                        max_cost_microusd=int(body.max_cost_microusd),
+                        invocation_id=invocation_id,
+                        max_total_cost_microusd=invocation_total,
                     )
-                ttl_seconds = max(1, int(effective_expires_at) - now)
+                    if invocation_id is not None:
+                        effective_expires_at = _ensure_operator_sdk_invocation(
+                            conn,
+                            scope=scope,
+                            expires_at=now + ttl_seconds,
+                        )
+                        ttl_seconds = max(1, int(effective_expires_at) - now)
             token = mint_capability(
                 scope,
                 signing_key=signing_key,
