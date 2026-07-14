@@ -35,6 +35,11 @@ command -v node >/dev/null 2>&1
 command -v npm >/dev/null 2>&1
 command -v google-chrome-stable >/dev/null 2>&1
 google-chrome-stable --version >/dev/null
+install -d -o takyon -g takyon -m 0755 \
+  /opt/takyon/.config \
+  /opt/takyon/.config/google-chrome \
+  /opt/takyon/.cache \
+  /opt/takyon/.cache/google-chrome
 timeout 20 runuser -u takyon -- env HOME=/opt/takyon \
   google-chrome-stable --headless=new --no-sandbox --disable-dev-shm-usage \
   --dump-dom about:blank >/dev/null
