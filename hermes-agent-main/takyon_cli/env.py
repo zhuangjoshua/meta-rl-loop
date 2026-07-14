@@ -18,10 +18,10 @@ from takyon_cli.colors import Colors, color
 def cmd_env(args: Any) -> int:
     """Dispatcher for ``takyon env <action> <name>``."""
     action = getattr(args, "env_action", None)
-    if action not in ("create", "status", "destroy", "restart", "revoke-node", "deploy"):
+    if action not in ("create", "status", "destroy", "restart", "revoke-node", "deploy", "promote"):
         print(
-            "usage: takyon env {create|status|deploy|restart|revoke-node|destroy} <name> "
-            "[<node>] [--rev <sha>] [--force]",
+            "usage: takyon env {create|status|deploy|promote|restart|revoke-node|destroy} <name> "
+            "[<node>] [--rev <sha>] [--confirm] [--force]",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -29,7 +29,7 @@ def cmd_env(args: Any) -> int:
     name = str(getattr(args, "env_name", "") or "").strip().lower()
     if not name:
         print(
-            "usage: takyon env {create|status|deploy|restart|revoke-node|destroy} <name>",
+            "usage: takyon env {create|status|deploy|promote|restart|revoke-node|destroy} <name>",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -61,6 +61,9 @@ def cmd_env(args: Any) -> int:
         # Revision-aware deploy: materialize the pinned code_revision (or --rev <sha>) via git
         # archive — the exact revision, never the working tree — for this env's hosts.
         result = provisioner.deploy(rev=(str(getattr(args, "rev", "") or "").strip() or None))
+    elif action == "promote":
+        # The ONLY dev -> prod path: fast-forward main to the dev-green SHA. Dry unless --confirm.
+        result = provisioner.promote(confirm=bool(getattr(args, "confirm", False)))
     elif action == "restart":
         # Drain-aware rolling restart of the env's replicas (the full-4b graceful-drain rail):
         # per replica remove-from-LB -> in-flight grace -> converge front + restart unit ->

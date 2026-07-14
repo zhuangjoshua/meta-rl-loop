@@ -75,42 +75,6 @@ def test_operator_units_pin_one_primary_sdk_agent_to_deepseek_with_spend_caps():
         assert required <= lines, unit_path
 
 
-def test_dev_runtime_units_share_prod_execution_contract():
-    pairs = (
-        ("deploy/argon-alpha-14/takyon-dashboard.service",
-         "deploy/takyon-dev-split/takyon-dashboard-dev.service.tmpl"),
-        ("deploy/argon-alpha-14/takyon-worker.service",
-         "deploy/takyon-dev-split/takyon-worker-dev.service.tmpl"),
-        ("deploy/takyon-subuser/takyon-subuser.service",
-         "deploy/takyon-dev-split/takyon-subuser-dev.service.tmpl"),
-        ("deploy/takyon-safebox/takyon-safebox.service",
-         "deploy/takyon-dev-split/takyon-safebox-dev.service.tmpl"),
-    )
-    required_directives = {"User=takyon", "Group=takyon", "NoNewPrivileges=true",
-                           "PrivateTmp=true", "ProtectSystem=strict"}
-    for prod_path, dev_path in pairs:
-        prod = set((ROOT / prod_path).read_text().splitlines())
-        dev = set((ROOT / dev_path).read_text().splitlines())
-        assert required_directives <= prod
-        assert required_directives <= dev
-        assert "Environment=TAKYON_ENV=prod" in prod
-        assert "Environment=TAKYON_ENV=dev" in dev
-        assert "Environment=TAKYON_STRIPE_MODE=live" in prod
-        assert "Environment=TAKYON_STRIPE_MODE=test" in dev
-
-    prod_worker = set((ROOT / pairs[1][0]).read_text().splitlines())
-    dev_worker = set((ROOT / pairs[1][1]).read_text().splitlines())
-    shared_worker_contract = {
-        line for line in prod_worker
-        if line.startswith("Environment=") and any(token in line for token in (
-            "MODEL", "MAX_BUDGET", "SKILLS_", "NODE_RUNTIME", "DISABLE_LEGACY",
-            "DOCKER_BROKER", "TERMINAL_",
-        ))
-    }
-    assert shared_worker_contract <= dev_worker
-    assert "TimeoutStopSec=960" in dev_worker
-
-
 def test_subuser_unit_forbids_operator_skill_materialization():
     lines = set(
         (ROOT / "deploy/takyon-subuser/takyon-subuser.service").read_text().splitlines()

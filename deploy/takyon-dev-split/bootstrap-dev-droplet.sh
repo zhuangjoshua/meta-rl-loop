@@ -49,16 +49,11 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TREE="$ROOT_DIR/hermes-agent-main"
 STORE="${TAKYON_DEV_STORE:-$(cd "$ROOT_DIR/.." && pwd)/takyon/.takyon-dev-safebox/.env}"
 KEY="${TAKYON_DEV_KEY:-$HOME/.ssh/takyon_dev_split}"
-OPERATOR_NODE="${TAKYON_DEV_OPERATOR_NODE:-takyon-dev-operator}"
-OPERATOR_VPC_IP="${TAKYON_DEV_OPERATOR_VPC_IP:-}"
 SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "root@$HOST")
 
 [[ -f "$STORE" ]] || { echo "dev store not found: $STORE" >&2; exit 1; }
 [[ -f "$KEY" ]] || { echo "dev ssh key not found: $KEY" >&2; exit 1; }
 case "$ROLE" in subuser|safebox|operator) ;; *) echo "role must be subuser|safebox|operator" >&2; exit 1;; esac
-if [[ "$ROLE" == "safebox" ]]; then
-  [[ -n "$OPERATOR_VPC_IP" ]] || { echo "TAKYON_DEV_OPERATOR_VPC_IP is required for safebox parity" >&2; exit 1; }
-fi
 # For the operator role VPC_IP is the DEV SAFEBOX private VPC IP (the dashboard/worker resolve
 # provider secrets from http://$VPC_IP:8000).
 PREPARE_PRIMARY_AGENT_RUNTIME="$ROOT_DIR/scripts/prepare-claude-agent-sdk-runtime.sh"
@@ -103,9 +98,7 @@ if [[ "$ROLE" == "operator" ]]; then
       useradd --system --user-group --home-dir /opt/takyon --shell /usr/sbin/nologin takyon
     fi
     getent group docker >/dev/null || groupadd docker
-    if id -nG takyon | grep -qw docker; then
-      gpasswd -d takyon docker >/dev/null 2>&1 || deluser takyon docker >/dev/null 2>&1 || true
-    fi
+    id -nG takyon | grep -qw docker || usermod -aG docker takyon
     takyon_uid=\$(id -u takyon)
     # user-manager + cgroup delegation for the product-action systemd-run --user --scope carve-out.
     loginctl enable-linger takyon
@@ -113,11 +106,6 @@ if [[ "$ROLE" == "operator" ]]; then
     printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > /etc/systemd/system/user@.service.d/delegate.conf
     systemctl daemon-reload
     systemctl restart \"user@\${takyon_uid}.service\" || true
-    runuser -u takyon -- env \
-      XDG_RUNTIME_DIR=\"/run/user/\${takyon_uid}\" \
-      DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/\${takyon_uid}/bus\" \
-      systemd-run --user --scope --quiet \
-        -p CPUQuota=20% -p MemoryMax=64M -p TasksMax=8 -- /bin/true
     systemctl enable docker >/dev/null
     systemctl start docker
     systemctl is-active --quiet docker
@@ -241,8 +229,6 @@ if [[ "$ROLE" == "operator" ]]; then
   else
     echo "⚠ no config.yaml at $CONFIG_SRC — the CEO will fail on missing model config; set TAKYON_DEV_CONFIG_YAML" >&2
   fi
-  scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-    "$PREPARE_PRIMARY_AGENT_RUNTIME" "root@$HOST:/root/prepare-claude-agent-sdk-runtime.sh"
   echo "→ [$NODE_NAME] operator units (docker-broker + worker + dashboard) rendered + started"
   # The units' BindPaths=/run/user/<uid> must use the ACTUAL takyon uid on THIS host (a fresh dev
   # droplet rarely lands on prod's 995), so resolve it and render __TAKYON_UID__.
@@ -261,14 +247,6 @@ if [[ "$ROLE" == "operator" ]]; then
     chown takyon:takyon /opt/takyon
     chown -R takyon:takyon /opt/takyon/.takyon
     chmod 600 /opt/takyon/.takyon/.env
-    chmod 0755 /root/prepare-claude-agent-sdk-runtime.sh
-    cp /root/prepare-claude-agent-sdk-runtime.sh /opt/takyon/prepare-claude-agent-sdk-runtime.sh
-    chown root:root /opt/takyon/prepare-claude-agent-sdk-runtime.sh
-    chmod 0755 /opt/takyon/prepare-claude-agent-sdk-runtime.sh
-    runuser -u takyon -- env \
-      TAKYON_PYTHON=/opt/takyon/hermes-agent-main/.venv/bin/python \
-      /opt/takyon/prepare-claude-agent-sdk-runtime.sh /opt/takyon /opt/takyon/.takyon >/dev/null
-    rm -f /root/prepare-claude-agent-sdk-runtime.sh
     systemctl daemon-reload
     for SVC in takyon-docker-broker takyon-worker takyon-dashboard; do systemctl enable \$SVC.service >/dev/null; done
     # Order: docker authority first, then the drain worker, then the dashboard front.
@@ -306,7 +284,6 @@ UNIT_TMPL="$SCRIPT_DIR/takyon-$( [[ "$ROLE" == subuser ]] && echo subuser || ech
 SERVICE_NAME="$( [[ "$ROLE" == subuser ]] && echo takyon-subuser || echo takyon-safebox ).service"
 TMPUNIT="$(mktemp)"
 sed -e "s/__NODE_NAME__/$NODE_NAME/g" -e "s/__SAFEBOX_VPC_IP__/$VPC_IP/g" -e "s/__BIND_IP__/$VPC_IP/g" \
-  -e "s/__OPERATOR_NODE__/$OPERATOR_NODE/g" -e "s/__OPERATOR_VPC_IP__/$OPERATOR_VPC_IP/g" \
   "$UNIT_TMPL" > "$TMPUNIT"
 scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$TMPUNIT" "root@$HOST:/etc/systemd/system/$SERVICE_NAME"

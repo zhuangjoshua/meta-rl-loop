@@ -20,15 +20,24 @@ description: >-
   gates against twin infrastructure — the same code, differing only in what the slices point at.
 
 # ── code revision (THE code gate) ─────────────────────────────────────────────────────────
-# Production and dev run the exact same published `origin/main` release. Environment differences
-# are injected only through the isolated dev data, secret, domain, and Stripe-test slices below.
+# The git ref this environment's hosts run. dev pins the `dev` branch, which is kept AHEAD of
+# `main` (prod) — so dev runs code prod does not have yet. That is what makes dev a real
+# "will this change break prod?" gate rather than a same-code rehearsal env.
 #   - `takyon env status dev`  reports this pin vs prod (main): the pinned SHA, prod's SHA, and
 #     how far ahead/behind dev is (drift is visible without any side effect).
 #   - `takyon env deploy dev [--rev <sha>]`  materializes THIS revision (git archive of the SHA,
 #     never the dirty working tree) for the dev hosts.
-# `origin/dev` is a dormant mirror, not a release source or promotion gate. The tested revision is
-# by definition the published main tip; deploy/status fetch and compare the remote ref.
-code_revision: origin/main
+#   - `takyon env promote dev [--confirm]`  fast-forwards main to the dev-green SHA (the ONLY
+#     dev -> prod path) and triggers the tracked prod deploy. prod never receives an unpinned rev.
+# prod -> dev is the reverse and AUTOMATIC (.github/workflows/forward-main-to-dev.yml); dev is
+# always a superset of prod.
+# Pinned to the REMOTE ref, not the local `dev` branch: this workspace hosts concurrent
+# sessions, so a machine-local `dev` can be stale or a diverged duplicate-SHA history (observed
+# 2026-07-03: local dev held 12 patch-equivalent-but-different-SHA commits while checked out
+# dirty in another session — promote would have pushed the wrong history to prod). The tested
+# revision is by definition the PUSHED dev tip (CI + dev hosts deploy from it via git archive);
+# run `git fetch` before promote/deploy so the tracking ref is current.
+code_revision: origin/dev
 
 # ── domains ─────────────────────────────────────────────────────────────────────────────
 # Dev domains are *.dev / localtest — never the prod company base or dashboard host.
@@ -130,14 +139,10 @@ auth0:
   callback_urls:
     - http://localhost:9119/callback
     - http://localhost:9119/api/auth/callback
-    - http://localhost:9129/callback
-    - http://localhost:9129/api/auth/callback
   logout_urls:
     - http://localhost:9119
-    - http://localhost:9129
   web_origins:
     - http://localhost:9119
-    - http://localhost:9129
 
 # (d) Cloudflare dev DNS / R2 — OPTIONAL (off by default; local serving first, plan Q9). When enabled,
 #     creates *.dev DNS records + a second R2 bucket + a worker route in the SAME Cloudflare account.
@@ -196,7 +201,6 @@ ssh_key:
 #      deliberately NOT replicated — plan §2.5). Smallest sizes that fit the runtime.
 droplets:
   enabled: true
-  bootstrap_hosts: true       # `takyon env create dev` leaves every declared systemd role healthy
   count: 2
   role: subuser
   name_prefix: takyon-dev-subuser
@@ -207,10 +211,6 @@ droplets:
     enabled: true
     name: takyon-dev-safebox
     size: s-1vcpu-1gb          # safebox_app is lighter; VPC-internal only (:8000 via the firewall)
-  operator_host:
-    enabled: true
-    name: takyon-dev-operator
-    size: s-1vcpu-2gb          # dashboard + durable worker + Docker broker, matching the prod role
   # (f7) Per-replica SCOPED, REVOCABLE credentials (Stage 4b hardening bullet). create() enrolls
   # each replica with its OWN DB login role (takyon_app_runtime__<node>, an INHERIT member of the
   # ONE canonical app-plane role) and its OWN safebox transport token (the safebox host stores
