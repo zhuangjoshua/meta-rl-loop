@@ -3017,7 +3017,7 @@ def test_bootstrap_hard_deadline_cancels_child_and_persists_human_stop(monkeypat
     assert "hard deadline" in recorded[0]
 
 
-def test_bootstrap_workflow_goal_published_without_real_action_requeues(monkeypatch):
+def test_bootstrap_does_not_repeat_phase_action_gate_after_authoritative_completion(monkeypatch):
     _install_bootstrap_handler_stubs(
         monkeypatch,
         turn_completed=False,
@@ -3030,9 +3030,10 @@ def test_bootstrap_workflow_goal_published_without_real_action_requeues(monkeypa
     monkeypatch.setattr(worker, "_bootstrap_real_http_actions", lambda *_a, **_k: set())
     job = SimpleNamespace(id="job-workflow-missing", business_slug="acme", payload={})
 
-    with pytest.raises(RuntimeError) as exc:
-        worker.ceo_bootstrap_handler(job)
-    assert "never materialized a real /app workflow action" in str(exc.value)
+    result = worker.ceo_bootstrap_handler(job)
+
+    assert result.terminal_status == "completed"
+    assert result.result["bootstrap_completion_status"] == "completed"
 
 
 def test_bootstrap_workflow_goal_published_with_real_action_completes(monkeypatch):

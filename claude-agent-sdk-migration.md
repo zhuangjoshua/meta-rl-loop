@@ -170,6 +170,14 @@ path validation failure as retryable: unchanged source replays the stored failur
 fail, and repaired source may atomically reclaim the same key. Successful, pending, publication-
 stage, and ambiguous activation results remain terminal and never repeat a live side effect.
 
+The fresh `signal-orchard-sdk9-20260714` run then completed every authoritative phase, invoked the
+Taste and product skills, published the landing, repaired a real pre-publication typecheck failure
+with the same key, and published the final workflow. An older post-phase queue-worker check still
+rescanned one host's mutable business cache, falsely missed the immutable live build's certified
+`generate-plan` action, and requeued the whole completed job. That redundant outer content check is
+removed: the durable phase store's final checkpoint is now the sole bootstrap done-gate, while any
+non-complete phase state returns one structured terminal blocker instead of requeuing.
+
 #### New in this migration goal
 
 | Gate | Grade | Disposition |

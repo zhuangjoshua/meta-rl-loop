@@ -3670,6 +3670,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         },
         job_attempt=bootstrap_attempt,
     )
+    completed_phase_run = phase_run
 
     tokens: list[object] = []
     try:
@@ -4176,41 +4177,51 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             command=command,
         )
 
-    # The done-gate. A web bootstrap is terminal when the product requirement holds. Research and
-    # distribution run later on the existing wake rail. Mobile additionally requires the CEO turn
-    # to finish naturally, because its store-signed app phase follows the web product and must not be cut off by the web completion
-    # probe. This prevents an interrupted/capped post-product turn from settling as fake "done".
-    real_http_actions = _bootstrap_real_http_actions(store, slug) if workflow_requested else set()
-    try:
-        durable_product_complete = _bootstrap_has_durable_live_product(
-            store,
-            slug,
-            workflow_requested=workflow_requested,
+    # The phase store is the sole bootstrap done-gate. Its final checkpoint already requires the
+    # durable published-build/action predicate plus the runtime completion receipt. Re-running an
+    # older business-root action scan here was both redundant and host-local: a Mac-built product
+    # could pass the authoritative phase checkpoint, then be falsely failed and wholly requeued by
+    # a VPS reading a different materialized cache. Human-review and platform blockers returned
+    # above; any remaining non-complete phase state is terminal and must never rerun the job.
+    if completed_phase_run.status != "completed":
+        blocker_text = (
+            f"bootstrap phase state ended as {completed_phase_run.status or 'incomplete'} "
+            "without authoritative finalization evidence"
         )
-    except Exception:
-        durable_product_complete = False
-    product_complete = durable_product_complete and (
-        not workflow_requested or bool(real_http_actions)
-    )
-    mobile_bootstrap = str(archetype or "").strip().lower() == "mobile_app"
-    bootstrap_done = product_complete and (bool(turn_completed) or not mobile_bootstrap)
-    if not bootstrap_done:
-        if workflow_requested and publish_status == "published" and not real_http_actions:
-            raise RuntimeError(
-                f"bootstrap for business:{slug} published the access shell but never materialized "
-                "a real /app workflow action"
-            )
-        if product_complete and mobile_bootstrap and not turn_completed:
-            raise RuntimeError(
-                f"bootstrap for business:{slug} stopped before its mobile release phase completed"
-            )
-        if product_complete and not turn_completed:
-            raise RuntimeError(
-                f"bootstrap for business:{slug} stopped before its final product pass completed"
-            )
-        raise RuntimeError(
-            f"bootstrap for business:{slug} exhausted its iteration budget before publishing "
-            f"(surface status={publish_status})"
+        cents = max(0, int(round(cost_usd * 100)))
+        _record_runtime_event(
+            slug,
+            kind="ceo_bootstrap",
+            status="blocked",
+            detail=blocker_text,
+            command=command,
+        )
+        return JobRunResult(
+            result={
+                "business_slug": slug,
+                "final_response": final_response[:4000],
+                "cost_usd": round(cost_usd, 6),
+                "cost_status": cost_status,
+                "bootstrap_completion_status": "phase_incomplete",
+                "review_required": False,
+                "review_blocker": blocker_text,
+                "wake": {
+                    "status": "suppressed",
+                    "enabled": False,
+                    "reason": "bootstrap_phase_incomplete",
+                    "requested_schedule": schedule,
+                },
+                "agent_runtime": agent_runtime,
+                "sdk_receipts": sdk_receipts,
+            },
+            actual_cost_cents=cents,
+            terminal_status="blocked",
+            terminal_reason="bootstrap_phase_incomplete",
+            billing_mode=(
+                jobs.BILLING_MODE_PROVIDER_BROKER
+                if agent_runtime == _WORKER_AGENT_RUNTIME_SDK
+                else jobs.BILLING_MODE_JOB_RESERVATION
+            ),
         )
 
     bootstrap_completion_status = "completed"
