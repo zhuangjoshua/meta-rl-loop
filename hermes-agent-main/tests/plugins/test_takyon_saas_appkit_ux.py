@@ -29,6 +29,7 @@ def test_public_shell_separates_login_signup_and_redirects_signed_in_viewers():
     auth = read("src/lib/product-auth.tsx")
     landing = read("src/screens/landing.tsx")
     navigation = read("src/components/site-navigation.tsx")
+    navigation_behavior = read("src/lib/public-site-navigation.ts")
 
     assert "signUpWithGoogle" in auth
     assert "setSubscribeAfterAuth(true)" not in auth  # the boolean comes from startGoogleAuth's argument
@@ -39,9 +40,10 @@ def test_public_shell_separates_login_signup_and_redirects_signed_in_viewers():
     assert "PublicSiteHeader" in landing
     assert navigation.count("Log in") >= 1
     assert navigation.count("Sign up") >= 1
-    assert "border-b border-border" in navigation
-    assert "max-w-7xl" not in navigation
-    assert 'className="flex w-full' in navigation
+    assert "usePublicSiteNavigation" in navigation
+    assert "signInWithGoogle" in navigation_behavior
+    assert "signUpWithGoogle" in navigation_behavior
+    assert 'href: "/pricing"' in navigation_behavior
 
 
 def test_landing_seed_is_composition_neutral_and_non_shippable(tmp_path):
@@ -168,7 +170,7 @@ def test_action_result_schema_drift_becomes_a_visible_runner_error():
 
 def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_fluid():
     contract = takyon_core._subuser_app_kit_contract_block(None)
-    assert "PublicSiteHeader" in contract
+    assert "usePublicSiteNavigation" in contract
     assert "distinct Log in and Sign up" in contract
     assert "full-width application workspace" in contract
     assert "persist it through `saveRecord(...)`" in contract
@@ -183,7 +185,7 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     prompt = turn_runtime._business_bootstrap_instruction(
         "saas-appkit-test", "Build a SaaS workflow", "live", archetype="web_saas"
     )
-    assert "Preserve `PublicSiteHeader` behavior" in prompt
+    assert "Preserve public-navigation behavior through the AppKit-owned `usePublicSiteNavigation` hook" in prompt
     landing_pass = prompt.rsplit("#### 2a. Build and publish the landing page", 1)[1].split(
         "#### 2a.1. Register Search Console", 1
     )[0]
@@ -397,9 +399,12 @@ def test_open_design_templates_and_dependencies_are_removed():
     assert '"claude-design-brutalist"' not in source
 
 
-def test_navigation_component_is_force_refreshed_with_appkit_rails():
+def test_navigation_behavior_is_force_refreshed_while_presentation_is_worker_owned():
     assert "src/components/action-error-announcer.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
-    assert "src/components/site-navigation.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
+    assert "src/components/site-navigation.tsx" not in takyon_core._STARTER_OWNED_REFRESH_FILES
+    assert "src/index.css" not in takyon_core._STARTER_OWNED_REFRESH_FILES
+    assert "src/lib/public-site-navigation.ts" in takyon_core._STARTER_OWNED_REFRESH_FILES
+    assert "src/components/back-button.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/components/social-proof-marquee.tsx" not in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/components/subscription-cancellation.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/lib/interaction-sounds.ts" in takyon_core._STARTER_OWNED_REFRESH_FILES
@@ -702,6 +707,7 @@ def test_landing_has_no_forced_visual_module_and_keeps_default_interaction_sound
     main = read("src/main.tsx")
     landing = read("src/screens/landing.tsx")
     navigation = read("src/components/site-navigation.tsx")
+    navigation_behavior = read("src/lib/public-site-navigation.ts")
     store = read("src/screens/store.tsx")
     sounds = read("src/lib/interaction-sounds.ts")
     assert "SocialProofMarquee" not in main
@@ -718,8 +724,8 @@ def test_landing_has_no_forced_visual_module_and_keeps_default_interaction_sound
         ('to="/privacy"', "Privacy"),
         ('to="/terms"', "Terms"),
     ):
-        assert path in navigation
-        assert label in navigation
+        assert path.replace("to=", "href: ") in navigation_behavior
+        assert label in navigation_behavior
     assert not (SCAFFOLD / "src/components/social-proof-marquee.tsx").exists()
     assert "animate-proof-marquee" not in read("src/index.css")
     assert "installInteractionSounds" in main

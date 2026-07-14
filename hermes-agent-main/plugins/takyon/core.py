@@ -3820,7 +3820,8 @@ def _materialize_subuser_app_scaffold(
 
 
 # The starter-owned metadata floor + AppKit-owned rail wrappers. Unlike the worker-owned screens
-# (app-home, landing, profile, support, components, and the `src/tokens.css` theme tokens), these
+# (app-home, landing, profile, support, components, `src/index.css`, and the `src/tokens.css` theme
+# tokens), these
 # files encode canonical SEO/auth/checkout/entitlement plumbing the worker must NOT edit (see the
 # product-build contract). NOTE `src/lib/branding.ts` IS in this set (it is re-rendered from the
 # surface contract's seed tokens): an edit to any file below can never persist — see
@@ -3835,14 +3836,14 @@ _STARTER_OWNED_REFRESH_FILES = (
     "public/sitemap.xml",
     "public/llms.txt",
     "src/main.tsx",
-    "src/index.css",
     "src/lib/takyon.ts",
     "src/lib/hooks.ts",
     "src/lib/product-auth.tsx",
+    "src/lib/public-site-navigation.ts",
     "src/lib/branding.ts",
     "src/lib/interaction-sounds.ts",
     "src/components/action-error-announcer.tsx",
-    "src/components/site-navigation.tsx",
+    "src/components/back-button.tsx",
     "src/components/subscription-cancellation.tsx",
     "src/screens/app-layout.tsx",
     "src/screens/support.tsx",
@@ -4047,14 +4048,13 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Scaffold-owned and force-rewritten from the bundled scaffold on EVERY product build/kit materialize — never edit these; any change to them is silently reverted before the build: "
         + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
         + ". If a screen needs a helper these files do not export, add it to a NEW worker-owned module under `src/lib/` (different filename) or define it in the screen itself.",
-        "- Use the canonical `PublicSiteHeader` from `src/components/site-navigation.tsx` on the landing and every public support page. It owns the stable signed-out Home/Pricing/FAQ/Privacy/Terms nav, distinct Log in and Sign up actions, the signed-in App/Account nav, and loading-state stability; do not replace it with page-specific nav variants.",
+        "- Public navigation behavior is AppKit-owned in `src/lib/public-site-navigation.ts`: use its `usePublicSiteNavigation(access)` hook to preserve stable signed-out Home/Pricing/FAQ/Privacy/Terms targets, distinct Log in and Sign up actions, signed-in App/Account navigation, logout, and loading/auth-disabled state. Header markup and presentation in `src/components/site-navigation.tsx` are worker-owned and may be replaced or redesigned freely.",
         "- Landing and pricing CTAs must derive from real runtime session/account state through the shared helpers: the public landing has distinct Log in and Sign up actions, never a price-first Subscribe/Open app button. Both `signInWithGoogle()` and `signUpWithGoogle()` preserve checkout intent through OAuth; an authenticated unentitled viewer proceeds directly to Stripe with no intermediate Complete subscription screen. Already-entitled viewers open the app. Pricing uses the resolved access state.",
         "- Authenticated viewers visiting `/` go directly to `/app`. The canonical `/app` layout owns the sign-in/subscription gate and renders the product immediately for entitled viewers; never add another landing, welcome, enter-product, or self-linking Open app screen inside `src/screens/app-home.tsx`.",
         "- Public nested pages such as FAQ, privacy, terms, articles, and guides must not show Open app or Subscribe CTAs. Use `BackButton` on nested pages; the only public conversion surfaces are the landing's Log in/Sign up actions and the pricing page.",
         "- Treat the signed-in product as a full-width application workspace. Do not wrap the primary `/app` workflow in a narrow centered marketing container or a single small card; use the available viewport for the real workflow while preserving readable inner regions.",
         "- Every created or generated customer artifact must survive tab and route changes: persist it through `saveRecord(...)`, render lists from `listRecords(...)`/`useRecords(...)`, and keep stale successful records visible if a refresh transiently fails. Component-local action results and browser storage are not durable product state.",
         "- The worker-owned landing decides whether and how a proof section fits the brief. Never inject generic platform portfolio proof outside that landing. Quantified outcome claims must come from verified research or real product data; never fabricate statistics, testimonials, or customer counts.",
-        "- The public header is a visually separated, full-viewport-width banner (border/background/shadow with responsive edge padding) and remains structurally static within signed-out and signed-in states. Do not constrain it to the landing content width or vary its options by public page.",
         "- Pricing may display only the exact published plan price, billing interval, and usage limits exported in `surfaceContext.plans`; never invent a promotion, introductory price, discount, trial, feature allowance, or quota that checkout/billing does not enforce. Use `defaultPlanPriceLabel()` and `defaultPlanLimitLabels()`. For action-backed features, `unlimited`, `as many as you need`, `as many as your workflow needs`, `no limits`, and equivalent unbounded paraphrases are false unless the exact plan allowance is actually unbounded.",
         "- Keep the canonical AppKit interaction-sound installer in `src/lib/interaction-sounds.ts`; it provides a quiet click sound for enabled buttons as progressive enhancement and must never block an interaction.",
         "- Takyon app products do NOT support a free plan or free tier. There is exactly one paid entitlement; an unentitled viewer has no usable access and must be routed to subscribe. Do not invent free-tier copy or UI: no \"Free plan\", \"Free · N/month\", \"N free per month\", \"free account\", \"free trial\", \"no credit card\", or freemium framing anywhere (landing, app home, profile, or pricing). Show the single paid plan and a subscribe-first gate; the free shape is unsupported runtime-side, so advertising it ships a promise the product cannot keep.",

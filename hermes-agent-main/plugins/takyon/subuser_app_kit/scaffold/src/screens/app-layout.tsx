@@ -1,5 +1,5 @@
 import { Link, NavLink, Outlet, useLocation, useSearchParams } from "react-router-dom";
-import { BackButton } from "../components/site-navigation";
+import { BackButton } from "../components/back-button";
 import { Skeleton } from "../components/ui/skeleton";
 import { brandMarkDataUri, businessDisplayName } from "../lib/branding";
 import { resolveViewerCta, useCheckoutReturnRefresh, useSubscribeIntent, useViewerAccess } from "../lib/hooks";

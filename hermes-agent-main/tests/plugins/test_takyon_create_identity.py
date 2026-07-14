@@ -123,12 +123,15 @@ def test_bootstrap_prompt_pins_canonical_business_name():
 
 
 def test_bootstrap_prompt_requires_bold_landing_and_branded_appkit_auth_surface():
+    brief = _checkpointed_phase_prompt("brief")
     landing = _checkpointed_phase_prompt("landing_build_publish")
     final = _checkpointed_phase_prompt("final_workflow_build_publish")
 
-    assert "Invoke takyon-product and design-taste-frontend" in landing
+    assert "Do not invoke a design or product skill yet" in brief
+    assert "do not invent a Design Direction" in brief
+    assert "Invoke takyon-product, then invoke design-taste-frontend for the first time" in landing
     assert "let design-taste-frontend own the complete landing implementation" in landing
-    assert "any frontend component, style, animation, and asset files" in landing
+    assert "any frontend component, global style, animation, and asset files" in landing
     assert "without wrapper-authored layout, section, image, animation, or audit guidance" in landing
     assert "landing_build_publish" not in PHASE_MAX_TURNS
     assert "Customize app-home.tsx and profile.tsx while preserving app-layout.tsx" in final

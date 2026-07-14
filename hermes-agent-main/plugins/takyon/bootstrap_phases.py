@@ -666,8 +666,8 @@ def phase_prompt(
     ]
     body: dict[str, Sequence[str]] = {
         "brief": (
-            "Invoke design-taste-frontend for product/landing judgment, without web research.",
             "Derive the display name, tagline, ICP, problem, offer, value proposition, tone, and positioning from the idea alone.",
+            "Keep this brief factual. Do not invoke a design or product skill yet, and do not invent a Design Direction, design dials, palette, typography, layout, section order, motion system, or visual treatment. Preserve only visual requirements explicitly supplied in the business goal.",
             "Write a truthful non-empty research/strategy.md; do not fabricate statistics, testimonials, partners, awards, or sourced claims.",
         ),
         "surface": (
@@ -677,8 +677,8 @@ def phase_prompt(
             "Do not set bootstrap_final_product_pass in this phase.",
         ),
         "landing_build_publish": (
-            "Invoke takyon-product and design-taste-frontend. Inspect the seeded product/site source, then let design-taste-frontend own the complete landing implementation and its normal working method without wrapper-authored layout, section, image, animation, or audit guidance.",
-            "Start from AppKit and preserve its auth, checkout, account, runtime, route, and PublicSiteHeader behavior. The skill may edit any frontend component, style, animation, and asset files needed for the landing and may redesign the header presentation without changing its behavior.",
+            "Invoke takyon-product, then invoke design-taste-frontend for the first time in this launch. Inspect the factual brief and seeded product/site source, then let design-taste-frontend own the complete landing implementation and its normal working method without wrapper-authored layout, section, image, animation, or audit guidance.",
+            "Start from AppKit and preserve its auth, checkout, account, runtime, and route behavior. Preserve public-navigation behavior through the AppKit-owned usePublicSiteNavigation hook, while the skill may replace or redesign header markup and may edit any frontend component, global style, animation, and asset files needed for the landing.",
             "The real generated logo is added in the later logo phase; do not block the landing on it or invent a replacement.",
             "Only after the native skill has completed its workflow, refresh with the exact publish idempotency key and require structured publish.status published plus a real public_url.",
             "If the structured result is a deterministic pre-publication build, type, action, or path validation failure, repair only worker-owned source and retry once with that same exact key; an unchanged retry only replays the failure.",

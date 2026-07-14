@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { BackButton, PublicSiteHeader } from "../components/site-navigation";
+import { BackButton } from "../components/back-button";
+import { PublicSiteHeader } from "../components/site-navigation";
 import { Badge } from "../components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { businessDisplayName } from "../lib/branding";
