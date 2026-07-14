@@ -308,7 +308,8 @@ test("primary defaults expose only Skill and the approved plugin with isolated s
   assert.equal(prepared.options.env.ANTHROPIC_BASE_URL, BROKER_ENV.ANTHROPIC_BASE_URL);
   assert.equal(prepared.options.env.ANTHROPIC_API_KEY, BROKER_ENV.ANTHROPIC_API_KEY);
   assert.equal(prepared.options.env.ANTHROPIC_MODEL, PRIMARY_AGENT_MODEL);
-  assert.equal(prepared.options.env.CLAUDE_CODE_MAX_RETRIES, "0");
+  assert.equal(prepared.options.env.CLAUDE_CODE_MAX_RETRIES, "2");
+  assert.equal(prepared.options.env.ANTHROPIC_CUSTOM_HEADERS, undefined);
   assert.equal(prepared.options.env.ANTHROPIC_TOKEN, undefined);
 });
 
@@ -892,27 +893,28 @@ test("SDK init fails closed on extra skills, forbidden Agent tool, or a model mi
     ["market-research"]
   );
   syntheticOnlyInit.plugins[0].path = fixture.pluginPath;
-  await assert.rejects(
-    runPrimaryAgentTurn(baseConfig, { sdk: fakeSdk([
-      syntheticOnlyInit,
-      {
-        type: "assistant",
-        session_id: syntheticOnlySession,
-        uuid: randomUUID(),
-        parent_tool_use_id: null,
-        message: {
-          role: "assistant",
-          model: "<synthetic>",
-          stop_reason: "stop_sequence",
-          content: [{ type: "text", text: "No paid-model evidence" }],
-        },
+  const syntheticOnlyResult = successfulResult(syntheticOnlySession);
+  syntheticOnlyResult.model = "<synthetic>";
+  const syntheticOnlyReceipt = await runPrimaryAgentTurn(baseConfig, { sdk: fakeSdk([
+    syntheticOnlyInit,
+    {
+      type: "assistant",
+      session_id: syntheticOnlySession,
+      uuid: randomUUID(),
+      parent_tool_use_id: null,
+      message: {
+        role: "assistant",
+        model: "<synthetic>",
+        stop_reason: "stop_sequence",
+        content: [{ type: "text", text: "SDK terminal bookkeeping" }],
       },
-    ]) }),
-    (error) => error.code === "actual_model_mismatch"
-  );
+    },
+    syntheticOnlyResult,
+  ]) });
+  assert.deepEqual(syntheticOnlyReceipt.actual_models, [PRIMARY_AGENT_MODEL]);
 });
 
-test("provider retries and session mirror failures abort instead of silently continuing", async (t) => {
+test("provider retries continue in-process while session mirror failures abort", async (t) => {
   const fixture = await createApprovedPlugin(t);
   const baseConfig = {
     prompt: "Do work.",
@@ -927,19 +929,28 @@ test("provider retries and session mirror failures abort instead of silently con
   const retrySession = randomUUID();
   const retryInit = sdkInit("takyon-approved-skills", retrySession, ["market-research"]);
   retryInit.plugins[0].path = fixture.pluginPath;
-  await assert.rejects(
-    runPrimaryAgentTurn(baseConfig, { sdk: fakeSdk([
-      retryInit,
-      {
-        type: "system",
-        subtype: "api_retry",
-        session_id: retrySession,
-        uuid: randomUUID(),
-        error_status: 529,
+  const retryReceipt = await runPrimaryAgentTurn(baseConfig, { sdk: fakeSdk([
+    retryInit,
+    {
+      type: "system",
+      subtype: "api_retry",
+      session_id: retrySession,
+      uuid: randomUUID(),
+      error_status: 529,
+    },
+    {
+      type: "assistant",
+      session_id: retrySession,
+      uuid: randomUUID(),
+      message: {
+        role: "assistant",
+        model: PRIMARY_AGENT_MODEL,
+        content: [{ type: "text", text: "Recovered" }],
       },
-    ]) }),
-    (error) => error.code === "provider_retry_refused"
-  );
+    },
+    successfulResult(retrySession),
+  ]) });
+  assert.equal(retryReceipt.success, true);
 
   const mirrorSession = randomUUID();
   const mirrorInit = sdkInit("takyon-approved-skills", mirrorSession, ["market-research"]);

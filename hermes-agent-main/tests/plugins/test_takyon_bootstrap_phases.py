@@ -484,6 +484,32 @@ def test_brief_phase_does_not_gate_on_failed_skill_receipt(tmp_path) -> None:
     assert evidence.source == "workspace-artifact"
 
 
+def test_finalize_gates_only_on_durable_product_not_bookkeeping_receipts(
+    monkeypatch,
+) -> None:
+    run = SimpleNamespace(
+        business_slug="acme",
+        owner_user_id=str(uuid.uuid4()),
+        phase_receipts={"finalize": []},
+        phase_idempotency={},
+    )
+    monkeypatch.setattr(
+        worker, "_bootstrap_has_durable_live_product", lambda *_args, **_kwargs: True
+    )
+
+    evidence = worker._bootstrap_phase_authoritative_evidence(
+        SimpleNamespace(_business_root=lambda _slug: Path(".")),
+        run,
+        "finalize",
+        workflow_requested=True,
+        archetype="web_saas",
+    )
+
+    assert evidence is not None
+    assert evidence.source == "final-product-done-predicate"
+    assert evidence.details == {"product_complete": True}
+
+
 def test_phase_runtime_receipt_preserves_native_skill_observability() -> None:
     store, conn, ids = _new_store()
     store.initialize_or_load(**ids)

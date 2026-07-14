@@ -489,7 +489,7 @@ export function buildPrimaryRuntimeEnvironment({
   configDir,
   cwd,
   sourceEnv = process.env,
-  failOnApiRetry = true,
+  failOnApiRetry = false,
 } = {}) {
   if (!broker?.baseUrl || !broker?.capabilityToken || !broker?.model) {
     fail("broker_configuration", "validated Safebox broker configuration is required");
@@ -507,11 +507,9 @@ export function buildPrimaryRuntimeEnvironment({
     CLAUDE_AGENT_SDK_CLIENT_APP: "takyon-primary-agent",
     CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
     CLAUDE_CONFIG_DIR: path.resolve(configDir),
+    CLAUDE_CODE_MAX_RETRIES: failOnApiRetry ? "0" : "2",
     ...(failOnApiRetry
-      ? {
-          CLAUDE_CODE_MAX_RETRIES: "0",
-          ANTHROPIC_CUSTOM_HEADERS: "x-takyon-fail-on-api-retry: 1",
-        }
+      ? { ANTHROPIC_CUSTOM_HEADERS: "x-takyon-fail-on-api-retry: 1" }
       : {}),
   };
   for (const key of ["LANG", "LC_ALL", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER"]) {
@@ -796,8 +794,8 @@ export function createProgressProjector({ epoch, onProgress = async () => {}, no
     if (message.type === "system" && message.subtype === "api_retry") {
       await emit({
         kind: "provider",
-        status: "failed",
-        detail: `Provider retry refused: ${message.error_status ? `HTTP ${message.error_status}` : "connection error"}.`,
+        status: "running",
+        detail: `Provider retrying after ${message.error_status ? `HTTP ${message.error_status}` : "a connection error"}.`,
       });
       return;
     }
@@ -1045,12 +1043,6 @@ function verifySdkInitialization(message, { plugin, tools, allowedMcpTools, mode
   return sessionId;
 }
 
-function retryFailure(message) {
-  if (message?.type !== "system" || message.subtype !== "api_retry") return "";
-  const status = Number.isInteger(message.error_status) ? `HTTP ${message.error_status}` : "connection error";
-  return `provider retry refused by fail-fast policy (${status})`;
-}
-
 function mirrorFailure(message) {
   if (message?.type !== "system" || message.subtype !== "mirror_error") return "";
   return `durable session mirror failed: ${compact(message.error || "unknown", 160)}`;
@@ -1083,7 +1075,7 @@ export async function buildPrimaryRuntimeOptions({
   maxTurns = 24,
   maxBudgetUsd = 8,
   effort = "high",
-  failOnApiRetry = true,
+  failOnApiRetry = false,
   pathToClaudeCodeExecutable = "",
   abortController = new AbortController(),
   onProgress = async () => {},
@@ -1100,8 +1092,8 @@ export async function buildPrimaryRuntimeOptions({
   if (!["turn", "compact"].includes(runtimeOperation)) {
     fail("runtime_operation", `unsupported primary runtime operation ${JSON.stringify(runtimeOperation)}`);
   }
-  if (failOnApiRetry !== true) {
-    fail("provider_retry_policy", "primary runtime provider retries must remain fail-fast");
+  if (failOnApiRetry !== false) {
+    fail("provider_retry_policy", "primary runtime provider retries must remain bounded in-process");
   }
   const resolvedCwd = path.resolve(cleanString(cwd));
   const resolvedRoot = path.resolve(cleanString(workspaceRoot || cwd));
@@ -1232,11 +1224,6 @@ export async function runPrimaryAgentTurn(configuration, { sdk = null } = {}) {
   try {
     for await (const message of queryInstance) {
     await prepared.projector.project(message);
-    const retryError = retryFailure(message);
-    if (retryError) {
-      prepared.options.abortController.abort();
-      fail("provider_retry_refused", retryError);
-    }
     const sessionMirrorError = mirrorFailure(message);
     if (sessionMirrorError) {
       prepared.options.abortController.abort();
@@ -1256,6 +1243,9 @@ export async function runPrimaryAgentTurn(configuration, { sdk = null } = {}) {
         resumeSessionId: prepared.resumeSessionId,
       });
       initialized = true;
+      // Init is the SDK's authoritative routed-model receipt. Synthetic terminal assistant
+      // envelopes are transport bookkeeping and must not invalidate this verified pin.
+      actualModels.add(prepared.broker.model);
       await prepared.projector.emit({
         kind: "session",
         status: prepared.resumeSessionId ? "resumed" : "started",

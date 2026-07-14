@@ -451,7 +451,7 @@ export async function runPrimaryEntrypoint(
       maxTurns: request.maxTurns,
       maxBudgetUsd: request.maxBudgetUsd,
       effort: request.effort,
-      failOnApiRetry: true,
+      failOnApiRetry: false,
       pathToClaudeCodeExecutable: request.pathToClaudeCodeExecutable,
       onProgress: async (event) => {
         process.stderr.write(`${PROGRESS_PREFIX}${JSON.stringify(event)}\n`);

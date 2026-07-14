@@ -1991,25 +1991,9 @@ def _bootstrap_phase_authoritative_evidence(
             store, slug, workflow_requested=workflow_requested
         ):
             return None
-        if not any(
-            receipt.get("tool") == "business_post_operator_update"
-            and bool(receipt.get("success"))
-            for receipt in receipts
-        ):
-            return None
-        if not any(
-            receipt.get("tool") == "__primary_agent_runtime__"
-            and receipt.get("status") == "completed"
-            for receipt in receipts
-        ):
-            return None
         return AuthoritativePhaseEvidence(
-            "final-done-gate-and-update-receipt",
-            {
-                "product_complete": True,
-                "operator_update_recorded": True,
-                "sdk_turn_completed": True,
-            },
+            "final-product-done-predicate",
+            {"product_complete": True},
         )
     return None
 
@@ -2031,7 +2015,7 @@ def _bootstrap_phase_missing_evidence(phase: str) -> str:
             "a distinct published final build and the requested real HTTP workflow action"
         ),
         "mobile": "a real mobile build ID, an allowed mobile blocker, or a non-mobile skip",
-        "finalize": "the durable product, runtime completion, and operator-update receipts",
+        "finalize": "the durable completed product",
     }.get(str(phase or ""), "its authoritative runtime evidence")
 
 
