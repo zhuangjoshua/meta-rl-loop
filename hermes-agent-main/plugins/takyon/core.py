@@ -23214,7 +23214,6 @@ def _finalize_product_surface_refresh(
         _scaffold_visible_shell_unfinished_blocker(refresh),
         _app_access_gate_null_unfinished_blocker(refresh),
         _appkit_subscription_cancellation_unfinished_blocker(refresh),
-        _requested_workflow_unfinished_blocker(refresh),
     ):
         if blocker:
             refresh = _merge_surface_refresh_blocker(refresh, blocker)
