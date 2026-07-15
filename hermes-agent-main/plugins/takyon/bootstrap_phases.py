@@ -736,13 +736,13 @@ def phase_prompt(
             "Write a truthful non-empty research/strategy.md; do not fabricate statistics, testimonials, partners, awards, or sourced claims.",
         ),
         "surface": (
-            "Create the product surface contract with source_path product/site, runtime_features auth/account/profile/checkout, and routes /, /app, /app/profile.",
+            "Create the product surface contract with source_path product/site, routes /, /app, /app/profile, and the base runtime_features auth/account/profile/checkout. Read the tool's canonical runtime-feature enum and add every other shared rail required to implement the business goal literally; do not defer a required upload, action, record, generation, or other supported capability as a placeholder.",
             "Use the one human display name from research/strategy.md, never the routing slug.",
             "If monthly paid, upsert plan_key monthly with the exact plan key. Unless the operator supplied explicit economics, omit composition, price_cents, and included_ai_budget_microusd so server policy supplies the canonical starter economics; do not invent provider pricing math.",
             "Do not set bootstrap_final_product_pass in this phase.",
         ),
         "landing_build_publish": (
-            "Invoke takyon-product, then invoke design-taste-frontend for the first time in this launch. Inspect the factual brief and seeded product/site source, then let design-taste-frontend own the complete landing implementation and its normal working method without wrapper-authored layout, section, image, animation, or audit guidance.",
+            "Invoke takyon-product, then invoke design-taste-frontend for the first time in this launch. Pass Taste only the factual business goal, audience, offer, existing source/assets, and runtime constraints: do not prescribe a hero type, page anatomy, section order, card count, design dials, palette, typography, image count, animation, or audit procedure. Inspect the factual brief and seeded product/site source, then let design-taste-frontend own the complete landing implementation and its normal working method.",
             "Start from AppKit and preserve its auth, checkout, account, runtime, and route behavior. Preserve public-navigation behavior through the AppKit-owned usePublicSiteNavigation hook, while the skill may replace or redesign header markup and may edit any frontend component, global style, animation, and asset files needed for the landing.",
             "The real generated logo is added in the later logo phase; do not block the landing on it or invent a replacement.",
             "Only after the native skill has completed its workflow, refresh with the exact publish idempotency key and require structured publish.status published plus a real public_url.",
@@ -759,9 +759,9 @@ def phase_prompt(
         ),
         "final_workflow_build_publish": (
             "Invoke takyon-product, takyon-app-runtime, and design-taste-frontend. Reinspect the existing product/site source.",
-            "First upsert the same surface contract with bootstrap_final_product_pass true and workflow_completion_required true only when the requested workflow is explicit.",
+            "First reread the explicit business goal and the tool's canonical runtime-feature enum, then upsert the surface contract with every shared rail the requested workflow literally requires, preserving existing base rails; set bootstrap_final_product_pass true and workflow_completion_required true only when the requested workflow is explicit.",
             "Customize app-home.tsx and profile.tsx while preserving app-layout.tsx, canonical account/entitlement/cancellation hooks, landing, auth, checkout, profile, and support rails.",
-            "When a workflow is requested, implement real product/site/actions/*.ts generation, one normalized validated result schema, useDecodedActionRunner UI wiring, and records persistence/reopen; no SDK keys, fake output, fixtures, localStorage authority, orphan action, or unsupported route.",
+            "When a workflow is requested, implement its inputs and behavior literally plus real product/site/actions/*.ts generation, one normalized validated result schema, useDecodedActionRunner UI wiring, and records persistence/reopen; never replace upload or another requested input with a URL field, 'coming soon', or any other placeholder, and use the declared shared rail instead. No SDK keys, fake output, fixtures, localStorage authority, orphan action, or unsupported route.",
             "Do not invoke the app action: signed-in subscriber execution remains post-bootstrap verification.",
             "Refresh with the exact publish key and require a different live build than the landing baseline.",
             "If the structured result is a deterministic pre-publication build, type, action, or path validation failure, repair only worker-owned source and retry once with that same exact key; an unchanged retry only replays the failure.",

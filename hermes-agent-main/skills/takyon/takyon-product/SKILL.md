@@ -52,6 +52,10 @@ The platform contract for product source — action-file shape, `user` + `entitl
 5. Implement the selected target directly in this bounded primary SDK session:
    - Invoke the native `design-taste-frontend` skill for the initial public landing and any
      marketing-surface redesign. Its full method is already installed in the release plugin.
+   - Invoke Taste with facts, not a caller-authored design solution: pass only the business goal,
+     audience, offer, explicit user requirements, existing source/assets, and technical/runtime
+     constraints. Do not prescribe a hero type, page anatomy, section order, card count, design
+     dials, palette, typography, image count, or motion; the unchanged native skill chooses those.
    - For dense or multi-step product UI, honor Taste's scope boundary and follow the injected App Kit
      contract rather than forcing marketing-page layouts onto the app.
    - Read, write, and patch `product/site/` through the scoped business file tools. Preserve useful
@@ -84,6 +88,9 @@ The platform contract for product source — action-file shape, `user` + `entitl
   directly in this session. Honor Taste's product-UI scope boundary, preserve useful existing work,
   and create real `product/site/actions/<name>.ts` files when backend behavior is needed; the
   injected contract defines their shape.
+- Implement requested inputs and behaviors literally. Never replace an upload or another requested
+  capability with a URL field, "coming soon", or a placeholder; declare and use the corresponding
+  canonical AppKit runtime rail.
 
 ### Surgical iterate (carries the pricing grandfather rail)
 

@@ -20,6 +20,14 @@ from plugins.takyon.bootstrap_phases import (
 from plugins.takyon import core, worker
 
 
+def _completed_runtime_receipt() -> dict[str, object]:
+    return {
+        "tool": "__primary_agent_runtime__",
+        "success": True,
+        "status": "completed",
+    }
+
+
 class _Cursor:
     def __init__(self, one=None):
         self.one = one
@@ -274,6 +282,16 @@ def test_phase_prompts_and_toolsets_are_bounded() -> None:
         animations=False,
     )
     assert "design-taste-frontend" in final_prompt
+    assert "every shared rail" in final_prompt
+    assert "never replace upload" in final_prompt
+    landing_prompt = phase_prompt(
+        run,
+        "landing_build_publish",
+        public_site_url="https://acme.coscale.app/",
+        animations=False,
+    )
+    assert "do not prescribe a hero type" in landing_prompt
+    assert "page anatomy" in landing_prompt
     assert "business_invoke_app_action" not in PHASE_ALLOWED_TOOLS[
         "final_workflow_build_publish"
     ]
@@ -358,7 +376,7 @@ def test_long_seeded_goal_does_not_skip_taste_brief_phase(tmp_path) -> None:
     run = SimpleNamespace(
         business_slug="acme",
         owner_user_id=str(uuid.uuid4()),
-        phase_receipts={},
+        phase_receipts={"brief": [_completed_runtime_receipt()]},
         phase_idempotency={},
     )
     store = SimpleNamespace(_business_root=lambda _slug: tmp_path)
@@ -400,7 +418,7 @@ Calm, precise, evidence-aware, and operational rather than motivational.
     assert evidence.source == "workspace-artifact"
 
 
-def test_final_product_phase_does_not_gate_on_skill_receipts(
+def test_final_product_phase_requires_runtime_completion_not_skill_receipts(
     monkeypatch,
 ) -> None:
     class SurfaceStore:
@@ -416,7 +434,9 @@ def test_final_product_phase_does_not_gate_on_skill_receipts(
     run = SimpleNamespace(
         business_slug="acme",
         owner_user_id=str(uuid.uuid4()),
-        phase_receipts={"final_workflow_build_publish": []},
+        phase_receipts={
+            "final_workflow_build_publish": [_completed_runtime_receipt()]
+        },
         phase_idempotency={},
     )
     monkeypatch.setattr(
@@ -439,7 +459,7 @@ def test_final_product_phase_does_not_gate_on_skill_receipts(
     assert "required_skills_invoked" not in evidence.details
 
 
-def test_landing_publication_does_not_gate_on_skill_receipts() -> None:
+def test_landing_publication_requires_runtime_completion_not_skill_receipts() -> None:
     class SurfaceStore:
         def _business_root(self, _slug):
             return Path(".")
@@ -463,7 +483,9 @@ def test_landing_publication_does_not_gate_on_skill_receipts() -> None:
         SimpleNamespace(
             business_slug="acme",
             owner_user_id=str(uuid.uuid4()),
-            phase_receipts={"landing_build_publish": []},
+            phase_receipts={
+                "landing_build_publish": [_completed_runtime_receipt()]
+            },
             phase_idempotency={},
         ),
         "landing_build_publish",
@@ -501,7 +523,9 @@ def test_landing_publication_prefers_authoritative_columns_over_stale_attempt() 
         SimpleNamespace(
             business_slug="acme",
             owner_user_id=str(uuid.uuid4()),
-            phase_receipts={"landing_build_publish": []},
+            phase_receipts={
+                "landing_build_publish": [_completed_runtime_receipt()]
+            },
             phase_idempotency={},
         ),
         "landing_build_publish",
@@ -521,7 +545,7 @@ def test_landing_publication_prefers_authoritative_columns_over_stale_attempt() 
     }
 
 
-def test_brief_phase_does_not_gate_on_failed_skill_receipt(tmp_path) -> None:
+def test_brief_phase_does_not_advance_after_failed_runtime_completion(tmp_path) -> None:
     strategy = tmp_path / "research" / "strategy.md"
     strategy.parent.mkdir(parents=True)
     strategy.write_text(
@@ -536,6 +560,7 @@ def test_brief_phase_does_not_gate_on_failed_skill_receipt(tmp_path) -> None:
             "brief": [
                 {
                     "tool": "__primary_agent_runtime__",
+                    "success": False,
                     "status": "failed",
                     "skills_invoked": [
                         "takyon-approved-skills:design-taste-frontend"
@@ -546,6 +571,16 @@ def test_brief_phase_does_not_gate_on_failed_skill_receipt(tmp_path) -> None:
         phase_idempotency={},
     )
 
+    evidence = worker._bootstrap_phase_authoritative_evidence(
+        SimpleNamespace(_business_root=lambda _slug: tmp_path),
+        run,
+        "brief",
+        workflow_requested=True,
+        archetype="web_saas",
+    )
+    assert evidence is None
+
+    run.phase_receipts["brief"].append(_completed_runtime_receipt())
     evidence = worker._bootstrap_phase_authoritative_evidence(
         SimpleNamespace(_business_root=lambda _slug: tmp_path),
         run,

@@ -23216,6 +23216,7 @@ def _finalize_product_surface_refresh(
         _scaffold_visible_shell_unfinished_blocker(refresh),
         _app_access_gate_null_unfinished_blocker(refresh),
         _appkit_subscription_cancellation_unfinished_blocker(refresh),
+        _requested_workflow_unfinished_blocker(refresh),
     ):
         if blocker:
             refresh = _merge_surface_refresh_blocker(refresh, blocker)
@@ -36796,7 +36797,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "source_path": {"type": "string"},
                 "runtime_api_base": {"type": "string"},
-                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared shared backend rails for this app surface. Bootstrap app shells are pinned to auth/account/profile/checkout."},
+                "runtime_features": {"type": "array", "items": {"type": "string", "enum": sorted(PRODUCT_RUNTIME_RAILS)}, "description": "Declared shared backend rails for this app surface. Fresh paid app shells include auth/account/profile/checkout plus every canonical rail required by the explicit product workflow."},
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, actions=broken, or usage=live."},
                 "display_name": {"type": "string", "description": "Canonical customer-visible product name. This is branding, never the routing slug; owned navigation, metadata, and surface context use it consistently."},
                 "workflow_completion_required": {"type": "boolean", "description": "Set true immediately before the final requested SaaS workflow build. While true, publish refuses an unchanged access starter or a workflow without a real action, AI generation, and durable records wiring."},

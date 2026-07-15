@@ -1831,6 +1831,26 @@ def _bootstrap_phase_authoritative_evidence(
     slug = str(run.business_slug)
     owner = str(run.owner_user_id)
     receipts = list(run.phase_receipts.get(phase) or [])
+    sdk_phases = {
+        "brief",
+        "surface",
+        "landing_build_publish",
+        "search",
+        "logo",
+        "final_workflow_build_publish",
+        "mobile",
+    }
+    if phase in sdk_phases and not any(
+        str(receipt.get("tool") or "") == "__primary_agent_runtime__"
+        and bool(receipt.get("success"))
+        and str(receipt.get("status") or "").lower() == "completed"
+        for receipt in receipts
+        if isinstance(receipt, Mapping)
+    ):
+        # An external side effect may commit before SessionStore/transcript persistence
+        # completes. Keep the phase current so the bounded continuation can reattach to
+        # the same idempotent effect and finish its craft/inspection loop.
+        return None
     if phase == "preflight":
         with store._connect() as conn:
             business = store._ensure_business(conn, slug)
