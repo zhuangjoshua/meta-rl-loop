@@ -785,9 +785,9 @@
       "publish_files": [
         "skills/takyon-product/SKILL.md"
       ],
-      "source_digest": "sha256:f23d39a5923bfd2f749db94328349d115ccf449f6b30b970bfd080236f876b91",
-      "content_digest": "sha256:f23d39a5923bfd2f749db94328349d115ccf449f6b30b970bfd080236f876b91",
-      "line_count": 136
+      "source_digest": "sha256:3cfc60962843cf293ea7d6c424446bc0386810bcdfe2be4450fddf7e3a8e68eb",
+      "content_digest": "sha256:3cfc60962843cf293ea7d6c424446bc0386810bcdfe2be4450fddf7e3a8e68eb",
+      "line_count": 143
     },
     {
       "name": "takyon-reddit-ads",
