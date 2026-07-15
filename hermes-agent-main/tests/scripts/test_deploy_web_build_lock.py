@@ -780,6 +780,8 @@ def test_deploys_replace_mutable_skills_with_immutable_operator_plugin_only():
     assert "rm -rf '$TAKYON_REMOTE_RUNTIME/node_modules/@anthropic-ai'/claude-agent-sdk*" in subuser
 
     release = (ROOT / "deploy/shared/runtime-release.sh").read_text()
+    assert "'$TAKYON_REMOTE_LIVE_RUNTIME/optional-skills'" in release
+    assert "'$TAKYON_REMOTE_LIVE_RUNTIME/plugins/takyon/references/polsia3-skills'" in release
     for forbidden in (
         "--exclude '/.claude/'",
         "--exclude '/skills/'",
