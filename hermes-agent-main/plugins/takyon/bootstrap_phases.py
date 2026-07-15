@@ -736,7 +736,7 @@ def phase_prompt(
             "Write a truthful non-empty research/strategy.md; do not fabricate statistics, testimonials, partners, awards, or sourced claims.",
         ),
         "surface": (
-            "Create the product surface contract with source_path product/site, routes /, /app, /app/profile, and the base runtime_features auth/account/profile/checkout. Read the tool's canonical runtime-feature enum and add every other shared rail required to implement the business goal literally; do not defer a required upload, action, record, generation, or other supported capability as a placeholder.",
+            "Create the product surface contract with source_path product/site and routes /, /app, /app/profile. Omit runtime_features: runtime policy defaults every non-spendful product rail and reconciles generate/search from the built source after refresh.",
             "Use the one human display name from research/strategy.md, never the routing slug.",
             "If monthly paid, upsert plan_key monthly with the exact plan key. Unless the operator supplied explicit economics, omit composition, price_cents, and included_ai_budget_microusd so server policy supplies the canonical starter economics; do not invent provider pricing math.",
             "Do not set bootstrap_final_product_pass in this phase.",
@@ -759,9 +759,9 @@ def phase_prompt(
         ),
         "final_workflow_build_publish": (
             "Invoke takyon-product, takyon-app-runtime, and design-taste-frontend. Reinspect the existing product/site source.",
-            "First reread the explicit business goal and the tool's canonical runtime-feature enum, then upsert the surface contract with every shared rail the requested workflow literally requires, preserving existing base rails; set bootstrap_final_product_pass true and workflow_completion_required true only when the requested workflow is explicit.",
+            "Reread the explicit business goal, then upsert the surface contract without runtime_features; runtime policy reconciles rails from the built source. Set bootstrap_final_product_pass true and workflow_completion_required true only when the requested workflow is explicit.",
             "Customize app-home.tsx and profile.tsx while preserving app-layout.tsx, canonical account/entitlement/cancellation hooks, landing, auth, checkout, profile, and support rails.",
-            "When a workflow is requested, implement its inputs and behavior literally plus real product/site/actions/*.ts generation, one normalized validated result schema, useDecodedActionRunner UI wiring, and records persistence/reopen; never replace upload or another requested input with a URL field, 'coming soon', or any other placeholder, and use the declared shared rail instead. No SDK keys, fake output, fixtures, localStorage authority, orphan action, or unsupported route.",
+            "When a workflow is requested, implement its inputs and behavior literally plus real product/site/actions/*.ts generation, one normalized validated result schema, useDecodedActionRunner UI wiring, and records persistence/reopen; never replace upload or another requested input with a URL field, 'coming soon', or any other placeholder. No SDK keys, fake output, fixtures, localStorage authority, orphan action, or unsupported route.",
             "Do not invoke the app action: signed-in subscriber execution remains post-bootstrap verification.",
             "Refresh with the exact publish key and require a different live build than the landing baseline.",
             "If the structured result is a deterministic pre-publication build, type, action, or path validation failure, repair only worker-owned source and retry once with that same exact key; an unchanged retry only replays the failure.",

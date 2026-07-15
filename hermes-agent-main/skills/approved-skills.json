@@ -574,8 +574,8 @@
         "skills/takyon-app-runtime/references/runtime-rules.md",
         "skills/takyon-app-runtime/templates/runtime.md"
       ],
-      "source_digest": "sha256:09e3d72ffadb1542a3b9ce1deadae34c1e71fe0e1b238e014f5966d536acb8b8",
-      "content_digest": "sha256:09e3d72ffadb1542a3b9ce1deadae34c1e71fe0e1b238e014f5966d536acb8b8",
+      "source_digest": "sha256:0e6672da429ebd345adeb53e6962cd46a37e95ca432a21702f26991529232976",
+      "content_digest": "sha256:0e6672da429ebd345adeb53e6962cd46a37e95ca432a21702f26991529232976",
       "line_count": 139
     },
     {
@@ -785,8 +785,8 @@
       "publish_files": [
         "skills/takyon-product/SKILL.md"
       ],
-      "source_digest": "sha256:3cfc60962843cf293ea7d6c424446bc0386810bcdfe2be4450fddf7e3a8e68eb",
-      "content_digest": "sha256:3cfc60962843cf293ea7d6c424446bc0386810bcdfe2be4450fddf7e3a8e68eb",
+      "source_digest": "sha256:4aa089a1c226040db53c4a7756e7c1aab1b707934ff14c1ebb8d2ffd1d1f4ece",
+      "content_digest": "sha256:4aa089a1c226040db53c4a7756e7c1aab1b707934ff14c1ebb8d2ffd1d1f4ece",
       "line_count": 143
     },
     {

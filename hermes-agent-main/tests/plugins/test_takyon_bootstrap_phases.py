@@ -282,7 +282,9 @@ def test_phase_prompts_and_toolsets_are_bounded() -> None:
         animations=False,
     )
     assert "design-taste-frontend" in final_prompt
-    assert "every shared rail" in final_prompt
+    assert "without runtime_features" in final_prompt
+    assert "runtime policy reconciles rails from the built source" in final_prompt
+    assert "every shared rail" not in final_prompt
     assert "never replace upload" in final_prompt
     landing_prompt = phase_prompt(
         run,

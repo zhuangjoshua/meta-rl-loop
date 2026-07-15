@@ -815,7 +815,7 @@ def test_active_surface_requires_product_refresh_receipt(tmp_path, monkeypatch):
     assert pulse["summary"]["local_continuable_product_work"] == 0
 
 
-def test_product_surface_refresh_keeps_http_actions_out_of_stored_runtime_features(tmp_path, monkeypatch):
+def test_product_surface_refresh_keeps_default_actions_available(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     from plugins.takyon import app_actions as takyon_app_actions
@@ -890,11 +890,11 @@ def test_product_surface_refresh_keeps_http_actions_out_of_stored_runtime_featur
     )
 
     assert result["success"] is True
-    assert "actions" not in result["surface_refresh"]["runtime_features"]
+    assert "actions" in result["surface_refresh"]["runtime_features"]
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
-    assert "actions" not in app["surface_contract"]["runtime_features"]
+    assert "actions" in app["surface_contract"]["runtime_features"]
     context_payload = _subuser_surface_context_payload(app["surface_contract"], slug="latexflow")
-    assert "actions" not in context_payload["runtimeFeatures"]
+    assert "actions" in context_payload["runtimeFeatures"]
 
 
 def test_product_surface_projection_turns_stale_when_source_changes_after_publish(tmp_path, monkeypatch):
@@ -1945,7 +1945,7 @@ def test_bootstrap_app_surface_seed_ignores_burned_shape_args(tmp_path, monkeypa
     assert shape["conversion_model"] == ""
     assert shape["required_routes"] == ["/", "/app"]
     assert shape["required_app_tabs"] == []
-    assert surface["runtime_features"] == ["auth", "account", "profile", "checkout"]
+    assert surface["runtime_features"] == list(takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)
     assert "customer_experience" not in (surface.get("metadata") or {})
 
 
@@ -2061,19 +2061,16 @@ def test_bootstrap_app_surface_seed_ignores_burned_workflow_args(tmp_path, monke
     surface = app["surface_contract"]
     workflow = _surface_product_workflow_shape(surface)
 
-    # Fresh bootstrap shells persist the fixed auth/account/profile/checkout shell
-    # directly onto the contract so the published /app shell is truthful immediately.
-    assert _surface_runtime_features(surface) == ["auth", "account", "profile", "checkout"]
-    assert takyon_core._surface_effective_runtime_features(surface) == [  # type: ignore[attr-defined]
-        "auth",
-        "account",
-        "profile",
-        "checkout",
-    ]
+    assert _surface_runtime_features(surface) == list(
+        takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES
+    )
+    assert takyon_core._surface_effective_runtime_features(surface) == list(  # type: ignore[attr-defined]
+        takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES
+    )
     assert _surface_is_bootstrap_access_shell(surface) is True
     assert workflow == {}
     assert surface["routes"] == [{"path": route} for route in takyon_core.DEFAULT_SUBUSER_APP_ROUTES]  # type: ignore[attr-defined]
-    assert surface["runtime_features"] == ["auth", "account", "profile", "checkout"]
+    assert surface["runtime_features"] == list(takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)
     assert "DEBUG/blocked" not in str(surface.get("notes") or "")
     assert len(app["plans"]) == 1
     plan = app["plans"][0]
@@ -2126,7 +2123,7 @@ def test_existing_source_can_select_actions_before_named_actions_exist(tmp_path,
     app = store.read(scope="business:longer", query="summary", include=["app"])["app"]
     surface = app["surface_contract"]
 
-    assert _surface_runtime_features(surface) == ["auth", "account"]
+    assert _surface_runtime_features(surface) == ["auth", "account", "actions"]
 
 
 def test_surface_upsert_backfills_monthly_plan_for_existing_app_shell_source(tmp_path, monkeypatch):
@@ -2594,7 +2591,7 @@ def test_commit_tool_allows_same_raw_key_for_same_action_with_different_content(
     assert app["plans"][0]["notes"] == "second"
 
 
-def test_vite_ai_product_contract_rejects_generate_runtime_feature(tmp_path, monkeypatch):
+def test_fresh_product_contract_ignores_prebuild_generate_guess(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -2615,8 +2612,12 @@ def test_vite_ai_product_contract_rejects_generate_runtime_feature(tmp_path, mon
         )
     )
 
-    assert result["success"] is False
-    assert "generate is not a declarable rail on the pinned Vite scaffold" in result["error"]
+    assert result["success"] is True
+    surface = store.read(scope="business:latexflow", query="summary", include=["app"])["app"][
+        "surface_contract"
+    ]
+    assert surface["runtime_features"] == list(takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)
+    assert "generate" not in surface["runtime_features"]
 
 
 def test_app_surface_contract_omits_burned_surface_theory_from_context_and_projection(tmp_path, monkeypatch):

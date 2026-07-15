@@ -507,17 +507,9 @@ _RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
 # appended to the worker contract for every product instead.
 ALWAYS_ON_RUNTIME_RAILS: tuple[str, ...] = ("analytics",)
 
-# Rails whose declaration is DERIVED from the built product source — the app self-declares
-# the rails it actually calls — rather than relying on the bootstrap seed listing them.
-# `actions` is derived from on-disk action files (site_http_action_names); the data / media /
-# AI / social rails are derived from runtime-client usage in the app source
-# (referenced_runtime_rails_in_source). Deriving the whole set is what keeps declared >= used
-# by construction for every business, curing rail_unavailable:<rail>:undeclared at the root.
-# Always-seeded shell rails (auth/account/profile/checkout) are intentionally NOT here — they
-# are declared regardless of source scanning.
-_BUILD_DERIVED_RAILS: frozenset[str] = frozenset(
-    {"actions", "records", "directory", "media", "connections", "generate", "search"}
-)
+# Paid-provider rails are the only rails derived from product source. Declaring them spends
+# nothing; each call remains fail-closed behind the existing reserve/settle price gate.
+_BUILD_DERIVED_RAILS: frozenset[str] = frozenset({"generate", "search"})
 
 
 # ---------------------------------------------------------------------------
@@ -882,7 +874,17 @@ DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER = "paid"
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS = 1_900
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD = 5_000_000
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA = 0
-DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES = ("auth", "account", "profile", "checkout")
+DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES = (
+    "auth",
+    "account",
+    "profile",
+    "records",
+    "actions",
+    "media",
+    "checkout",
+    "entitlements",
+    "usage",
+)
 DEFAULT_SUBUSER_APP_ROUTES = (
     "/",
     "/faq",
@@ -1925,29 +1927,11 @@ def _normalize_runtime_features(raw: Any, *, strict: bool = False) -> list[str]:
 def _surface_declared_runtime_features(surface: dict[str, Any] | None) -> list[str]:
     if not isinstance(surface, dict):
         return []
-    # `actions` is the one rail that MUST be file-backed — declaring it without on-disk action
-    # files would expose an uncallable rail — so it is stripped from the directly-declared set
-    # and only re-admitted from `_workspace_file_rails` below. Every other rail may be declared
-    # directly AND/OR derived from the build (purely additive), so directly-declared rails are
-    # never lost.
-    direct = [
-        rail
-        for rail in _normalize_runtime_features(surface.get("runtime_features"))
-        if rail != "actions"
-    ]
-    # `_workspace_file_rails` carries the rails DERIVED from the built source (actions from
-    # on-disk files, plus records/media/directory/connections/generate/search from runtime-
-    # client usage). Admit the whole build-derived set, not just actions, so a product that
-    # calls a rail self-declares it even when the stored contract omitted it.
-    file_backed = [
-        rail
-        for rail in _normalize_runtime_features(surface.get("_workspace_file_rails"))
-        if rail in _BUILD_DERIVED_RAILS
-    ]
-    if direct or file_backed:
-        return _normalize_runtime_features([*direct, *file_backed])
+    direct = _normalize_runtime_features(surface.get("runtime_features"))
+    if direct:
+        return direct
     metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
-    return [rail for rail in _normalize_runtime_features(metadata.get("runtime_features")) if rail != "actions"]
+    return _normalize_runtime_features(metadata.get("runtime_features"))
 
 
 def _surface_runtime_features(surface: dict[str, Any] | None) -> list[str]:
@@ -2144,21 +2128,6 @@ def _canonical_bootstrap_access_runtime_features(
     if not (bootstrap_seed and app_shell_required):
         return runtime_features
     return list(DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)
-
-
-def _validate_frontend_stack_runtime_feature_contract(
-    *,
-    frontend_stack: Any,
-    runtime_features: list[str],
-) -> None:
-    normalized_frontend_stack = _normalize_frontend_stack_choice(frontend_stack) or DEFAULT_SUBUSER_FRONTEND_STACK
-    if normalized_frontend_stack != "vite_react_ts":
-        return
-    if "generate" in set(runtime_features or []):
-        raise TakyonError(
-            "generate is not a declarable rail on the pinned Vite scaffold — AI generation must be "
-            "implemented behind a product action file that calls the shared generate broker via ctx"
-        )
 
 
 def _canonical_bootstrap_surface_notes(
@@ -3042,28 +3011,51 @@ def _materialized_surface_for_workspace(
 ) -> dict[str, Any] | None:
     if not isinstance(surface, dict):
         return surface
+    return {
+        **surface,
+        "product_workflow": _surface_product_workflow_shape(surface),
+        "runtime_features": _surface_runtime_features(surface),
+    }
+
+
+def _reconcile_product_runtime_features_from_source(
+    site_root: Path,
+    *,
+    surface: dict[str, Any],
+    receipt_path: str,
+) -> tuple[list[str], dict[str, Any]]:
+    """Default free rails and derive only paid-provider declarations from product source."""
+
     try:
         from . import app_actions as takyon_app_actions
     except Exception:
         from plugins.takyon import app_actions as takyon_app_actions
-    surface_with_workflow = {
-        **surface,
-        "product_workflow": _surface_product_workflow_shape(surface),
-    }
-    file_rails: list[str] = []
-    runtime_features = _surface_runtime_features(surface)
-    if takyon_app_actions.site_http_action_names(workspace_root, surface_with_workflow):
-        file_rails.append("actions")
-    # Self-declare every build-derived rail the app's source actually calls (records, media,
-    # directory, connections, generate, search) — symmetric with how `actions` is derived from
-    # on-disk action files above — so the declared contract stays honest to the build.
-    for rail in takyon_app_actions.referenced_runtime_rails_in_source(workspace_root):
-        if rail in _BUILD_DERIVED_RAILS and rail not in file_rails:
-            file_rails.append(rail)
-    return {
-        **surface_with_workflow,
-        "runtime_features": runtime_features,
-        "_workspace_file_rails": file_rails,
+
+    existing = _surface_runtime_features(surface)
+    used_spendful = sorted(
+        set(takyon_app_actions.referenced_runtime_rails_in_source(site_root))
+        & set(_BUILD_DERIVED_RAILS)
+    )
+    preserved = [rail for rail in existing if rail not in _BUILD_DERIVED_RAILS]
+    default_rails = (
+        []
+        if _surface_allows_landing_only(surface)
+        else list(DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)
+    )
+    reconciled = _normalize_runtime_features(
+        [*default_rails, *preserved, *used_spendful],
+        strict=True,
+    )
+    previous_spendful = set(existing) & set(_BUILD_DERIVED_RAILS)
+    receipt_name = Path(receipt_path).name or f"{uuid.uuid4().hex}.json"
+    return reconciled, {
+        "status": "observed",
+        "source_path": str(site_root),
+        "runtime_features": reconciled,
+        "spendful_rails_used": used_spendful,
+        "added": [rail for rail in reconciled if rail not in existing],
+        "removed": sorted(previous_spendful - set(used_spendful)),
+        "receipt_path": f"metrics/receipts/runtime-rails/{receipt_name}",
     }
 
 
@@ -18398,9 +18390,7 @@ class TakyonStore:
                 or DEFAULT_SUBUSER_FRONTEND_STACK
             )
             bootstrap_seed = not existing_has_source_files
-            runtime_features = _canonical_runtime_features_for_surface_shape(
-                [rail for rail in runtime_features if rail != "actions"]
-            )
+            runtime_features = _canonical_runtime_features_for_surface_shape(runtime_features)
             raw_routes = op.get("routes") if op.get("routes") is not None else []
             if isinstance(raw_routes, dict):
                 routes = [raw_routes]
@@ -18497,10 +18487,6 @@ class TakyonStore:
                 subuser_app_payload["chat_tone"] = resolved_tone
             metadata.pop("customer_experience", None)
             metadata.pop("product_workflow", None)
-            _validate_frontend_stack_runtime_feature_contract(
-                frontend_stack=frontend_stack_value,
-                runtime_features=runtime_features,
-            )
             surface_requires_app_shell = _surface_shape_requires_app_shell(
                 runtime_features=runtime_features,
                 required_routes=route_paths,
@@ -23188,10 +23174,22 @@ def _finalize_product_surface_refresh(
     if isinstance(reconciled_surface, Mapping):
         surface = dict(reconciled_surface)
 
+    source_rel = _safe_relpath(source_path or "product/site", field="source_path").as_posix()
+    source_root = store._business_root(business) / source_rel
+    runtime_features, runtime_rail_reconciliation = _reconcile_product_runtime_features_from_source(
+        source_root,
+        surface=surface,
+        receipt_path=receipt_path,
+    )
+    surface = {
+        **surface,
+        "runtime_features": runtime_features,
+    }
+
     surface_with_workflow = {
         **surface,
         "product_workflow": _surface_product_workflow_shape(surface),
-        "runtime_features": _surface_runtime_features(surface),
+        "runtime_features": runtime_features,
     }
 
     refresh = _refresh_product_surface_path(
@@ -23515,11 +23513,16 @@ def _finalize_product_surface_refresh(
             business,
             verification_actions or _surface_product_workflow_shape(surface).get("actions"),
         )
+    runtime_rail_reconciliation = {
+        **runtime_rail_reconciliation,
+        "status": "applied" if refresh.get("status") == "passed" else "observed",
+    }
     return {
         **refresh,
         "business": business,
         "receipt_path": receipt_path,
-        "runtime_features": _surface_runtime_features(surface),
+        "runtime_features": runtime_features,
+        "runtime_rail_reconciliation": runtime_rail_reconciliation,
         "publish": publish,
         "inventory": inventory,
         "action_invocations": action_invocations,
@@ -23566,6 +23569,29 @@ def _product_surface_refresh_operations(
             },
         },
     ]
+    runtime_rail_reconciliation = (
+        surface_refresh.get("runtime_rail_reconciliation")
+        if isinstance(surface_refresh.get("runtime_rail_reconciliation"), dict)
+        else {}
+    )
+    runtime_rail_receipt_path = str(runtime_rail_reconciliation.get("receipt_path") or "").strip()
+    if runtime_rail_receipt_path:
+        operations.extend(
+            [
+                {
+                    "action": "artifact.write",
+                    "business": business,
+                    "path": runtime_rail_receipt_path,
+                    "content": json.dumps(runtime_rail_reconciliation, indent=2, ensure_ascii=False) + "\n",
+                },
+                {
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "product.runtime_rails.reconciled",
+                    "payload": runtime_rail_reconciliation,
+                },
+            ]
+        )
     publish_blocker = publish.get("blocker") or surface_refresh.get("blocker") or surface_refresh.get("error") or ""
     publish_succeeded = publish.get("status") == "published"
     refresh_passed = surface_refresh.get("status") == "passed"
@@ -36797,7 +36823,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "source_path": {"type": "string"},
                 "runtime_api_base": {"type": "string"},
-                "runtime_features": {"type": "array", "items": {"type": "string", "enum": sorted(PRODUCT_RUNTIME_RAILS)}, "description": "Declared shared backend rails for this app surface. Fresh paid app shells include auth/account/profile/checkout plus every canonical rail required by the explicit product workflow."},
+                "runtime_features": {"type": "array", "items": {"type": "string", "enum": sorted(PRODUCT_RUNTIME_RAILS)}, "description": "Compatibility-only runtime rail field. Product bootstrap should omit it: policy defaults non-spendful rails and refresh derives generate/search from actual source usage."},
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, actions=broken, or usage=live."},
                 "display_name": {"type": "string", "description": "Canonical customer-visible product name. This is branding, never the routing slug; owned navigation, metadata, and surface context use it consistently."},
                 "workflow_completion_required": {"type": "boolean", "description": "Set true immediately before the final requested SaaS workflow build. While true, publish refuses an unchanged access starter or a workflow without a real action, AI generation, and durable records wiring."},

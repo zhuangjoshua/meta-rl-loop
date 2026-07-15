@@ -1,10 +1,4 @@
-"""Build-derived runtime-rail declaration.
-
-A product app self-declares every runtime rail it actually calls (records, media, …),
-not just `actions`. This is the root cure for `rail_unavailable:<rail>:undeclared`: the
-declared contract is derived from the built source, so declared >= used by construction
-for every business, regardless of what the bootstrap seed listed.
-"""
+"""Default-on free rails and source-derived paid-provider rail declaration."""
 from __future__ import annotations
 
 from plugins.takyon import app_actions, core as takyon_core
@@ -52,9 +46,7 @@ def test_scanner_detects_action_internal_generate(tmp_path):
     assert "generate" in app_actions.referenced_runtime_rails_in_source(site)
 
 
-def test_materialized_surface_self_declares_records_when_app_reads_records(tmp_path):
-    # The exact prod bug: the stored contract (bootstrap seed) never declared `records`, but
-    # the built app reads via the records rail. Materialization must self-declare it.
+def test_reconcile_defaults_non_spendful_rails(tmp_path):
     workspace = tmp_path / "product" / "site"
     _write(
         workspace / "src" / "App.tsx",
@@ -66,34 +58,63 @@ def test_materialized_surface_self_declares_records_when_app_reads_records(tmp_p
         "metadata": {"subuser_app": {}},
         "routes": ["/", "/app"],
     }
-    materialized = takyon_core._materialized_surface_for_workspace(workspace, surface=surface)
+    reconciled, receipt = takyon_core._reconcile_product_runtime_features_from_source(
+        workspace,
+        surface=surface,
+        receipt_path="metrics/receipts/product-surface/run.json",
+    )
+    assert reconciled == list(takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)
+    assert receipt["added"] == ["records", "actions", "media", "entitlements", "usage"]
+    assert receipt["receipt_path"] == "metrics/receipts/runtime-rails/run.json"
 
-    assert "records" in materialized["_workspace_file_rails"]
-    # …and it flows all the way to the effective set baked into surface-context.js.
-    assert "records" in takyon_core._surface_declared_runtime_features(materialized)
-    assert "records" in takyon_core._surface_effective_runtime_features(materialized)
 
-
-def test_unused_rail_is_not_declared(tmp_path):
-    # A product that uses no data rail must not over-declare records/media/etc.
+def test_reconcile_adds_used_generate_and_drops_unused_search(tmp_path):
     workspace = tmp_path / "product" / "site"
-    _write(workspace / "src" / "App.tsx", "export const App = () => 'hi';\n")
+    _write(workspace / "actions" / "draft.ts", "export default (p, ctx) => ctx.generate(p);\n")
     surface = {
-        "runtime_features": ["auth", "account", "profile", "checkout"],
+        "runtime_features": ["auth", "account", "search"],
         "metadata": {"subuser_app": {}},
         "routes": ["/", "/app"],
     }
-    materialized = takyon_core._materialized_surface_for_workspace(workspace, surface=surface)
-    declared = takyon_core._surface_declared_runtime_features(materialized)
-    assert "records" not in declared
-    assert "media" not in declared
+    reconciled, receipt = takyon_core._reconcile_product_runtime_features_from_source(
+        workspace,
+        surface=surface,
+        receipt_path="metrics/receipts/product-surface/run.json",
+    )
+    assert "generate" in reconciled
+    assert "search" not in reconciled
+    assert receipt["spendful_rails_used"] == ["generate"]
+    assert receipt["removed"] == ["search"]
 
 
-def test_build_derived_set_covers_actions_and_data_rails():
-    # `actions` stays in the derived set (its file-backed derivation is unchanged); the data /
-    # media / AI / social rails join it so the channel is one general mechanism.
-    for rail in ("actions", "records", "media", "directory", "connections", "generate", "search"):
-        assert rail in takyon_core._BUILD_DERIVED_RAILS
-    # Always-seeded shell rails are NOT build-derived.
-    for rail in ("auth", "account", "profile", "checkout"):
-        assert rail not in takyon_core._BUILD_DERIVED_RAILS
+def test_only_paid_provider_rails_are_build_derived():
+    assert takyon_core._BUILD_DERIVED_RAILS == {"generate", "search"}
+
+
+def test_refresh_operations_write_runtime_rail_receipt():
+    operations = takyon_core._product_surface_refresh_operations(
+        business="demo",
+        surface_refresh={
+            "status": "passed",
+            "kind": "vite_react_ts",
+            "source_path": "product/site",
+            "receipt_path": "metrics/receipts/product-surface/run.json",
+            "runtime_features": list(takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES),
+            "runtime_rail_reconciliation": {
+                "status": "applied",
+                "receipt_path": "metrics/receipts/runtime-rails/run.json",
+                "added": ["media"],
+                "removed": [],
+            },
+            "publish": {"status": "published", "database_build_activated": True},
+        },
+        surface={"runtime_features": []},
+        publish_target="https://demo.coscale.app/",
+        publish_policy="static",
+        requested_publish_policy="static",
+        activate_on_success=True,
+    )
+    writes = [op for op in operations if op["action"] == "artifact.write"]
+    assert any(op["path"] == "metrics/receipts/runtime-rails/run.json" for op in writes)
+    events = [op for op in operations if op["action"] == "event.record"]
+    assert any(op["event_type"] == "product.runtime_rails.reconciled" for op in events)

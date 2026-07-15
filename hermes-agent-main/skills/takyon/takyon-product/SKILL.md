@@ -78,7 +78,7 @@ The platform contract for product source — action-file shape, `user` + `entitl
 
 ### First build (seed the surface + the plan)
 
-- Call `business_upsert_app_surface_contract` once to keep the single surface contract truthful: `source_path` (`product/site`), `routes` (the canonical skeleton), `publish_target`, `runtime_features`, and honest `notes`. Do not duplicate UI/copy/theory into it — it is the tiny shell record only.
+- Call `business_upsert_app_surface_contract` once to keep the single surface contract truthful: `source_path` (`product/site`), `routes` (the canonical skeleton), `publish_target`, and honest `notes`. Omit `runtime_features`: policy defaults all non-spendful rails and refresh derives `generate`/`search` from actual source usage, records the reconciliation receipt, and drops either paid rail when no longer used.
 - Ensure the canonical monthly paid plan exists with `business_upsert_app_plan` before any UI claims paid subscription is real. Keep `included_ai_budget_microusd <= price_cents * 10_000`.
 - Apply native `design-taste-frontend` directly to build a truthful, branded `/`; leave `/app` + `/app/profile` as the honest auth/subscription/account shell. Do not finish the deep `/app` workflow in this phase.
 
@@ -89,8 +89,8 @@ The platform contract for product source — action-file shape, `user` + `entitl
   and create real `product/site/actions/<name>.ts` files when backend behavior is needed; the
   injected contract defines their shape.
 - Implement requested inputs and behaviors literally. Never replace an upload or another requested
-  capability with a URL field, "coming soon", or a placeholder; declare and use the corresponding
-  canonical AppKit runtime rail.
+  capability with a URL field, "coming soon", or a placeholder. Use the canonical AppKit client;
+  do not select rails manually.
 
 ### Surgical iterate (carries the pricing grandfather rail)
 

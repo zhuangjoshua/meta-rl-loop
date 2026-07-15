@@ -480,13 +480,16 @@ def test_surface_shape_defaults_frontend_stack_to_vite():
 
 
 def test_bootstrap_default_runtime_features_stay_pinned():
-    # The bootstrap access shell must stay pinned to the shared auth/account/profile/
-    # checkout shell so removing the old taxonomy never silently changes it.
     assert takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES == (
         "auth",
         "account",
         "profile",
+        "records",
+        "actions",
+        "media",
         "checkout",
+        "entitlements",
+        "usage",
     )
 
 
@@ -505,7 +508,12 @@ def test_bootstrap_access_shell_is_effective_until_workflow_declares_real_rails(
         "auth",
         "account",
         "profile",
+        "records",
+        "actions",
+        "media",
         "checkout",
+        "entitlements",
+        "usage",
     ]
 
     payload = takyon_core._subuser_surface_context_payload(  # type: ignore[attr-defined]
@@ -516,11 +524,16 @@ def test_bootstrap_access_shell_is_effective_until_workflow_declares_real_rails(
         "auth",
         "account",
         "profile",
+        "records",
+        "actions",
+        "media",
         "checkout",
+        "entitlements",
+        "usage",
     ]
 
     block = takyon_core._runtime_ui_contract_block(surface)  # type: ignore[attr-defined]
-    assert "Runtime-backed features available in this shell: auth, account, profile, checkout" in block
+    assert "Runtime-backed features available in this shell: auth, account, profile, records, actions, media, checkout, entitlements, usage" in block
 
 
 def test_product_workflow_actions_survive_shape_normalization():
@@ -608,7 +621,7 @@ def test_bootstrap_access_shell_seed_forces_canonical_shell_for_real_app_surface
         bootstrap_seed=True,
         app_shell_required=True,
     )
-    assert forced == ["auth", "account", "profile", "checkout"]
+    assert forced == list(takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)
 
     # Not a fresh seed → declared rails are left untouched.
     assert takyon_core._canonical_bootstrap_access_runtime_features(  # type: ignore[attr-defined]
