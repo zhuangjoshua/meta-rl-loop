@@ -693,6 +693,14 @@ def referenced_runtime_rails_in_source(site_root: Path, *, limit: int = 400) -> 
     used: set[str] = set()
     if not site_root.exists():
         return used
+    try:
+        from . import core as _core
+    except Exception:
+        from plugins.takyon import core as _core
+    runtime_owned_files = frozenset(
+        str(item).replace("\\", "/")
+        for item in getattr(_core, "_STARTER_OWNED_REFRESH_FILES", ())
+    )
     pending = list(_runtime_rail_usage_patterns())
     scanned = 0
     for path in sorted(site_root.rglob("*")):
@@ -700,7 +708,12 @@ def referenced_runtime_rails_in_source(site_root: Path, *, limit: int = 400) -> 
             break
         if not path.is_file() or path.suffix.lower() not in _ACTION_SCAN_SOURCE_SUFFIXES:
             continue
-        if _ACTION_SCAN_SKIP_DIRS & set(path.relative_to(site_root).parts):
+        relative = path.relative_to(site_root)
+        if _ACTION_SCAN_SKIP_DIRS & set(relative.parts):
+            continue
+        # AppKit rematerializes these files during refresh. Scanning the pre-refresh copies would
+        # mistake the canonical client wrappers and example action for product usage.
+        if relative.as_posix() in runtime_owned_files:
             continue
         scanned += 1
         try:

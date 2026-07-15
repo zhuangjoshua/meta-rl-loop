@@ -27,6 +27,8 @@ def test_scanner_detects_app_rail_usage_and_skips_the_kit(tmp_path):
         "async search(){ ensureRail('search'); }\n"
         "async listConnections(){ ensureRail('connections'); }\n",
     )
+    _write(site / "src" / "lib" / "takyon.ts", "client.generate({}); client.search({});\n")
+    _write(site / "actions" / "_example-generate.ts", "export default (p, ctx) => ctx.generate(p);\n")
     assert app_actions.referenced_runtime_rails_in_source(site) == {"records", "media"}
 
 
