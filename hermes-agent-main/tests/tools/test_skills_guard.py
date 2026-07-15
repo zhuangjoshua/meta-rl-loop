@@ -46,10 +46,6 @@ from tools.skills_guard import (
 
 
 class TestResolveTrustLevel:
-    def test_official_sources_resolve_to_builtin(self):
-        assert _resolve_trust_level("official") == "builtin"
-        assert _resolve_trust_level("official/email/agentmail") == "builtin"
-
     def test_trusted_repos(self):
         assert _resolve_trust_level("openai/skills") == "trusted"
         assert _resolve_trust_level("anthropics/skills") == "trusted"

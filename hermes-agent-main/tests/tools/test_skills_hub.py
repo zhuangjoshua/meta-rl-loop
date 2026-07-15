@@ -12,9 +12,9 @@ from tools.skills_hub import (
     GitHubSource,
     LobeHubSource,
     SkillsShSource,
+    TakyonIndexSource,
     UrlSource,
     WellKnownSkillSource,
-    OptionalSkillSource,
     SkillMeta,
     SkillBundle,
     HubLockFile,
@@ -27,6 +27,32 @@ from tools.skills_hub import (
     _skill_meta_to_dict,
     quarantine_bundle,
 )
+
+
+def test_takyon_index_excludes_removed_optional_catalog() -> None:
+    source = TakyonIndexSource(auth=MagicMock())
+    source._loaded = True
+    source._index = {
+        "skills": [
+            {
+                "name": "legacy",
+                "description": "removed",
+                "source": "official",
+                "identifier": "official/research/legacy",
+                "trust_level": "builtin",
+            },
+            {
+                "name": "current",
+                "description": "external",
+                "source": "github",
+                "identifier": "example/skills/current",
+                "trust_level": "community",
+            },
+        ]
+    }
+
+    assert [skill.name for skill in source.search("")] == ["current"]
+    assert source.inspect("official/research/legacy") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1427,42 +1453,6 @@ class TestSkillMetaToDict:
         assert restored.trust_level == meta.trust_level
 
 
-# ---------------------------------------------------------------------------
-# Official skills / binary assets
-# ---------------------------------------------------------------------------
-
-
-class TestOptionalSkillSourceBinaryAssets:
-    def test_fetch_preserves_binary_assets(self, tmp_path):
-        optional_root = tmp_path / "optional-skills"
-        skill_dir = optional_root / "mlops" / "models" / "neutts"
-        (skill_dir / "assets" / "neutts-cli" / "samples").mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(
-            "---\nname: neutts\ndescription: test\n---\n\nBody\n",
-            encoding="utf-8",
-        )
-        wav_bytes = b"RIFF\x00\x01fakewav"
-        (skill_dir / "assets" / "neutts-cli" / "samples" / "jo.wav").write_bytes(
-            wav_bytes
-        )
-        (skill_dir / "assets" / "neutts-cli" / "samples" / "jo.txt").write_text(
-            "hello\n", encoding="utf-8"
-        )
-        pycache_dir = skill_dir / "assets" / "neutts-cli" / "src" / "neutts_cli" / "__pycache__"
-        pycache_dir.mkdir(parents=True)
-        (pycache_dir / "cli.cpython-312.pyc").write_bytes(b"junk")
-
-        src = OptionalSkillSource()
-        src._optional_dir = optional_root
-
-        bundle = src.fetch("official/mlops/models/neutts")
-
-        assert bundle is not None
-        assert bundle.files["assets/neutts-cli/samples/jo.wav"] == wav_bytes
-        assert bundle.files["assets/neutts-cli/samples/jo.txt"] == b"hello\n"
-        assert "assets/neutts-cli/src/neutts_cli/__pycache__/cli.cpython-312.pyc" not in bundle.files
-
-
 class TestQuarantineBundleBinaryAssets:
     def test_quarantine_bundle_writes_binary_files(self, tmp_path):
         import tools.skills_hub as hub
@@ -1481,9 +1471,9 @@ class TestQuarantineBundleBinaryAssets:
                     "SKILL.md": "---\nname: neutts\n---\n",
                     "assets/neutts-cli/samples/jo.wav": b"RIFF\x00\x01fakewav",
                 },
-                source="official",
-                identifier="official/mlops/models/neutts",
-                trust_level="builtin",
+                source="github",
+                identifier="example/skills/neutts",
+                trust_level="community",
             )
 
             q_path = quarantine_bundle(bundle)

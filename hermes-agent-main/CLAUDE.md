@@ -6,7 +6,7 @@ Instructions for AI coding assistants and developers working on the takyon-agent
 
 When this repo is opened from `/Users/Zygote/Downloads/takyon`, this directory is the active Hermes/Takyon runtime, CEO, skill, cron, and plugin trunk. The parent workspace entrypoint is `/Users/Zygote/Downloads/takyon/takyon`, which launches this runtime with parent-owned `TAKYON_HOME`.
 
-Do not infer that `/Users/Zygote/Downloads/takyon/polsia3` is a second active trunk. That old app tree was removed from the parent workspace. Archived source material salvaged from it lives under `plugins/takyon/references/polsia3-skills/`; merge ideas from there into active Hermes Takyon code or skills instead of recreating `polsia3`.
+Do not infer that `/Users/Zygote/Downloads/takyon/polsia3` is a second active trunk. That old app tree and its salvaged source archive were removed; do not recreate `polsia3`.
 
 ## Takyon Users vs Product Subusers
 
@@ -110,7 +110,6 @@ takyon-agent/
 │   ├── image_gen/        # Image-generation providers
 │   └── <others>/         # disk-cleanup, example-dashboard, google_meet, platforms,
 │                         #   spotify, strike-freedom-cockpit, ...
-├── optional-skills/      # Heavier/niche skills shipped but NOT active by default
 ├── skills/               # Built-in skills bundled with the repo
 ├── ui-tui/               # Ink (React) terminal UI — `takyon --tui`
 │   └── src/              # entry.tsx, app.tsx, gatewayClient.ts + app/components/hooks/lib
@@ -682,20 +681,9 @@ companion repo, not in this tree.
 
 ## Skills
 
-Two parallel surfaces:
-
-- **`skills/`** — built-in skills shipped and loadable by default.
-  Organized by category directories (e.g. `skills/github/`, `skills/mlops/`).
-- **`optional-skills/`** — heavier or niche skills shipped with the repo but
-  NOT active by default. Installed explicitly via
-  `takyon skills install official/<category>/<skill>`. Adapter lives in
-  `tools/skills_hub.py` (`OptionalSkillSource`). Categories include
-  `autonomous-ai-agents`, `blockchain`, `communication`, `creative`,
-  `devops`, `email`, `health`, `mcp`, `migration`, `mlops`, `productivity`,
-  `research`, `security`, `web-development`.
-
-When reviewing skill PRs, check which directory they target — heavy-dep or
-niche skills belong in `optional-skills/`.
+**`skills/`** is the only repo-owned skill surface. Production Claude Agent SDK
+sessions publish exactly the entries in `skills/release-skills.yaml`; other
+skills are installed from external registries and remain outside that release.
 
 ### SKILL.md frontmatter
 

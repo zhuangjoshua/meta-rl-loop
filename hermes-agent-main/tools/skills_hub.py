@@ -5,7 +5,6 @@ Skills Hub — Source adapters and hub state management for the Takyon Skills Hu
 This is a library module (not an agent tool). It provides:
   - GitHubAuth: Shared GitHub API authentication (PAT, gh CLI, GitHub App)
   - SkillSource ABC: Interface for all skill registry adapters
-  - OptionalSkillSource: Official optional skills shipped with the repo (not activated by default)
   - GitHubSource: Fetch skills from any GitHub repo via the Contents API
   - HubLockFile: Track provenance of installed hub skills
   - Hub state directory management (quarantine, audit log, taps, index cache)
@@ -70,7 +69,7 @@ class SkillMeta:
     """Minimal metadata returned by search results."""
     name: str
     description: str
-    source: str           # "official", "github", "clawhub", "claude-marketplace", "lobehub"
+    source: str           # "github", "clawhub", "claude-marketplace", "lobehub", etc.
     identifier: str       # source-specific ID (e.g. "openai/skills/skill-creator")
     trust_level: str      # "builtin" | "trusted" | "community"
     repo: Optional[str] = None
@@ -2528,179 +2527,6 @@ class BrowseShSource(SkillSource):
 
 
 # ---------------------------------------------------------------------------
-# Official optional skills source adapter
-# ---------------------------------------------------------------------------
-
-class OptionalSkillSource(SkillSource):
-    """
-    Fetch skills from the optional-skills/ directory shipped with the repo.
-
-    These skills are official (maintained by Nous Research) but not activated
-    by default — they don't appear in the system prompt and aren't copied to
-    ~/.takyon/skills/ during setup.  They are discoverable via the Skills Hub
-    (search / install / inspect) and labelled "official" with "builtin" trust.
-    """
-
-    def __init__(self):
-        from takyon_constants import get_optional_skills_dir
-
-        self._optional_dir = get_optional_skills_dir(
-            Path(__file__).parent.parent / "optional-skills"
-        )
-
-    def source_id(self) -> str:
-        return "official"
-
-    def trust_level_for(self, identifier: str) -> str:
-        return "builtin"
-
-    # -- search -----------------------------------------------------------
-
-    def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
-        results: List[SkillMeta] = []
-        query_lower = query.lower()
-
-        for meta in self._scan_all():
-            searchable = f"{meta.name} {meta.description} {' '.join(meta.tags)}".lower()
-            if query_lower in searchable:
-                results.append(meta)
-            if len(results) >= limit:
-                break
-
-        return results
-
-    # -- fetch ------------------------------------------------------------
-
-    def fetch(self, identifier: str) -> Optional[SkillBundle]:
-        # identifier format: "official/category/skill" or "official/skill"
-        rel = identifier.split("/", 1)[-1] if identifier.startswith("official/") else identifier
-        skill_dir = self._optional_dir / rel
-
-        # Guard against path traversal (e.g. "official/../../etc")
-        try:
-            resolved = skill_dir.resolve()
-            if not str(resolved).startswith(str(self._optional_dir.resolve())):
-                return None
-        except (OSError, ValueError):
-            return None
-
-        if not resolved.is_dir():
-            # Try searching by skill name only (last segment)
-            skill_name = rel.rsplit("/", 1)[-1]
-            skill_dir = self._find_skill_dir(skill_name)
-            if not skill_dir:
-                return None
-        else:
-            skill_dir = resolved
-
-        files: Dict[str, Union[str, bytes]] = {}
-        for f in skill_dir.rglob("*"):
-            if (
-                f.is_file()
-                and not f.name.startswith(".")
-                and "__pycache__" not in f.parts
-                and f.suffix != ".pyc"
-            ):
-                rel_path = str(f.relative_to(skill_dir))
-                try:
-                    files[rel_path] = f.read_bytes()
-                except OSError:
-                    continue
-
-        if not files:
-            return None
-
-        # Determine category from directory structure
-        name = skill_dir.name
-
-        return SkillBundle(
-            name=name,
-            files=files,
-            source="official",
-            identifier=f"official/{skill_dir.relative_to(self._optional_dir)}",
-            trust_level="builtin",
-        )
-
-    # -- inspect ----------------------------------------------------------
-
-    def inspect(self, identifier: str) -> Optional[SkillMeta]:
-        rel = identifier.split("/", 1)[-1] if identifier.startswith("official/") else identifier
-        skill_name = rel.rsplit("/", 1)[-1]
-
-        for meta in self._scan_all():
-            if meta.name == skill_name:
-                return meta
-        return None
-
-    # -- internal helpers -------------------------------------------------
-
-    def _find_skill_dir(self, name: str) -> Optional[Path]:
-        """Find a skill directory by name anywhere in optional-skills/."""
-        if not self._optional_dir.is_dir():
-            return None
-        for skill_md in self._optional_dir.rglob("SKILL.md"):
-            if skill_md.parent.name == name:
-                return skill_md.parent
-        return None
-
-    def _scan_all(self) -> List[SkillMeta]:
-        """Enumerate all optional skills with metadata."""
-        if not self._optional_dir.is_dir():
-            return []
-
-        results: List[SkillMeta] = []
-        for skill_md in sorted(self._optional_dir.rglob("SKILL.md")):
-            parent = skill_md.parent
-            rel_parts = parent.relative_to(self._optional_dir).parts
-            if any(part.startswith(".") for part in rel_parts):
-                continue
-
-            try:
-                content = skill_md.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-
-            fm = self._parse_frontmatter(content)
-            name = fm.get("name", parent.name)
-            desc = fm.get("description", "")
-            tags = []
-            meta_block = fm.get("metadata", {})
-            if isinstance(meta_block, dict):
-                takyon_meta = meta_block.get("takyon", {})
-                if isinstance(takyon_meta, dict):
-                    tags = takyon_meta.get("tags", [])
-
-            rel_path = str(parent.relative_to(self._optional_dir))
-
-            results.append(SkillMeta(
-                name=name,
-                description=desc[:200],
-                source="official",
-                identifier=f"official/{rel_path}",
-                trust_level="builtin",
-                path=rel_path,
-                tags=tags if isinstance(tags, list) else [],
-            ))
-
-        return results
-
-    @staticmethod
-    def _parse_frontmatter(content: str) -> dict:
-        """Parse YAML frontmatter from SKILL.md content."""
-        if not content.startswith("---"):
-            return {}
-        match = re.search(r'\n---\s*\n', content[3:])
-        if not match:
-            return {}
-        yaml_text = content[3:match.start() + 3]
-        try:
-            parsed = yaml.safe_load(yaml_text)
-            return parsed if isinstance(parsed, dict) else {}
-        except yaml.YAMLError:
-            return {}
-
-
-# ---------------------------------------------------------------------------
 # Shared cache helpers (used by multiple adapters)
 # ---------------------------------------------------------------------------
 
@@ -3177,15 +3003,25 @@ class TakyonIndexSource(SkillSource):
     def source_id(self) -> str:
         return "takyon-index"
 
+    @staticmethod
+    def _active_skills(index: dict) -> list[dict]:
+        """Exclude entries from the removed repo-owned optional catalog."""
+        return [
+            skill
+            for skill in index.get("skills", [])
+            if skill.get("source") != "official"
+            and not str(skill.get("identifier", "")).startswith("official/")
+        ]
+
     @property
     def is_available(self) -> bool:
         """Whether the index is loaded and has skills."""
         index = self._ensure_loaded()
-        return bool(index.get("skills"))
+        return bool(self._active_skills(index))
 
     def trust_level_for(self, identifier: str) -> str:
         index = self._ensure_loaded()
-        for skill in index.get("skills", []):
+        for skill in self._active_skills(index):
             if skill.get("identifier") == identifier:
                 return skill.get("trust_level", "community")
         return "community"
@@ -3193,7 +3029,7 @@ class TakyonIndexSource(SkillSource):
     def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
         """Search the cached index.  Zero API calls."""
         index = self._ensure_loaded()
-        skills = index.get("skills", [])
+        skills = self._active_skills(index)
         if not skills:
             return []
 
@@ -3256,7 +3092,7 @@ class TakyonIndexSource(SkillSource):
 
     def _find_entry(self, identifier: str, index: dict) -> Optional[dict]:
         """Look up a skill in the index by identifier or name."""
-        skills = index.get("skills", [])
+        skills = self._active_skills(index)
 
         # Exact identifier match
         for s in skills:
@@ -3265,7 +3101,7 @@ class TakyonIndexSource(SkillSource):
 
         # Try without source prefix (e.g. "skills-sh/" stripped)
         normalized = identifier
-        for prefix in ("skills-sh/", "skills.sh/", "official/", "github/", "clawhub/"):
+        for prefix in ("skills-sh/", "skills.sh/", "github/", "clawhub/"):
             if identifier.startswith(prefix):
                 normalized = identifier[len(prefix):]
                 break
@@ -3275,7 +3111,7 @@ class TakyonIndexSource(SkillSource):
             sid = s.get("identifier", "")
             # Strip prefix from stored identifier too
             stored_normalized = sid
-            for prefix in ("skills-sh/", "skills.sh/", "official/", "github/", "clawhub/"):
+            for prefix in ("skills-sh/", "skills.sh/", "github/", "clawhub/"):
                 if sid.startswith(prefix):
                     stored_normalized = sid[len(prefix):]
                     break
@@ -3311,7 +3147,6 @@ def create_source_router(auth: Optional[GitHubAuth] = None) -> List[SkillSource]
     extra_taps = taps_mgr.list_taps()
 
     sources: List[SkillSource] = [
-        OptionalSkillSource(),        # Official optional skills (highest priority)
         TakyonIndexSource(auth=auth), # Centralized index (search + resolved install paths)
         SkillsShSource(auth=auth),
         WellKnownSkillSource(),
@@ -3373,7 +3208,7 @@ def parallel_search_sources(
 
     for src in sources:
         sid = src.source_id()
-        if source_filter != "all" and sid != source_filter and sid != "official":
+        if source_filter != "all" and sid != source_filter:
             continue
         # Skip external API sources when the index covers them
         if _index_available and sid in _api_source_ids:

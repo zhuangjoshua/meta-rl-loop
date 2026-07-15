@@ -805,12 +805,9 @@ Common examples:
 
 ```bash
 takyon skills browse
-takyon skills browse --source official
 takyon skills search react --source skills-sh
 takyon skills search https://mintlify.com/docs --source well-known
-takyon skills inspect official/security/1password
 takyon skills inspect skills-sh/vercel-labs/json-render/json-render-react
-takyon skills install official/migration/openclaw-migration
 takyon skills install skills-sh/anthropics/skills/pdf --force
 takyon skills install https://sharethis.chat/SKILL.md                     # Direct URL (single-file SKILL.md)
 takyon skills install https://example.com/SKILL.md --name my-skill        # Override name when frontmatter has none

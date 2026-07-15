@@ -553,7 +553,6 @@ Advanced per-platform knobs for throttling the outbound message batcher. Most us
 | `TAKYON_DISABLE_FILE_STATE_GUARD` | Set to `1` to turn off the "file changed since you read it" guard on `patch`/`write_file`. |
 | `TAKYON_CORE_TOOLS` | Comma-separated override for the canonical core tool list (advanced; rarely needed). |
 | `TAKYON_BUNDLED_SKILLS` | Comma-separated override for the list of bundled skills loaded at startup. |
-| `TAKYON_OPTIONAL_SKILLS` | Comma-separated list of optional-skill names to auto-install on first run. |
 | `TAKYON_DEBUG_INTERRUPT` | Set to `1` to log detailed interrupt/cancel tracing to `agent.log`. |
 | `TAKYON_DUMP_REQUESTS` | Dump API request payloads to log files (`true`/`false`) |
 | `TAKYON_DUMP_REQUEST_STDOUT` | Dump API request payloads to stdout instead of log files. |

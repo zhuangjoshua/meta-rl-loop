@@ -297,7 +297,7 @@ def quick() -> Dict[str, Any]:
     takyon_home = get_takyon_home()
     _PROTECTED_TOP_LEVEL = {
         "logs", "memories", "sessions", "cron", "cronjobs",
-        "cache", "skills", "plugins", "disk-cleanup", "optional-skills",
+        "cache", "skills", "plugins", "disk-cleanup",
         "takyon-agent", "backups", "profiles", ".worktrees",
     }
     empty_removed = 0

@@ -44,10 +44,10 @@ excalidraw        Create hand-drawn style diagrams using Excalidraw...
 
 ### The Skills Hub
 
-Official optional skills (heavier or niche skills not active by default) are available via the Hub:
+External skills are available via the Hub:
 
 ```bash
-# Browse official optional skills
+# Browse available skills
 /skills browse
 
 # Search the hub
@@ -86,14 +86,14 @@ This means skills don't cost tokens until they're actually used.
 
 ## Installing from the Hub
 
-Official optional skills ship with Takyon but aren't active by default. Install them explicitly:
+Install external skills explicitly:
 
 ```bash
-# Install an official optional skill
-takyon skills install official/research/arxiv
+# Install from a trusted repository
+takyon skills install openai/skills/skill-creator
 
 # Install from the hub in a chat session
-/skills install official/creative/songwriting-and-ai-music
+/skills install openai/skills/skill-creator
 
 # Install a single-file SKILL.md directly from any HTTP(S) URL
 takyon skills install https://sharethis.chat/SKILL.md
@@ -113,10 +113,10 @@ Installed skills take effect in new sessions. If you want it available in the cu
 
 ```bash
 # Check it's there
-takyon skills list | grep arxiv
+takyon skills list | grep skill-creator
 
 # Or in chat
-/skills search arxiv
+/skills search skill-creator
 ```
 
 ---

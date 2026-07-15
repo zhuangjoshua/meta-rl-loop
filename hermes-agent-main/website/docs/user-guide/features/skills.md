@@ -15,7 +15,6 @@ You can also point Takyon at **external skill directories** — additional folde
 See also:
 
 - [Bundled Skills Catalog](/docs/reference/skills-catalog)
-- [Official Optional Skills Catalog](/docs/reference/optional-skills-catalog)
 
 ## Using Skills
 
@@ -373,19 +372,17 @@ The `patch` action is preferred for updates — it's more token-efficient than `
 
 ## Skills Hub
 
-Browse, search, install, and manage skills from online registries, `skills.sh`, direct well-known skill endpoints, and official optional skills.
+Browse, search, install, and manage skills from online registries, `skills.sh`, and direct well-known skill endpoints.
 
 ### Common commands
 
 ```bash
-takyon skills browse                              # Browse all hub skills (official first)
-takyon skills browse --source official            # Browse only official optional skills
+takyon skills browse                              # Browse all hub skills
 takyon skills search kubernetes                   # Search all sources
 takyon skills search react --source skills-sh     # Search the skills.sh directory
 takyon skills search https://mintlify.com/docs --source well-known
 takyon skills inspect openai/skills/k8s           # Preview before installing
 takyon skills install openai/skills/k8s           # Install with security scan
-takyon skills install official/security/1password
 takyon skills install skills-sh/vercel-labs/json-render/json-render-react --force
 takyon skills install well-known:https://mintlify.com/docs/.well-known/skills/mintlify
 takyon skills install https://sharethis.chat/SKILL.md              # Direct URL (single-file SKILL.md)
@@ -406,7 +403,6 @@ takyon skills tap add myorg/skills-repo           # Add a custom GitHub source
 
 | Source | Example | Notes |
 |--------|---------|-------|
-| `official` | `official/security/1password` | Optional skills shipped with Takyon. |
 | `skills-sh` | `skills-sh/vercel-labs/agent-skills/vercel-react-best-practices` | Searchable via `takyon skills search <query> --source skills-sh`. Takyon resolves alias-style skills when the skills.sh slug differs from the repo folder. |
 | `well-known` | `well-known:https://mintlify.com/docs/.well-known/skills/mintlify` | Skills served directly from `/.well-known/skills/index.json` on a website. Search using the site or docs URL. |
 | `url` | `https://sharethis.chat/SKILL.md` | Direct HTTP(S) URL to a single-file `SKILL.md`. Name resolution: frontmatter → URL slug → interactive prompt → `--name` flag. |
@@ -417,20 +413,7 @@ takyon skills tap add myorg/skills-repo           # Add a custom GitHub source
 
 Takyon currently integrates with these skills ecosystems and discovery sources:
 
-#### 1. Official optional skills (`official`)
-
-These are maintained in the Takyon repository itself and install with builtin trust.
-
-- Catalog: [Official Optional Skills Catalog](../../reference/optional-skills-catalog)
-- Source in repo: `optional-skills/`
-- Example:
-
-```bash
-takyon skills browse --source official
-takyon skills install official/security/1password
-```
-
-#### 2. skills.sh (`skills-sh`)
+#### 1. skills.sh (`skills-sh`)
 
 This is Vercel's public skills directory. Takyon can search it directly, inspect skill detail pages, resolve alias-style slugs, and install from the underlying source repo.
 
@@ -445,7 +428,7 @@ takyon skills inspect skills-sh/vercel-labs/json-render/json-render-react
 takyon skills install skills-sh/vercel-labs/json-render/json-render-react --force
 ```
 
-#### 3. Well-known skill endpoints (`well-known`)
+#### 2. Well-known skill endpoints (`well-known`)
 
 This is URL-based discovery from sites that publish `/.well-known/skills/index.json`. It is not a single centralized hub — it is a web discovery convention.
 
@@ -459,7 +442,7 @@ takyon skills inspect well-known:https://mintlify.com/docs/.well-known/skills/mi
 takyon skills install well-known:https://mintlify.com/docs/.well-known/skills/mintlify
 ```
 
-#### 4. Direct GitHub skills (`github`)
+#### 3. Direct GitHub skills (`github`)
 
 Takyon can install directly from GitHub repositories and GitHub-based taps. This is useful when you already know the repo/path or want to add your own custom source repo.
 
@@ -477,14 +460,14 @@ takyon skills install openai/skills/k8s
 takyon skills tap add myorg/skills-repo
 ```
 
-#### 5. ClawHub (`clawhub`)
+#### 4. ClawHub (`clawhub`)
 
 A third-party skills marketplace integrated as a community source.
 
 - Site: [clawhub.ai](https://clawhub.ai/)
 - Takyon source id: `clawhub`
 
-#### 6. Claude marketplace-style repos (`claude-marketplace`)
+#### 5. Claude marketplace-style repos (`claude-marketplace`)
 
 Takyon supports marketplace repos that publish Claude-compatible plugin/marketplace manifests.
 
@@ -494,7 +477,7 @@ Known integrated sources include:
 
 Takyon source id: `claude-marketplace`
 
-#### 7. LobeHub (`lobehub`)
+#### 6. LobeHub (`lobehub`)
 
 Takyon can search and convert agent entries from LobeHub's public catalog into installable Takyon skills.
 
@@ -503,7 +486,7 @@ Takyon can search and convert agent entries from LobeHub's public catalog into i
 - Backing repo: [lobehub/lobe-chat-agents](https://github.com/lobehub/lobe-chat-agents)
 - Takyon source id: `lobehub`
 
-#### 8. browse.sh (`browse-sh`)
+#### 7. browse.sh (`browse-sh`)
 
 Takyon integrates with [browse.sh](https://browse.sh), Browserbase's catalog of 200+ site-specific browser-automation SKILL.md files (Airbnb, Amazon, arXiv, 12306.cn, Etsy, Xero, and many more). Each skill describes how to drive one website end-to-end and is suitable for use with Takyon' browser tools and any browser-automation skills you already have installed.
 
@@ -520,7 +503,7 @@ takyon skills install browse-sh/airbnb.com/search-listings-ddgioa
 
 Identifiers use the form `browse-sh/<hostname>/<task-id>` and match the slug exposed by the browse.sh catalog. Content is resolved through the per-skill detail endpoint (`/api/skills/<slug>` → `skillMdUrl`), not through the catalog's GitHub `sourceUrl`.
 
-#### 9. Direct URL (`url`)
+#### 8. Direct URL (`url`)
 
 Install a single-file `SKILL.md` directly from any HTTP(S) URL — useful when an author hosts a skill on their own site (no hub listing, no GitHub path to type). Takyon fetches the URL, parses the YAML frontmatter, security-scans it, and installs.
 
@@ -570,14 +553,12 @@ takyon skills install skills-sh/anthropics/skills/pdf --force
 Important behavior:
 - `--force` can override policy blocks for caution/warn-style findings.
 - `--force` does **not** override a `dangerous` scan verdict.
-- Official optional skills (`official/...`) are treated as builtin trust and do not show the third-party warning panel.
 
 ### Trust levels
 
 | Level | Source | Policy |
 |-------|--------|--------|
 | `builtin` | Ships with Takyon | Always trusted |
-| `official` | `optional-skills/` in the repo | Builtin trust, no third-party warning |
 | `trusted` | Trusted registries/repos such as `openai/skills`, `anthropics/skills`, `huggingface/skills` | More permissive policy than community sources |
 | `community` | Everything else (`skills.sh`, well-known endpoints, custom GitHub repos, most marketplaces) | Non-dangerous findings can be overridden with `--force`; `dangerous` verdicts stay blocked |
 
@@ -762,5 +743,3 @@ All the same commands work with `/skills`:
 /skills reset google-workspace
 /skills list
 ```
-
-Official optional skills still use identifiers like `official/security/1password` and `official/migration/openclaw-migration`.

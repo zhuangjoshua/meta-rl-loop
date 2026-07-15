@@ -7,7 +7,6 @@ from takyon_cli.config import (
     recommended_update_command,
 )
 from takyon_cli.main import cmd_update
-from tools.skills_hub import OptionalSkillSource
 
 
 def test_get_managed_system_homebrew(monkeypatch):
@@ -49,13 +48,3 @@ def test_cmd_update_blocks_managed_homebrew(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "managed by Homebrew" in captured.err
     assert "brew upgrade takyon-agent" in captured.err
-
-
-def test_optional_skill_source_honors_env_override(monkeypatch, tmp_path):
-    optional_dir = tmp_path / "optional-skills"
-    optional_dir.mkdir()
-    monkeypatch.setenv("TAKYON_OPTIONAL_SKILLS", str(optional_dir))
-
-    source = OptionalSkillSource()
-
-    assert source._optional_dir == optional_dir

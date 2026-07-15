@@ -26,12 +26,12 @@ def test_cli_skills_install_yes_sets_skip_confirm(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["takyon", "skills", "install", "official/email/agentmail", "--yes"],
+        ["takyon", "skills", "install", "github/example/skill", "--yes"],
     )
 
     main()
 
-    assert captured["identifier"] == "official/email/agentmail"
+    assert captured["identifier"] == "github/example/skill"
     assert captured["yes"] is True
     assert captured["force"] is False
 

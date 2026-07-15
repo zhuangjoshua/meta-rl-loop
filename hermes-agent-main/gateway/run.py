@@ -1130,24 +1130,6 @@ def _check_unavailable_skill(command_name: str) -> str | None:
                         f"Enable it with: `takyon skills config`"
                     )
 
-        # Check optional skills (shipped with repo but not installed)
-        from takyon_constants import get_optional_skills_dir
-        repo_root = Path(__file__).resolve().parent.parent
-        optional_dir = get_optional_skills_dir(repo_root / "optional-skills")
-        if optional_dir.exists():
-            for skill_md in optional_dir.rglob("SKILL.md"):
-                slug, _declared = _skill_slug_from_frontmatter(skill_md)
-                if not slug:
-                    continue
-                if slug == normalized:
-                    # Build install path: official/<category>/<name>
-                    rel = skill_md.parent.relative_to(optional_dir)
-                    parts = list(rel.parts)
-                    install_path = f"official/{'/'.join(parts)}"
-                    return (
-                        f"The **{command_name}** skill is available but not installed.\n"
-                        f"Install it with: `takyon skills install {install_path}`"
-                    )
     except Exception:
         pass
     return None

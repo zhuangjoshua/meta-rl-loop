@@ -13,7 +13,7 @@ This workspace has one runnable Takyon trunk:
 
 `hermes-agent-main` is the active runtime, CEO, skill, cron, and plugin trunk.
 
-The old `polsia3` app tree was removed. Archived source material salvaged from it lives under `hermes-agent-main/plugins/takyon/references/polsia3-skills/`.
+The old `polsia3` app tree and its salvaged source archive were removed.
 
 Do not recreate `polsia3`, do not restore `polsia3/takyon`, and do not describe `polsia3` as "the active Next/Takyon app", "the main trunk", or "one of two trunks".
 
@@ -209,5 +209,5 @@ When in doubt:
 
 1. Use the root `./takyon`.
 2. Treat Hermes as CEO/runtime/cron owner.
-3. Use archived reference material only from `hermes-agent-main/plugins/takyon/references/polsia3-skills/`.
+3. Use active Takyon code and skills; do not recreate `polsia3`.
 4. Keep business state in the canonical Takyon/Hermes store and per-business filesystem.

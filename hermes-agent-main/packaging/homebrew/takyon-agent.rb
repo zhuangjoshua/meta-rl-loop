@@ -24,7 +24,7 @@ class TakyonAgent < Formula
     venv.pip_install resources
     venv.pip_install buildpath
 
-    pkgshare.install "skills", "optional-skills"
+    pkgshare.install "skills"
 
     %w[takyon takyon-agent takyon-acp].each do |exe|
       next unless (libexec/"bin"/exe).exist?
@@ -32,7 +32,6 @@ class TakyonAgent < Formula
       (bin/exe).write_env_script(
         libexec/"bin"/exe,
         TAKYON_BUNDLED_SKILLS: pkgshare/"skills",
-        TAKYON_OPTIONAL_SKILLS: pkgshare/"optional-skills",
         TAKYON_MANAGED: "homebrew"
       )
     end

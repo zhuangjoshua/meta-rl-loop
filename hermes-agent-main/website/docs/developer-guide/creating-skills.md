@@ -24,7 +24,7 @@ Make it a **Tool** when:
 
 ## Skill Directory Structure
 
-Bundled skills live in `skills/` organized by category. Official optional skills use the same structure in `optional-skills/`:
+Bundled skills live in `skills/` organized by category:
 
 ```text
 skills/
@@ -330,8 +330,6 @@ Bundled skills (in `skills/`) ship with every Takyon install. They should be **b
 - Document handling, web research, common dev workflows, system administration
 - Used regularly by a wide range of people
 
-If your skill is official and useful but not universally needed (e.g., a paid service integration, a heavyweight dependency), put it in **`optional-skills/`** — it ships with the repo, is discoverable via `takyon skills browse` (labeled "official"), and installs with builtin trust.
-
 If your skill is specialized, community-contributed, or niche, it's better suited for a **Skills Hub** — upload it to a registry and share it via `takyon skills install`.
 
 ## Publishing Skills
@@ -363,7 +361,6 @@ All hub-installed skills go through a security scanner that checks for:
 
 Trust levels:
 - `builtin` — ships with Takyon (always trusted)
-- `official` — from `optional-skills/` in the repo (builtin trust, no third-party warning)
 - `trusted` — from openai/skills, anthropics/skills, huggingface/skills
 - `community` — non-dangerous findings can be overridden with `--force`; `dangerous` verdicts remain blocked
 

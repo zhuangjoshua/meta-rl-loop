@@ -44,6 +44,13 @@ ALL_MODES = {"bootstrap", "interactive", "wake"}
 PINNED_TASTE_SKILL_SHA256 = "aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89"
 
 
+def test_legacy_skill_catalogs_are_absent() -> None:
+    assert not (PROJECT_ROOT / "optional-skills").exists()
+    assert not (
+        PROJECT_ROOT / "plugins" / "takyon" / "references" / "polsia3-skills"
+    ).exists()
+
+
 def _load_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 

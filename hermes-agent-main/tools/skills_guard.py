@@ -898,9 +898,6 @@ def _resolve_trust_level(source: str) -> str:
     # Agent-created skills get their own permissive trust level
     if normalized_source == "agent-created":
         return "agent-created"
-    # Official optional skills shipped with the repo
-    if normalized_source.startswith("official/") or normalized_source == "official":
-        return "builtin"
     # Check if source matches any trusted repo
     for trusted in TRUSTED_REPOS:
         if normalized_source.startswith(trusted) or normalized_source == trusted:

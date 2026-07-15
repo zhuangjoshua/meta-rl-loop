@@ -121,7 +121,7 @@ Common examples:
 | `/help` | Show command help |
 | `/model` | Show or change the current model |
 | `/tools` | List currently available tools |
-| `/skills browse` | Browse the skills hub and official optional skills |
+| `/skills browse` | Browse the skills hub |
 | `/background <prompt>` | Run a prompt in a separate background session |
 | `/skin` | Show or switch the active CLI skin |
 | `/voice on` | Enable CLI voice mode (press `Ctrl+B` to record) |

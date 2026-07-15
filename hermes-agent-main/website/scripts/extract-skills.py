@@ -10,7 +10,6 @@ import yaml
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LOCAL_SKILL_DIRS = [
     ("skills", "built-in"),
-    ("optional-skills", "optional"),
 ]
 INDEX_CACHE_DIR = os.path.join(REPO_ROOT, "skills", "index-cache")
 OUTPUT = os.path.join(REPO_ROOT, "website", "src", "data", "skills.json")
@@ -99,12 +98,11 @@ def _docs_page_path(rel_dir: str, source_label: str) -> str:
     Mirrors the slug logic in website/scripts/generate-skill-docs.py:
       bundled  + skills/<cat>/<slug>/SKILL.md          -> bundled/<cat>/<cat>-<slug>
       bundled  + skills/<cat>/<sub>/<slug>/SKILL.md    -> bundled/<cat>/<cat>-<sub>-<slug>
-      optional + optional-skills/<cat>/<slug>/SKILL.md -> optional/<cat>/<cat>-<slug>
     """
     parts = [p for p in rel_dir.split(os.sep) if p]
     if not parts:
         return ""
-    source_dir = "bundled" if source_label == "built-in" else "optional"
+    source_dir = "bundled"
     if len(parts) == 1:
         category, slug = parts[0], parts[0]
         return f"{source_dir}/{category}/{category}-{slug}"

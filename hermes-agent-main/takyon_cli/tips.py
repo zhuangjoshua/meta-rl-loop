@@ -170,7 +170,6 @@ TIPS = [
     # --- Skills ---
     "Over 80 bundled skills covering github, creative, mlops, productivity, research, and more.",
     "Every installed skill automatically becomes a slash command — type / to see them all.",
-    "takyon skills install official/security/1password installs optional skills from the repo.",
     "Skills can restrict to specific OS platforms — some only load on macOS or Linux.",
     "skills.external_dirs in config.yaml lets you load skills from custom directories.",
     "The agent can create its own skills as procedural memory using skill_manage.",
@@ -438,7 +437,6 @@ TIPS = [
     'TAKYON_ENABLE_PROJECT_PLUGINS=1 auto-loads repo-local plugins from ./.takyon/plugins/ — trust-gated by design.',
     "TAKYON_DISABLE_FILE_STATE_GUARD=1 turns off the 'file changed since you read it' guard on patch and write_file.",
     'TAKYON_ALLOW_PRIVATE_URLS=true lets web tools hit localhost and private networks — off by default in gateway mode.',
-    'TAKYON_OPTIONAL_SKILLS=name1,name2 auto-installs extra optional-catalog skills on first run per profile.',
     'TAKYON_BUNDLED_SKILLS points at a custom bundled-skill tree — used by Homebrew and Nix packaging.',
     'TAKYON_DUMP_REQUEST_STDOUT=1 dumps every API request payload to stdout instead of log files.',
     'TAKYON_OAUTH_TRACE=1 logs redacted OAuth token exchange and refresh attempts for debugging provider auth.',
@@ -477,4 +475,3 @@ def get_random_tip(exclude_recent: int = 0) -> str:
             deduplication across sessions.
     """
     return random.choice(TIPS)
-

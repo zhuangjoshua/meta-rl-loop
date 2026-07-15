@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the Takyon Skills Index — a centralized JSON catalog of all skills.
 
-This script crawls every skill source (skills.sh, GitHub taps, official,
+This script crawls every skill source (skills.sh, GitHub taps,
 clawhub, lobehub, claude-marketplace) and writes a JSON index with resolved
 GitHub paths. The index is served as a static file on the docs site so that
 `takyon skills search/install` can use it without hitting the GitHub API.
@@ -35,7 +35,6 @@ from tools.skills_hub import (
     GitHubAuth,
     GitHubSource,
     SkillsShSource,
-    OptionalSkillSource,
     WellKnownSkillSource,
     ClawHubSource,
     ClaudeMarketplaceSource,
@@ -254,7 +253,6 @@ def main():
 
     skills_sh_source = SkillsShSource(auth=auth)
     sources = {
-        "official": OptionalSkillSource(),
         "well-known": WellKnownSkillSource(),
         "github": GitHubSource(auth=auth),
         "clawhub": ClawHubSource(),
@@ -290,8 +288,8 @@ def main():
     deduped = list(seen.values())
 
     # Sort
-    source_order = {"official": 0, "skills-sh": 1, "skills.sh": 1,
-                    "github": 2, "well-known": 3, "clawhub": 4,
+    source_order = {"skills-sh": 1, "skills.sh": 1, "github": 2,
+                    "well-known": 3, "clawhub": 4,
                     "claude-marketplace": 5, "lobehub": 6}
     deduped.sort(key=lambda s: (source_order.get(s["source"], 99), s["name"]))
 
