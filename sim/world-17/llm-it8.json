@@ -1,0 +1,8 @@
+{"iteration": 8, "policy": "v7", "ads": [
+  {"id": "it8-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): outcome-led house ad - teams cut form-handling time from hours to minutes with Formflow. Clear voiceover, product name on screen, CTA to start."},
+  {"id": "it8-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): rotating challenger, count-led - 12,000 teams route their intake through Formflow. Adoption numbers on screen; same structure and CTA as the house ad, only the angle differs."}
+], "campaigns": [
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 150, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 25, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 25, "mode": "fixed"}
+]}

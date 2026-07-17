@@ -1,0 +1,11 @@
+{"iteration": 5, "policy": "v4", "ads": [
+  {"id": "it5-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Story-led, named customer: 'Sam Okafor, events director at Lakeview Collective, runs every registration through Formflow and filled his last three events from one link.' Customer-voice testimonial, event-floor footage, CTA: Start free."},
+  {"id": "it5-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Outcome-led: 'Teams using Formflow cut form build time from days to 20 minutes and doubled completion rates.' Before/after framing, results on screen, CTA: Start free."},
+  {"id": "it5-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Count-led: 'Over 12,000 teams already ship their forms with Formflow.' Adoption ticker visual, logos-style social proof montage, CTA: Join them — start free."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 75, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 25, "mode": "fixed"},
+  {"id": "exp-sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"}
+]}

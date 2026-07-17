@@ -1,0 +1,11 @@
+{"iteration": 3, "policy": "v2", "ads": [
+  {"id": "it3-story-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Maya Chen, ops lead at Harbor Clinic, replaced 11 paper intake forms with Formflow in one afternoon.' Her quote on screen, then a screen-recording demo of her actual intake workflow running. CTA: Start free trial."},
+  {"id": "it3-story-nodemo", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Maya Chen, ops lead at Harbor Clinic, replaced 11 paper intake forms with Formflow in one afternoon.' Same script and quotes as the demo variant but rendered with her photo, pull-quotes, and motion graphics — no screen recording. CTA: Start free trial."},
+  {"id": "it3-benefit-demo", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): benefit-led — stop rebuilding the same intake forms; Formflow turns any form into a reusable, automated workflow in minutes. Screen-recording demo of building a form and automating it. CTA: Start free trial."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 50, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 50, "mode": "fixed"}
+]}

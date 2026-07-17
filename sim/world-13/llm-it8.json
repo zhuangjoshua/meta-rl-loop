@@ -1,0 +1,13 @@
+{
+  "iteration": 8,
+  "policy": "v7",
+  "ads": [
+    {"id": "it8-story-demo-fresh", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Fresh execution. Demo core: new screen recording — importing a spreadsheet of questions and publishing a working registration form in 60 seconds, autosave shown. Story wrapper: Priya Nair, bootcamp admissions lead, narrates cutting applicant drop-off in half. CTA: Start free."},
+    {"id": "it8-count-demo-fresh", "proof": "count", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Fresh execution. Demo core: new screen recording — analytics dashboard filling up as 50 live submissions arrive during the video. Count wrapper: 1.2 million submissions processed last quarter across 4,200 teams. CTA: Start free."}
+  ],
+  "campaigns": [
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 100, "mode": "fixed"},
+    {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 80, "mode": "fixed"},
+    {"id": "leads-control", "objective": "leads", "audience": "broad", "budget": 20, "mode": "fixed"}
+  ]
+}

@@ -1,0 +1,11 @@
+{"iteration": 4, "policy": "v3", "ads": [
+  {"id": "it4-story-maya", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo form builder). Named customer story: 'Maya Chen, ops lead at Brightloom Coffee, replaced six paper intake forms with Formflow in one afternoon — her onboarding time dropped from 3 days to 4 hours.' Direct-to-camera testimonial with product b-roll. CTA: $29/mo."},
+  {"id": "it4-story-diego", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo form builder). Named customer story: 'Diego Ramos, who runs a 12-person landscaping crew, moved job quotes and client sign-offs into Formflow — he stopped losing paperwork in the truck and now closes quotes the same day.' Direct-to-camera on a job site, phone in hand. CTA: $29/mo."},
+  {"id": "it4-story-priya", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo form builder). Named customer story: 'Priya Nair, events director at a nonprofit, registered 2,400 volunteers through one Formflow form — no double entries, no spreadsheet cleanup nights.' Testimonial intercut with event footage. CTA: $29/mo."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 80, "mode": "fixed"},
+  {"id": "sales-biz", "objective": "sales", "audience": "interest_biztools", "budget": 30, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 30, "mode": "fixed"}
+]}

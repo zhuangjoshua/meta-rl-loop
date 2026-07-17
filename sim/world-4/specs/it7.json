@@ -1,0 +1,13 @@
+{"iteration":7,"policy":"v5 (co-leads; outcome re-check)","ads":[
+ {"id":"story-rivera","proof":"story","named_story":true,"demo":false,
+  "prompt":"Co-lead: Rivera story"},
+ {"id":"count","proof":"count","named_story":false,"demo":false,
+  "prompt":"Co-lead: count words"},
+ {"id":"outcome","proof":"outcome","named_story":false,"demo":false,
+  "prompt":"Re-price: outcome words (stale since it1)"}],
+"campaigns":[
+ {"id":"pageviews","objective":"pageviews","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"leads","objective":"leads","audience":"broad","budget":20,"mode":"fixed"},
+ {"id":"sales-broad","objective":"sales","audience":"broad","budget":50,"mode":"fixed"},
+ {"id":"sales-interest","objective":"sales","audience":"interest_biztools","budget":30,"mode":"fixed"},
+ {"id":"sales-niche","objective":"sales","audience":"interest_niche","budget":60,"mode":"fixed"}]}

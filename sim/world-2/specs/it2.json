@@ -1,0 +1,14 @@
+{"iteration":2,"policy":"v1 (calm register doctrine)","ads":[
+ {"id":"benefit-calm","proof":"benefit","named_story":false,"demo":false,
+  "prompt":"Calm seated delivery, credible tone: 'Beautiful forms in minutes - no code...' (incumbent best performer)"},
+ {"id":"outcome-calm","proof":"outcome","named_story":false,"demo":false,
+  "prompt":"IDENTICAL calm production; only words differ: 'Intake auto-syncs to your CRM - no copy-paste...' (copy axis under calm)"},
+ {"id":"benefit-calm-demo","proof":"benefit","named_story":false,"demo":true,
+  "prompt":"Same benefit words, calm VO; screen-recording shows a form being built and branded in 60s (demo axis under calm)"}],
+"campaigns":[
+ {"id":"clicks","objective":"clicks","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"pageviews","objective":"pageviews","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"leads","objective":"leads","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"sales-broad","objective":"sales","audience":"broad","budget":20,"mode":"fixed"},
+ {"id":"sales-interest","objective":"sales","audience":"interest_biztools","budget":20,"mode":"fixed"},
+ {"id":"sales-auto","objective":"sales","audiences":["broad","interest_biztools"],"budget":40,"mode":"auto"}]}

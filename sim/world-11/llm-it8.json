@@ -1,0 +1,9 @@
+{"iteration": 8, "policy": "v7", "ads": [
+  {"id": "it8-time-fresh", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Lived before/after: hours of form admin becomes minutes. Fresh rendering: a Monday-morning inbox overflowing with intake requests, then a screen-recording demo of Formflow auto-building the form and the same inbox clear by 9:15. Outcome voiceover, CTA to start."},
+  {"id": "it8-loss-fresh", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Lived before/after: submissions stop going missing. Fresh rendering: a customer says 'I sent that form last week' and nobody can find it — then the after, Formflow's tracked inbox shows every submission received, assigned, answered. Outcome-first voiceover, CTA to start."},
+  {"id": "it8-drudge-fresh", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Lived before/after: nobody rebuilds the same intake form again. Fresh rendering: a team copies questions cell by cell into yet another form builder, then the after — one Formflow form duplicated and shipped in one click. Outcome-first voiceover, CTA to start."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 75, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 85, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"}
+]}

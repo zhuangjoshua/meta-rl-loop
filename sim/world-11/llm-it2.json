@@ -1,0 +1,12 @@
+{"iteration": 2, "policy": "v1", "ads": [
+  {"id": "it2-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Lead with a concrete outcome: teams cut form-handling time from hours to minutes and stop losing submissions. Outcome-first hook, before/after framing, CTA to start."},
+  {"id": "it2-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Same outcome-first hook — hours to minutes, no lost submissions — but the visual is a live screen-recording demo of Formflow turning a doc into a working form. Outcome voiceover over real product footage, CTA to start."},
+  {"id": "it2-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Named customer story: Maya Chen, ops lead at a 12-person agency, tells how her team stopped drowning in intake forms after switching to Formflow. Real-person testimonial framing, CTA to start."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 30, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 30, "mode": "auto"}
+]}

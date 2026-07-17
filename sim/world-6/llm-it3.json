@@ -1,0 +1,11 @@
+{"iteration": 3, "policy": "v2", "ads": [
+  {"id": "it3-story-plain", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Ana at Fieldstone Surveys stopped chasing PDF forms; her crew now files reports from their phones with Formflow'; her words and results, CTA to start."},
+  {"id": "it3-story-demo-a", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow: named customer story with demo — 'Marcus at Helio Tutoring shows how he built his enrollment form in 5 minutes'; screen-recording of him building it, his voiceover, CTA to start."},
+  {"id": "it3-story-demo-b", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow: named customer story with demo — 'Ines at Corner Bakery Collective walks through her wholesale order form live'; screen-recording of the form working, her results, CTA to start."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 50, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 45, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 45, "mode": "fixed"}
+]}

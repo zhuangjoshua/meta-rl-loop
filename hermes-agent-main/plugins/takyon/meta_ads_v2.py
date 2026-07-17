@@ -48,9 +48,13 @@ def _dt_now() -> datetime:
 # ── Defaults / constants ──────────────────────────────────────────────────────────────────────────
 _DEFAULT_OBJECTIVE = "OUTCOME_TRAFFIC"
 _DEFAULT_CALL_TO_ACTION = "LEARN_MORE"
-# Ad-spend policy statuses that hold the per-business "one live meta campaign" slot.
-# "paused" and "completed" do NOT hold it: pausing or completion frees the slot.
+# Ad-spend policy statuses that hold a per-business live meta campaign slot.
+# "paused" and "completed" do NOT hold one: pausing or completion frees the slot.
 _LIVE_SLOT_STATUSES = ("reserved", "created_paused", "active")
+# Hard cap on concurrent live meta campaigns per business (operator rail, code-enforced).
+# Portfolio launches (A/B arms) are allowed up to this cap; each launch still reserves its
+# own channel credits, so the credit bucket — not this cap — bounds total spend authority.
+_MAX_LIVE_META_CAMPAIGNS = 3
 _DEFAULT_OPTIMIZATION_GOAL = "LINK_CLICKS"
 _DEFAULT_BILLING_EVENT = "IMPRESSIONS"
 _DEFAULT_BID_STRATEGY = "LOWEST_COST_WITHOUT_CAP"
@@ -505,6 +509,10 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
         objective = str(_arg(args, "objective", default=_DEFAULT_OBJECTIVE)).strip().upper()
         daily_budget_usd = _arg(args, "daily_budget_usd", "daily_budget", default=_DEFAULT_DAILY_BUDGET_USD)
         daily_budget_cents = _budget_cents(daily_budget_usd)
+        # Optional per-campaign cap on the credit reservation (in USD). Without it a launch
+        # reserves ALL remaining meta credits, which starves any further portfolio arm.
+        total_budget_usd = _arg(args, "total_budget_usd", "total_budget", default=None)
+        total_budget_cap_cents = _budget_cents(total_budget_usd) if total_budget_usd not in (None, "") else 0
         mode = str(_arg(args, "mode", default="paused") or "paused").strip().lower()
         if mode not in {"paused", "live"}:
             raise core.TakyonError("mode must be 'paused' or 'live'")
@@ -528,25 +536,29 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 "value": prior,
             })
 
-        # ── One live campaign at a time (operator policy, hard rail) ──
-        # At most ONE Meta campaign may hold live/spending status per business. Launching
-        # while another campaign is reserved/created_paused/active fails CLOSED here, before
-        # any credit reserve or provider call. Pausing the current campaign
-        # (business_meta_ad_control action='pause') or letting it complete (insights sync
-        # settles on exhausted budget / passed end date) frees the slot. Same-slug retries
-        # pass through — the receipt idempotency above already governs re-runs. A store
-        # failure here propagates (fail closed): if the slot cannot be verified, no launch.
+        # ── Live campaign cap (operator policy, hard rail) ──
+        # At most _MAX_LIVE_META_CAMPAIGNS Meta campaigns may hold live/spending status per
+        # business, so a portfolio of A/B arms can run concurrently. Launching while the cap
+        # is full fails CLOSED here, before any credit reserve or provider call. Pausing a
+        # campaign (business_meta_ad_control action='pause') or letting it complete (insights
+        # sync settles on exhausted budget / passed end date) frees its slot. Same-slug
+        # retries pass through — the receipt idempotency above already governs re-runs. A
+        # store failure here propagates (fail closed): if the slots cannot be verified, no
+        # launch. Total spend authority stays bounded by the channel-credit bucket: every
+        # live campaign reserves its own credits below.
         live_holders = [
             p for p in core._list_ad_spend_policies(business, statuses=list(_LIVE_SLOT_STATUSES))
             if str(getattr(p, "channel", "")) == "meta" and str(getattr(p, "slug", "")) != slug
         ]
-        if live_holders:
-            holder = live_holders[0]
+        if len(live_holders) >= _MAX_LIVE_META_CAMPAIGNS:
+            holder_desc = ", ".join(
+                f"'{p.slug}' ({p.status})" for p in live_holders[:_MAX_LIVE_META_CAMPAIGNS]
+            )
             raise core.TakyonError(
-                f"one live meta campaign at a time: campaign '{holder.slug}' currently holds the "
-                f"live slot (status {holder.status}). Pause it first with business_meta_ad_control "
-                "(action='pause') or let it complete (business_meta_ad_insights_sync settles it once "
-                "its budget is spent or its end date has passed), then relaunch."
+                f"live meta campaign cap reached ({_MAX_LIVE_META_CAMPAIGNS} concurrent): "
+                f"{holder_desc}. Pause one first with business_meta_ad_control (action='pause') "
+                "or let it complete (business_meta_ad_insights_sync settles it once its budget "
+                "is spent or its end date has passed), then relaunch."
             )
 
         plan = {
@@ -655,6 +667,10 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
         media_spend_credits = core._ad_channel_live_media_spend_credits(
             "meta", remaining_channel_credits
         )
+        # Portfolio arms: an explicit total_budget_usd bounds this campaign's reservation to a
+        # slice of the bucket (credits are cents), leaving the rest for concurrent launches.
+        if total_budget_cap_cents > 0:
+            media_spend_credits = min(media_spend_credits, total_budget_cap_cents)
         schedule = core._derive_ad_spend_schedule(
             channel="meta",
             reserved_credits=media_spend_credits,
@@ -1057,7 +1073,7 @@ def handle_business_meta_ad_control(args: dict, **_: Any) -> str:
                 params={"status": "PAUSED"},
             )
             applied = {"status": "PAUSED"}
-            # Pausing frees the per-business "one live meta campaign" slot: mirror the pause
+            # Pausing frees one of the per-business live meta campaign slots: mirror the pause
             # onto the ad-spend policy row the launch guard reads. Best-effort — a launch
             # that predates policy rows holds no slot to free.
             try:
@@ -1069,16 +1085,19 @@ def handle_business_meta_ad_control(args: dict, **_: Any) -> str:
                 pass
         else:  # activate
             _require_authorized_meta_object_id(store, business, slug, object_id)
-            # Activating re-claims the live slot, so it must respect the same
-            # one-live-campaign rail as launch: refuse while another campaign holds it.
+            # Activating re-claims a live slot, so it must respect the same live-campaign
+            # cap as launch: refuse while _MAX_LIVE_META_CAMPAIGNS other campaigns hold slots.
             other_live = [
                 p for p in core._list_ad_spend_policies(business, statuses=list(_LIVE_SLOT_STATUSES))
                 if str(getattr(p, "channel", "")) == "meta" and str(getattr(p, "slug", "")) != slug
             ]
-            if other_live:
+            if len(other_live) >= _MAX_LIVE_META_CAMPAIGNS:
+                holder_desc = ", ".join(
+                    f"'{p.slug}' ({p.status})" for p in other_live[:_MAX_LIVE_META_CAMPAIGNS]
+                )
                 raise core.TakyonError(
-                    f"one live meta campaign at a time: campaign '{other_live[0].slug}' holds the "
-                    f"live slot (status {other_live[0].status}); pause it before activating '{slug}'."
+                    f"live meta campaign cap reached ({_MAX_LIVE_META_CAMPAIGNS} concurrent): "
+                    f"{holder_desc}; pause one before activating '{slug}'."
                 )
             result = core.safebox.meta_graph_forward(
                 method="POST",
@@ -1943,6 +1962,7 @@ TAKYON_META_ADS_V2_DEFINITIONS = [
                 "call_to_action_type": {"type": "string", "description": "CTA enum, default LEARN_MORE"},
                 "objective": {"type": "string", "description": "Campaign objective, default OUTCOME_TRAFFIC"},
                 "daily_budget_usd": {"type": "number", "description": "Ad set daily budget in USD; default 5"},
+                "total_budget_usd": {"type": "number", "description": "Optional cap on this campaign's total credit reservation in USD; without it the launch reserves all remaining meta channel credits. Set it when running multiple concurrent campaigns so each arm takes only its slice of the budget."},
                 "geo_countries": {"type": "array", "items": {"type": "string"}, "description": "ISO country codes for geo targeting; default ['US']"},
                 "targeting": {"type": "string", "description": "Optional ready targeting JSON to override the geo-only default"},
                 "mode": {"type": "string", "enum": ["paused", "live"], "description": "paused (default) leaves PAUSED; live activates"},

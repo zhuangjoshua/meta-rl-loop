@@ -1,0 +1,11 @@
+{"iteration": 2, "policy": "v1", "ads": [
+  {"id": "it2-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Story-led, named customer: 'Maya Chen, ops lead at Brightline Studio, rebuilt their client intake in one afternoon with Formflow — and stopped losing leads to broken forms.' Documentary-style customer voiceover, real desk footage, CTA: Start free."},
+  {"id": "it2-demo-outcome", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Screen-recording demo: cursor builds a working intake form in 60 seconds — drag fields, set logic, publish, submissions land live. Outcome caption overlay: 'From spec to live form in 20 minutes — teams double completion rates.' CTA: Start free."},
+  {"id": "it2-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Outcome-led: 'Teams using Formflow cut form build time from days to 20 minutes and doubled completion rates.' Before/after framing, results on screen, CTA: Start free."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 40, "mode": "auto"}
+]}

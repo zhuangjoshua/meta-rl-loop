@@ -1,0 +1,8 @@
+{"iteration":1,"spend":200.01,"revenue":0,"roas":0.0,"dose":6,"thesis":"Demo variant shows weak mid-funnel engagement lift; favor demo with a same-angle no-demo comparator to isolate it"}
+{"iteration":2,"spend":200.01,"revenue":0,"roas":0.0,"dose":4,"thesis":"Auto-mode cells unreadable two straight batches; cut auto and concentrate budget in fixed sales cells"}
+{"iteration":3,"spend":200.01,"revenue":0,"roas":0.0,"dose":4,"thesis":"Cheap signups but zero purchases across all eras; bottleneck is post-click, so pre-qualify traffic with plain $29/mo card-required offer copy"}
+{"iteration":4,"spend":200.01,"revenue":0,"roas":0.0,"dose":4,"thesis":"Three replicated same-angle pairs show no demo advantage (nodemo 13v8 signups, demos tied); revert demo default to words-led lean"}
+{"iteration":5,"spend":200.01,"revenue":29,"roas":0.14,"dose":2,"thesis":"Fourth straight matched pair shows no demo advantage and nodemo took the only purchase; drop the mandatory demo pair slot"}
+{"iteration":6,"spend":200.01,"revenue":29,"roas":0.14,"dose":4,"thesis":"Upper-funnel pv/leads signups never advance in six eras; collapse them to one $15 probe and concentrate budget in sales cells"}
+{"iteration":7,"spend":199.98,"revenue":29,"roas":0.15,"dose":3,"thesis":"All three purchases came from story or outcome angles; make story+outcome the default slots and reweight away from benefit/count"}
+{"iteration":8,"spend":199.98,"revenue":29,"roas":0.15,"dose":2,"thesis":"Story holds 3 of 4 purchases and most funnel depth; promote story to primary angle with two variants per batch"}

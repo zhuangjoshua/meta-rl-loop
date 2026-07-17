@@ -1,0 +1,9 @@
+{"iteration": 4, "policy": "v3", "ads": [
+  {"id": "it4-story-dan", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Dan, office manager at a dental group, on replacing paper intake forms across 3 locations in a week with Formflow. Testimonial style, CTA to start."},
+  {"id": "it4-story-lena", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Lena, paralegal at a 6-attorney law firm, on replacing emailed PDF client-intake packets with Formflow forms for all 40 monthly intakes in two days. Testimonial style, CTA to start."},
+  {"id": "it4-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): outcome angle grounded in a concrete workplace - a property management office cut tenant-application processing from 4 days to same-day after moving its 120 monthly applications into Formflow. Before/after framing, CTA to start."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 80, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 80, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"}
+]}

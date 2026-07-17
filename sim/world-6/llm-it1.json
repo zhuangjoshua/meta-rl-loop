@@ -1,0 +1,11 @@
+{"iteration": 1, "policy": "v0", "ads": [
+  {"id": "it1-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): leads with the core benefit — build forms in minutes without code; clean UI shots, benefit-first copy, CTA to start."},
+  {"id": "it1-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow: outcome-first — 'teams cut form-building time 80%'; screen-recording demo of building and publishing a live form, CTA to start."},
+  {"id": "it1-story-named", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow: named customer story — 'How Maya at Brightpath Consulting replaced her intake spreadsheet with Formflow'; her words, her results, CTA to start."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 40, "mode": "auto"}
+]}

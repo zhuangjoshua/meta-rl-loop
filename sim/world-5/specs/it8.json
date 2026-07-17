@@ -1,0 +1,64 @@
+{
+ "iteration": 8,
+ "policy": "v7 (final)",
+ "ads": [
+  {
+   "id": "count",
+   "proof": "count",
+   "named_story": false,
+   "demo": false,
+   "prompt": "Lead: count words (cumulative proxy leader)"
+  },
+  {
+   "id": "count-demo",
+   "proof": "count",
+   "named_story": false,
+   "demo": true,
+   "prompt": "Demo row (accruing toward floor)"
+  },
+  {
+   "id": "benefit",
+   "proof": "benefit",
+   "named_story": false,
+   "demo": false,
+   "prompt": "Challenger: benefit words"
+  }
+ ],
+ "campaigns": [
+  {
+   "id": "pageviews",
+   "objective": "pageviews",
+   "audience": "broad",
+   "budget": 50,
+   "mode": "fixed"
+  },
+  {
+   "id": "leads",
+   "objective": "leads",
+   "audience": "broad",
+   "budget": 50,
+   "mode": "fixed"
+  },
+  {
+   "id": "sales-broad",
+   "objective": "sales",
+   "audience": "broad",
+   "budget": 40,
+   "mode": "fixed"
+  },
+  {
+   "id": "sales-niche",
+   "objective": "sales",
+   "audience": "interest_niche",
+   "budget": 30,
+   "mode": "fixed"
+  },
+  {
+   "id": "sales-interest",
+   "objective": "sales",
+   "audience": "interest_biztools",
+   "budget": 30,
+   "mode": "fixed"
+  }
+ ]
+}

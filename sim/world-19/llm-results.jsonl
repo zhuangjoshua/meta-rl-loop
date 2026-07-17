@@ -1,0 +1,8 @@
+{"iteration":1,"spend":199.95,"revenue":0,"roas":0.0,"dose":4,"thesis":"Benefit-first creative produced 0 sign-ups in matched cells while outcome and story each produced 3; lean away from benefit-led openings."}
+{"iteration":2,"spend":199.98,"revenue":0,"roas":0.0,"dose":4,"thesis":"Auto-mode sales cells were unreadable two batches running ($80 of NO-TRUST spend); cut auto-mode and fund only fixed single-audience cells."}
+{"iteration":3,"spend":199.98,"revenue":29,"roas":0.15,"dose":6,"thesis":"Funded benefit re-test falsified the benefit demotion (6 sign-ups at $2.22 CPL in the matched pageviews-broad cell); restore benefit-led creative."}
+{"iteration":4,"spend":200.01,"revenue":87,"roas":0.43,"dose":4,"thesis":"Plain benefit-led creative in pageviews-broad is the engine — replicated best CPL two eras and all 3 purchases this batch; put half the budget there."}
+{"iteration":5,"spend":199.98,"revenue":0,"roas":0.0,"dose":4,"thesis":"Winning angle is cell-dependent — benefit wins pageviews-broad three eras running while outcome wins sales-broad both funded eras; assign angles per cell."}
+{"iteration":6,"spend":199.98,"revenue":29,"roas":0.15,"dose":4,"thesis":"Demo variant improves outcome-led creative — outcome-with-demo beat plain outcome in all four matched cells; attach demo to outcome ads."}
+{"iteration":7,"spend":200.04,"revenue":0,"roas":0.0,"dose":2,"thesis":"Verbatim creative reuse fatigues — the identical benefit prompt decayed monotonically over five eras in pageviews-broad; write fresh executions each batch."}
+{"iteration":8,"spend":200.01,"revenue":29,"roas":0.14,"dose":3,"thesis":"Fatigue confirmed — fresh benefit briefs recovered pv-broad CTR/CPL and took a purchase; forbid verbatim prompt reuse outside deliberate re-tests."}

@@ -1,0 +1,11 @@
+{"iteration": 6, "policy": "v5", "ads": [
+  {"id": "it6-marcus-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story with screen-recording demo — Marcus, office manager at a dental group, shows his actual Formflow patient-intake form being built and going live while he explains how it ended clipboard-and-retype and saved the front desk two hours a day."},
+  {"id": "it6-ana-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story with screen-recording demo — Ana, who runs client services at a small law firm, walks through her live Formflow conditional intake form as it adapts to a client's answers, narrating how abandonment stopped and back-and-forth email halved."},
+  {"id": "it6-tom-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story with screen-recording demo — Tom, HR lead at a logistics company, screen-records his Formflow applicant screening form auto-routing candidates while he recounts cutting time-to-shortlist from a week to a day."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 45, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 65, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 30, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 30, "mode": "fixed"}
+]}

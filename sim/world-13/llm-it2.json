@@ -1,0 +1,17 @@
+{
+  "iteration": 2,
+  "policy": "v1",
+  "ads": [
+    {"id": "it2-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Named customer story: Maya Chen, ops lead at a 12-person agency, replaced her PDF intake mess with Formflow and now onboards clients same-day. Testimonial style, CTA: Start free."},
+    {"id": "it2-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Lead with adoption numbers: 4,200 teams build their intake forms on Formflow. Social-proof count hook, quick montage of forms, CTA: Start free."},
+    {"id": "it2-story-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Named customer story: Diego Ramos, clinic manager, narrates over a live screen recording of Formflow turning his intake doc into a working form in 90 seconds. Story voiceover plus product demo footage, CTA: Start free."}
+  ],
+  "campaigns": [
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 50, "mode": "fixed"},
+    {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 30, "mode": "fixed"},
+    {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+    {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+    {"id": "clicks-broad", "objective": "clicks", "audience": "broad", "budget": 20, "mode": "fixed"},
+    {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 30, "mode": "auto"}
+  ]
+}

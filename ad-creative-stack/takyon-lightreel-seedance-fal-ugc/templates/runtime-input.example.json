@@ -1,0 +1,42 @@
+{
+  "company": {
+    "name": "dealloop.ai",
+    "category": "bot-free meeting AI for macOS",
+    "audience": "sales reps, founders, revenue teams",
+    "core_pain": "meeting follow-up gets messy, decisions get disputed, and bot note takers are awkward",
+    "mechanism": "records and transcribes meetings without a bot joining, understands what is happening on screen, and can take actions during the call",
+    "differentiators": [
+      "no bot joins the meeting",
+      "reads screen context",
+      "can send Slack messages",
+      "can update CRM",
+      "can loop in teammates"
+    ],
+    "proof": [
+      "works on macOS",
+      "works across meeting platforms"
+    ],
+    "cta_goal": "drive download or trial intent"
+  },
+  "creative_constraints": {
+    "duration_seconds": 10,
+    "aspect_ratio": "9:16",
+    "resolution": "720p",
+    "generate_audio": true,
+    "single_person_only": true,
+    "camera_mode": "handheld iPhone selfie",
+    "allow_funny_or_irreverent": true,
+    "allow_lightly_skitty": true,
+    "allow_chaotic": true,
+    "allow_confessional": true,
+    "forbid_product_shots": true,
+    "forbid_ui": true,
+    "forbid_screen_recordings": true,
+    "forbid_overlays": true,
+    "forbid_second_character": true
+  },
+  "reference_image": {
+    "storage_url": "https://example-bucket.s3.amazonaws.com/reference-images/<company>/<image>.png",
+    "usage": "reference_only"
+  }
+}

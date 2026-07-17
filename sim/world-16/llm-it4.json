@@ -1,0 +1,11 @@
+{"iteration": 4, "policy": "v3", "ads": [
+  {"id": "benefit-demo-inbox", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad: screen-recording demo of Formflow while voiceover leads with the benefit: 'Stop babysitting form submissions — Formflow files, tags, and routes them for you.' Show the inbox-zero moment. End card: Formflow, $29/mo."},
+  {"id": "benefit-demo-hours", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad: benefit-led demo variant. Hook: 'Get your Tuesdays back.' Screen-recording shows a stack of form submissions auto-sorted, tagged, and synced while a timer counts hours saved this week. End card: Formflow, $29/mo."},
+  {"id": "benefit-demo-quiet", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad: benefit-led demo variant. Hook: 'The quietest inbox on your team.' Screen-recording of Formflow silently routing submissions to the right owner with zero manual touches; notifications fall to zero. End card: Formflow, $29/mo."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 47, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 47, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 46, "mode": "fixed"}
+]}

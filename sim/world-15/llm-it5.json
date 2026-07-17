@@ -1,0 +1,16 @@
+{
+  "iteration": 5,
+  "policy": "v4",
+  "ads": [
+    {"id": "it5-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Priya S., HR coordinator' on how candidate intake went from scattered emails to one Formflow pipeline. Talking head with product cutaways, CTA to start."},
+    {"id": "it5-benefit-demo", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): benefit lead — build intake forms in minutes, not hours — over a live screen-recording demo building a form, adding conditional logic, and publishing. CTA to start."},
+    {"id": "it5-count-challenger", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): refreshed count execution — '12,000 forms submitted through Formflow last week' — animated counter over product shots, social-proof badges, CTA to start."}
+  ],
+  "campaigns": [
+    {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 10, "mode": "fixed"},
+    {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 65, "mode": "fixed"},
+    {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+    {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 55, "mode": "fixed"}
+  ]
+}

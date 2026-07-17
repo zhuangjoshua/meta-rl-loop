@@ -1,0 +1,11 @@
+{"iteration": 8, "policy": "v7", "ads": [
+  {"id": "it8-story-a", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Story-led, named customer: 'Elena Marsh, ops lead at Copperline Logistics, moved driver onboarding to Formflow and cut paperwork time from two days to one morning.' Customer-voice testimonial, warehouse footage, CTA: Start free."},
+  {"id": "it8-story-b", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Story-led, named customer: 'Tom Abara, founder of Stillwater Tutoring, runs enrollment through Formflow and filled every fall cohort two weeks early.' Customer-voice testimonial, classroom footage, CTA: Start free."},
+  {"id": "it8-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Benefit-led: 'Stop wrestling with form builders. Formflow turns any spec into a working form in minutes — drag, drop, publish.' Clean UI b-roll, upbeat pacing, CTA: Start free."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 46, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 47, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 47, "mode": "fixed"},
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"}
+]}

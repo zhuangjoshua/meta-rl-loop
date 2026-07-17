@@ -1,0 +1,7 @@
+{"iteration": 8, "policy": "v7", "ads": [
+  {"id": "it8-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): outcome angle grounded in a concrete workplace - a property management office cut tenant-application processing from 4 days to same-day after moving its 120 monthly applications into Formflow. Before/after framing, CTA to start."},
+  {"id": "it8-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): outcome angle grounded in a concrete workplace - a property management office cut tenant-application processing from 4 days to same-day after moving its 120 monthly applications into Formflow - intercut with a live screen-recording demo of Formflow turning a tenant-application doc into a working form. Before/after framing plus demo, CTA to start."},
+  {"id": "it8-story-rosa", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Rosa, front-desk lead at a physical-therapy clinic, on moving 200 monthly patient intake forms from clipboards into Formflow in one week. Testimonial style, CTA to start."}
+], "campaigns": [
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 200, "mode": "fixed"}
+]}

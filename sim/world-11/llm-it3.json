@@ -1,0 +1,12 @@
+{"iteration": 3, "policy": "v2", "ads": [
+  {"id": "it3-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Lead with a concrete outcome: teams cut form-handling time from hours to minutes and stop losing submissions. Outcome-first hook, before/after framing, CTA to start."},
+  {"id": "it3-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Outcome-first hook — hours to minutes, no lost submissions — over a live screen-recording demo of Formflow turning a doc into a working form. Outcome voiceover on real product footage, CTA to start."},
+  {"id": "it3-outcome-money", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Lead with a money outcome: teams reclaim a full workday per week of admin time — $29/mo buys back 4+ hours weekly. Concrete ROI framing, CTA to start."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 55, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 50, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 50, "mode": "fixed"},
+  {"id": "clicks-broad", "objective": "clicks", "audience": "broad", "budget": 15, "mode": "fixed"},
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 15, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 15, "mode": "fixed"}
+]}

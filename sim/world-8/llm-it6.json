@@ -1,0 +1,9 @@
+{"iteration": 6, "policy": "v5", "ads": [
+  {"id": "it6-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): concrete outcome first - a team ships its client intake form the same afternoon instead of next week, and nothing falls through the cracks. Outcome framing, CTA to start."},
+  {"id": "it6-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Maya R., ops lead at a 12-person agency, walks through the week she swapped her PDF patchwork for Formflow and what stopped going wrong. Named story format, CTA to start."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 25, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 25, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 75, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 75, "mode": "fixed"}
+]}

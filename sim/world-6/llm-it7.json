@@ -1,0 +1,11 @@
+{"iteration": 7, "policy": "v6", "ads": [
+  {"id": "it7-story-demo-a", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story with demo — 'Jonah at Pinewood Woodworks shows the custom-order form that ended his quoting bottleneck, live on screen'; screen-recording, his words and numbers, CTA to start."},
+  {"id": "it7-story-demo-b", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow: named customer story with demo — 'Aisha at Lantern Therapy builds her new-client intake form in 5 minutes and shows the first submission arriving'; live screen-recording, her voiceover, CTA to start."},
+  {"id": "it7-story-demo-c", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow: named customer story with demo — 'Piet at Cobble Lane Catering walks through the event-order form that filled his weekends, on screen as it happens'; screen-recording, his results, CTA to start."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 150, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 15, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 15, "mode": "fixed"},
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 10, "mode": "fixed"},
+  {"id": "probe-niche", "objective": "sales", "audience": "interest_niche", "budget": 10, "mode": "fixed"}
+]}

@@ -1,0 +1,11 @@
+{"iteration": 3, "policy": "v2", "ads": [
+  {"id": "it3-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Outcome-led: 'Teams using Formflow cut form build time from days to 20 minutes and doubled completion rates.' Before/after framing, results on screen, CTA: Start free."},
+  {"id": "it3-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Story-led, named customer: 'Dev Patel, founder of Harborline Consulting, replaced three tools with Formflow and now closes client intake the same day.' Customer-voice testimonial, real workspace footage, CTA: Start free."},
+  {"id": "it3-demo-outcome", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Screen-recording demo: cursor builds a working intake form in 60 seconds — drag fields, set logic, publish, submissions land live. Outcome caption overlay: 'From spec to live form in 20 minutes — teams double completion rates.' CTA: Start free."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+  {"id": "exp-clicks-broad", "objective": "clicks", "audience": "broad", "budget": 40, "mode": "fixed"}
+]}

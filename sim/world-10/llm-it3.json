@@ -1,0 +1,11 @@
+{"iteration": 3, "policy": "v2", "ads": [
+  {"id": "it3-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — Priya, operations manager at a 30-person consultancy, walks through how Formflow's branching intake forms cut her client onboarding from two weeks to three days."},
+  {"id": "it3-story-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story with live screen-recording demo — Priya, operations manager at a 30-person consultancy, shows her actual Formflow intake form being built and published in 60 seconds while narrating how it cut onboarding from two weeks to three days."},
+  {"id": "it3-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): screen-recording demo of the product working — build a branching intake form live in 60 seconds, publish, and watch a submission land; outcome framing: days of build time down to under an hour."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 50, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 45, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 45, "mode": "fixed"}
+]}

@@ -1,0 +1,11 @@
+{"iteration": 1, "policy": "v0", "ads": [
+  {"id": "benefit-plain", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad: Formflow saves your team hours every week by turning messy intake forms into clean, automated workflows. Lead with the core benefit: less busywork, more real work. End card: Formflow, $29/mo."},
+  {"id": "outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad: screen-recording demo of Formflow in action — a raw form submission arrives and is instantly routed, tagged, and synced to the CRM. Voiceover states the concrete outcome: 'Teams cut form-handling time 80% in week one.' End card: Formflow, $29/mo."},
+  {"id": "story-maya", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad: named customer story. Maya Chen, ops lead at a 12-person agency, tells how Formflow replaced her spreadsheet triage: 'I stopped living in form exports.' Authentic talking-head style with light b-roll. End card: Formflow, $29/mo."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 40, "mode": "auto"}
+]}

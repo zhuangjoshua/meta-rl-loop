@@ -1,0 +1,12 @@
+{"iteration": 2, "policy": "v1", "ads": [
+  {"id": "count-plain", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad: adoption-count proof — '12,000 ops teams already run their intake on Formflow.' Fast montage of workflows firing, count ticker on screen. CTA: Start free."},
+  {"id": "outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad: screen-recording demo of Formflow converting a raw form into a routed workflow in 40 seconds, ending on the outcome 'approvals in minutes, not days'. CTA: Start free."},
+  {"id": "story-named", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad: named customer story — 'Maya Chen, ops lead at Brightline, cut form processing from 3 days to 2 hours with Formflow.' Direct-to-camera style testimonial. CTA: Start free."}
+], "campaigns": [
+  {"id": "clicks-broad", "objective": "clicks", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 30, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 40, "mode": "auto"}
+]}

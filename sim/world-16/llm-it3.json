@@ -1,0 +1,11 @@
+{"iteration": 3, "policy": "v2", "ads": [
+  {"id": "count-demo", "proof": "count", "named_story": false, "demo": true, "prompt": "Video ad: adoption-numbers angle over live screen-recording demo. '4,200 teams route intake through Formflow' as an on-screen counter while the product auto-files a real submission. End card: Formflow, $29/mo."},
+  {"id": "story-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad: named customer story with demo footage. Maya Chen, ops lead at a 12-person agency, narrates while her actual Formflow screen routes a submission: 'This used to be my whole Tuesday.' End card: Formflow, $29/mo."},
+  {"id": "benefit-demo", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad: screen-recording demo of Formflow while voiceover leads with the benefit: 'Stop babysitting form submissions — Formflow files, tags, and routes them for you.' Show the inbox-zero moment. End card: Formflow, $29/mo."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 47, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 47, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 46, "mode": "fixed"}
+]}

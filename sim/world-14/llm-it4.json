@@ -1,0 +1,11 @@
+{"iteration": 4, "policy": "v3", "ads": [
+  {"id": "it4-story-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Diego Ramos, office manager at Kestrel Legal, moved client intake off email chains and into Formflow in a week.' His quote on screen, then a screen-recording demo of his client-intake workflow auto-routing submissions. CTA: Start free trial."},
+  {"id": "it4-story-nodemo", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Diego Ramos, office manager at Kestrel Legal, moved client intake off email chains and into Formflow in a week.' Same script and quotes as the demo variant, rendered with his photo, pull-quotes, and motion graphics — no screen recording. CTA: Start free trial."},
+  {"id": "it4-count-demo", "proof": "count", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): adoption-count-led — 'Over 4,000 teams already run their intake on Formflow.' Social-proof counters, then a screen-recording demo of a form being built and automated. CTA: Start free trial."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 20, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 50, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 50, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 50, "mode": "fixed"}
+]}

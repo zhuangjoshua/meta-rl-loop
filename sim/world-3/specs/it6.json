@@ -1,0 +1,13 @@
+{"iteration":6,"policy":"v5 (pageviews-primary)","ads":[
+ {"id":"benefit","proof":"benefit","named_story":false,"demo":false,
+  "prompt":"Lead: benefit words"},
+ {"id":"outcome","proof":"outcome","named_story":false,"demo":false,
+  "prompt":"Challenger: outcome words"},
+ {"id":"benefit-demo","proof":"benefit","named_story":false,"demo":true,
+  "prompt":"Demo row (held)"}],
+"campaigns":[
+ {"id":"pageviews","objective":"pageviews","audience":"broad","budget":80,"mode":"fixed"},
+ {"id":"pageviews-2","objective":"pageviews","audience":"interest_biztools","budget":40,"mode":"fixed"},
+ {"id":"leads","objective":"leads","audience":"broad","budget":20,"mode":"fixed"},
+ {"id":"sales-broad","objective":"sales","audience":"broad","budget":30,"mode":"fixed"},
+ {"id":"sales-interest","objective":"sales","audience":"interest_biztools","budget":30,"mode":"fixed"}]}

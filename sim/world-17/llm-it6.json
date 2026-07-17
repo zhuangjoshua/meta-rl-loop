@@ -1,0 +1,10 @@
+{"iteration": 6, "policy": "v5", "ads": [
+  {"id": "it6-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): outcome-led house ad - teams cut form-handling time from hours to minutes with Formflow. Clear voiceover, product name on screen, CTA to start."},
+  {"id": "it6-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): identical outcome-led script to the house ad, rendered as a screen-recording demo of building a form and watching submissions auto-route. Only the demo treatment differs."},
+  {"id": "it6-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): benefit-led periodic challenger - stop rebuilding the same intake forms; Formflow turns any form into a reusable automated workflow in minutes. Same structure and CTA as the house ad; only the leading angle differs."}
+], "campaigns": [
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 120, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 27, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 27, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 26, "mode": "fixed"}
+]}

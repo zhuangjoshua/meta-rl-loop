@@ -1,0 +1,12 @@
+{"iteration": 2, "policy": "v1", "ads": [
+  {"id": "count-plain", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad: adoption-numbers angle. '4,200 teams route their intake forms through Formflow.' Animated counter, quick logos-style montage of workflows firing. End card: Formflow, $29/mo."},
+  {"id": "benefit-demo", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad: screen-recording demo of Formflow while voiceover leads with the benefit: 'Stop babysitting form submissions — Formflow files, tags, and routes them for you.' Show the inbox-zero moment. End card: Formflow, $29/mo."},
+  {"id": "outcome-plain", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad: outcome-led, no demo footage. Bold text-forward cut: 'Form-handling time down 80% in week one.' Concrete before/after framing of a team's weekly hours. End card: Formflow, $29/mo."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 35, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 35, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 35, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 35, "mode": "auto"}
+]}

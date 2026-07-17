@@ -1,0 +1,16 @@
+{
+  "iteration": 5,
+  "policy": "v4",
+  "ads": [
+    {"id": "it5-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): concrete outcome lead - teams cut form-handling time from hours to minutes and stop losing submissions - shown over a live screen-recording demo of a form becoming an automated workflow. CTA: Start free."},
+    {"id": "it5-story-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story - Maya Chen, ops lead at a 12-person agency, narrates while a live screen-recording shows her actual Formflow board replacing her spreadsheet-and-email intake mess. Real name on screen. CTA: Start free."},
+    {"id": "it5-count-demo", "proof": "count", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): adoption-numbers lead - 4,200 teams route their intake forms through Formflow - over a live screen-recording demo of a form becoming an automated workflow. CTA: Start free."}
+  ],
+  "campaigns": [
+    {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 25, "mode": "fixed"},
+    {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 25, "mode": "fixed"},
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 25, "mode": "fixed"},
+    {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 60, "mode": "fixed"},
+    {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 65, "mode": "fixed"}
+  ]
+}

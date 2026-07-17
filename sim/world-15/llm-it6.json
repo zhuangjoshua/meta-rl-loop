@@ -1,0 +1,16 @@
+{
+  "iteration": 6,
+  "policy": "v5",
+  "ads": [
+    {"id": "it6-story-a", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Marcus D., property manager' on how maintenance requests went from lost voicemails to a Formflow queue his team clears daily. Talking head with product cutaways, CTA to start."},
+    {"id": "it6-story-b", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Elena V., nonprofit program director' on how volunteer applications doubled once intake moved to a Formflow form. Documentary-style b-roll with captions, CTA to start."},
+    {"id": "it6-count-decision", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): count decision test — '4,200 teams, 12,000 forms a week' — bold animated numbers over rapid product montage, CTA to start."}
+  ],
+  "campaigns": [
+    {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 10, "mode": "fixed"},
+    {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 65, "mode": "fixed"},
+    {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+    {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 55, "mode": "fixed"}
+  ]
+}

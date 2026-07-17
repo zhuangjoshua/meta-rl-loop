@@ -1,0 +1,11 @@
+{"iteration": 6, "policy": "v5", "ads": [
+  {"id": "it6-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): plain benefit-led — never rebuild the same intake form again; Formflow turns any doc into a live form in minutes. Sharp single-benefit hook, clean product visuals, CTA to start."},
+  {"id": "it6-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): outcome-led — teams cut intake form turnaround from two days to twenty minutes and stop losing submissions. Before/after structure, concrete numbers, CTA to start."},
+  {"id": "it6-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): outcome-led challenger with demo — the two-days-to-twenty-minutes outcome claim, then a screen-recording demo of a doc becoming a live form with submissions arriving. CTA to start."}
+],
+"campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 70, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 70, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 30, "mode": "fixed"}
+]}

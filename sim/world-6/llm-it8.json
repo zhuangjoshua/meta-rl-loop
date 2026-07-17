@@ -1,0 +1,11 @@
+{"iteration": 8, "policy": "v7", "ads": [
+  {"id": "it8-story-demo-a", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story with demo — 'Mara at Stillwater Yoga shows the class-registration form that replaced her DM tangle, live on screen'; screen-recording, her words and results, CTA to start."},
+  {"id": "it8-story-demo-b", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow: named customer story with demo — 'Theo at Granite Peak Accounting builds his tax-document intake form in 5 minutes and shows secure uploads landing'; live screen-recording, his voiceover, CTA to start."},
+  {"id": "it8-story-plain-control", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow: named customer story, no demo footage — 'Yusuf at Beacon Rowing Club tells how Formflow waivers got his whole roster signed in a weekend'; his words and results over club footage, CTA to start."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 165, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 10, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 10, "mode": "fixed"},
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 8, "mode": "fixed"},
+  {"id": "probe-niche", "objective": "sales", "audience": "interest_niche", "budget": 7, "mode": "fixed"}
+]}

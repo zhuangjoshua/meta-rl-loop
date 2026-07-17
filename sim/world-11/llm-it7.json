@@ -1,0 +1,9 @@
+{"iteration": 7, "policy": "v6", "ads": [
+  {"id": "it7-time", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Lived before/after: hours of form admin becomes minutes. Opens on a cluttered desk at 7pm, then the after — the same person leaving on time, forms handled. Outcome-first voiceover, CTA to start."},
+  {"id": "it7-loss", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Lived before/after: submissions stop going missing. Opens on a lost-form fire drill — a client's intake vanished — then the after: every submission tracked and answered in Formflow. Outcome-first voiceover, CTA to start."},
+  {"id": "it7-loss-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Lived before/after: submissions stop going missing. Same lost-form fire drill open, then a live screen-recording demo of Formflow's tracked submissions inbox catching and routing every intake. Outcome voiceover over real product footage, CTA to start."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 75, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 85, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"}
+]}

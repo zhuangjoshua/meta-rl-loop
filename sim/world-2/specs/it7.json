@@ -1,0 +1,12 @@
+{"iteration":7,"policy":"v6 (concentration)","ads":[
+ {"id":"outcome-calm-demo","proof":"outcome","named_story":false,"demo":true,
+  "prompt":"Lead: outcome words, calm VO, 60s screen-demo"},
+ {"id":"benefit-calm-demo","proof":"benefit","named_story":false,"demo":true,
+  "prompt":"Copy axis: benefit words, same demo footage"},
+ {"id":"count-calm-demo","proof":"count","named_story":false,"demo":true,
+  "prompt":"Copy axis widened: adoption-count words ('2,300 firms run intake here') over the same demo footage"}],
+"campaigns":[
+ {"id":"leads","objective":"leads","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"sales-broad","objective":"sales","audience":"broad","budget":30,"mode":"fixed"},
+ {"id":"sales-interest","objective":"sales","audience":"interest_biztools","budget":30,"mode":"fixed"},
+ {"id":"sales-niche","objective":"sales","audience":"interest_niche","budget":100,"mode":"fixed"}]}

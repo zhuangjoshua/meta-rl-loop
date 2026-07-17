@@ -1,0 +1,12 @@
+{"iteration":2,"policy":"v1 (consolidated power)",
+ "ads":[
+  {"id":"benefit-selfie","proof":"benefit","named_story":false,"demo":false,
+   "prompt":"UGC selfie, female consultant, energetic: 'Beautiful forms in minutes - no code.' Template gallery glance. 28s."},
+  {"id":"outcome-selfie","proof":"outcome","named_story":false,"demo":false,
+   "prompt":"IDENTICAL spec; only words: 'Intake auto-syncs to your CRM - no copy-paste.'"},
+  {"id":"benefit-calm","proof":"benefit","named_story":false,"demo":false,
+   "prompt":"Same words as benefit-selfie; CALM delivery; else identical."}],
+ "campaigns":[
+  {"id":"pageviews","objective":"pageviews","audience":"broad","budget":6.66,"mode":"fixed"},
+  {"id":"leads","objective":"leads","audience":"broad","budget":6.66,"mode":"fixed"},
+  {"id":"sales-broad","objective":"sales","audience":"broad","budget":6.66,"mode":"fixed"}]}

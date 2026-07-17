@@ -1,0 +1,12 @@
+{"iteration": 2, "policy": "v1", "ads": [
+  {"id": "it2-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): lead with adoption numbers — 4,800 teams build their forms on Formflow; join them and stop wrestling with brittle form builders."},
+  {"id": "it2-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): screen-recording demo of the product working — build a branching intake form live in 60 seconds, publish, and watch a submission land; outcome framing: days of build time down to under an hour."},
+  {"id": "it2-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — Dev, founder of a bookkeeping startup, explains how Formflow replaced three tools for client onboarding forms and saved his team a day each week."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 25, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 35, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 35, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 35, "mode": "auto"}
+]}

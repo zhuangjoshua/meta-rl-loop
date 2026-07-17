@@ -1,0 +1,9 @@
+{"iteration":4,"policy":"v3 (outcome leads; story challenger)",
+ "ads":[
+  {"id":"outcome-selfie","proof":"outcome","named_story":false,"demo":false,
+   "prompt":"UGC selfie, energetic: 'Intake auto-syncs to your CRM - no copy-paste.'"},
+  {"id":"story-selfie","proof":"story","named_story":true,"demo":false,
+   "prompt":"IDENTICAL spec; only words: 'How Rivera Consulting cut intake time 80% - four hours a week down to 45 minutes. Her words: the one tool I would panic without.'"}],
+ "campaigns":[
+  {"id":"leads","objective":"leads","audience":"broad","budget":10.0,"mode":"fixed"},
+  {"id":"sales-broad","objective":"sales","audience":"broad","budget":10.0,"mode":"fixed"}]}

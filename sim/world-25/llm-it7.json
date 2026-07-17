@@ -1,0 +1,11 @@
+{"iteration": 7, "policy": "v6", "ads": [
+  {"id": "it7-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Story-led, named customer: 'Jonas Reyes, owner of Meridian Fitness, moved trial sign-ups to Formflow and doubled his monthly memberships without hiring.' Customer-voice testimonial, gym-floor footage, CTA: Start free."},
+  {"id": "it7-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Count-led: 'Over 12,000 teams already ship their forms with Formflow.' Adoption ticker visual, logos-style social proof montage, CTA: Join them — start free."},
+  {"id": "it7-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Outcome-led: 'Teams using Formflow cut form build time from days to 20 minutes and doubled completion rates.' Before/after framing, results on screen, CTA: Start free."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 46, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 47, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 47, "mode": "fixed"},
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"}
+]}

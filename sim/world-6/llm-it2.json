@@ -1,0 +1,12 @@
+{"iteration": 2, "policy": "v1", "ads": [
+  {"id": "it2-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Dev at Larkin Legal ditched paper intake; Formflow forms cut his onboarding from 3 days to 1 afternoon'; told in his words, CTA to start."},
+  {"id": "it2-story-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow: named customer story with demo — 'Priya at Northbeam Studio shows exactly how she rebuilt her client brief form in 4 minutes'; screen-recording of her doing it, her voiceover, CTA to start."},
+  {"id": "it2-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Coverage test, count family: 'Over 12,000 teams build their forms on Formflow' — adoption-numbers-led video, logos and counters, CTA to start."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 35, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 35, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 35, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 35, "mode": "auto"}
+]}

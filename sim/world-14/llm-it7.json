@@ -1,0 +1,11 @@
+{"iteration": 7, "policy": "v6", "ads": [
+  {"id": "it7-founder-lena-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named founder story — 'Lena Park, founder of Fieldnote Design, stopped losing client requests in DMs; Formflow intakes, routes, and follows up on every brief automatically.' Her quote, then a screen-recording demo of a client request flowing to her queue. CTA: Start free trial."},
+  {"id": "it7-legal-omar-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story, legal-office vertical — 'Omar Haddad, practice manager at Cedar & Lowe, moved conflict checks and client intake onto Formflow; files open themselves now.' His quote, then a screen-recording demo of an intake packet auto-assembling. CTA: Start free trial."},
+  {"id": "it7-health-tasha-nodemo", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story, healthcare-ops vertical — 'Tasha Nguyen, clinic coordinator at Lakeview Physio, replaced clipboard intake with Formflow; reminders and follow-ups send themselves.' Her photo, pull-quotes, motion graphics; no screen recording. CTA: Start free trial."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 20, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 60, "mode": "fixed"}
+]}

@@ -1,0 +1,9 @@
+{"iteration":5,"policy":"v4 (demo axis test)",
+ "ads":[
+  {"id":"outcome-selfie","proof":"outcome","named_story":false,"demo":false,
+   "prompt":"UGC selfie, energetic: 'Intake auto-syncs to your CRM - no copy-paste.'"},
+  {"id":"outcome-demo","proof":"outcome","named_story":false,"demo":true,
+   "prompt":"SAME words voiced over a SCREEN RECORDING: a form submits and the CRM record appears field-by-field in real time; face only final 3s."}],
+ "campaigns":[
+  {"id":"leads","objective":"leads","audience":"broad","budget":10.0,"mode":"fixed"},
+  {"id":"sales-broad","objective":"sales","audience":"broad","budget":10.0,"mode":"fixed"}]}

@@ -1,0 +1,11 @@
+{"iteration": 7, "policy": "v6", "ads": [
+  {"id": "it7-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): plain benefit-led — never rebuild the same intake form again; Formflow turns any doc into a live form in minutes. Sharp single-benefit hook, clean product visuals, CTA to start."},
+  {"id": "it7-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): outcome-led with demo — teams cut intake form turnaround from two days to twenty minutes, then a screen-recording demo of a doc becoming a live form with submissions arriving in real time. CTA to start."},
+  {"id": "it7-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story challenger — Elena, event planner, tells how Formflow replaced her email-thread RSVPs with one live form and saved a full day per event. First-person named testimonial, CTA to start."}
+],
+"campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 80, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 80, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 20, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 20, "mode": "fixed"}
+]}

@@ -1,0 +1,10 @@
+{"iteration": 7, "policy": "v6", "ads": [
+  {"id": "it7-outcome-q", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo, card-required trial — stated plainly on screen and in voiceover). Outcome-first: teams cut form-admin time from hours to minutes. Words-led motion graphics, no screen recording. CTA: start your $29/mo trial."},
+  {"id": "it7-story-q", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo, card-required trial — stated plainly on screen and in voiceover). Named customer story: Maya R., ops lead at a 12-person agency, direct-to-camera testimonial about replacing intake spreadsheet chaos with Formflow. Words-led, no screen recording. CTA: start your $29/mo trial."},
+  {"id": "it7-benefit-q", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo, card-required trial — stated plainly on screen and in voiceover). Benefit-led: stop rebuilding the same forms — turn any workflow into a reusable form in minutes. Words-led motion graphics, no screen recording. CTA: start your $29/mo trial."}
+], "campaigns": [
+  {"id": "probe-pv-broad", "objective": "pageviews", "audience": "broad", "budget": 15, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 85, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 60, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"}
+]}

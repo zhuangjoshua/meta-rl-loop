@@ -1,0 +1,7 @@
+{"iteration": 7, "policy": "v6", "ads": [
+  {"id": "it7-story-rosa", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Rosa, front-desk lead at a physical-therapy clinic, on moving 200 monthly patient intake forms from clipboards into Formflow in one week. Testimonial style, CTA to start."},
+  {"id": "it7-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): outcome angle grounded in a concrete workplace - a property management office cut tenant-application processing from 4 days to same-day after moving its 120 monthly applications into Formflow. Before/after framing, CTA to start."},
+  {"id": "it7-story-dan", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Dan, office manager at a dental group, on replacing paper intake forms across 3 locations in a week with Formflow. Testimonial style, CTA to start."}
+], "campaigns": [
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 200, "mode": "fixed"}
+]}

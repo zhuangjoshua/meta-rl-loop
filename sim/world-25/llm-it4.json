@@ -1,0 +1,11 @@
+{"iteration": 4, "policy": "v3", "ads": [
+  {"id": "it4-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Story-led, named customer: 'Rosa Alvarez, clinic manager at Northgate Health, moved patient intake to Formflow and cut no-shows by a third.' Customer-voice testimonial, warm clinic footage, CTA: Start free."},
+  {"id": "it4-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Outcome-led: 'Teams using Formflow cut form build time from days to 20 minutes and doubled completion rates.' Before/after framing, results on screen, CTA: Start free."},
+  {"id": "it4-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Benefit-led: 'Stop wrestling with form builders. Formflow turns any spec into a working form in minutes — drag, drop, publish.' Clean UI b-roll, upbeat pacing, CTA: Start free."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 50, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 50, "mode": "fixed"},
+  {"id": "exp-sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"}
+]}

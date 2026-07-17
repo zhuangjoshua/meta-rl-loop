@@ -1,0 +1,10 @@
+{"iteration": 8, "policy": "v7", "ads": [
+  {"id": "it8-benefit-fresh", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): fresh plain benefit-led — one link, every form: send a single Formflow link and collect perfectly structured responses without chasing anyone. New hook, clean product visuals, CTA to start."},
+  {"id": "it8-benefit-fresh2", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): fresh plain benefit-led — your forms build themselves: drop in any doc and Formflow makes it a live form instantly. Different hook from prior batches, bold typography visuals, CTA to start."},
+  {"id": "it8-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): fresh outcome-led with demo — a 40-hour admin month cut to 90 minutes: watch the screen-recording as a messy PDF becomes a live form and responses roll in. New framing, CTA to start."}
+],
+"campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 90, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 90, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 20, "mode": "fixed"}
+]}

@@ -1,0 +1,11 @@
+{"iteration": 4, "policy": "v3", "ads": [
+  {"id": "outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad: screen-recording demo of Formflow converting a raw form into a routed workflow in 40 seconds, ending on the outcome 'approvals in minutes, not days'. CTA: Start free."},
+  {"id": "outcome-plain", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad: same outcome script without demo footage — motion-graphics text and stills ending on the outcome 'approvals in minutes, not days'. CTA: Start free."},
+  {"id": "story-named", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad: named customer story — 'Maya Chen, ops lead at Brightline, cut form processing from 3 days to 2 hours with Formflow.' Direct-to-camera style testimonial. CTA: Start free."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 50, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "clicks-broad", "objective": "clicks", "audience": "broad", "budget": 40, "mode": "fixed"}
+]}

@@ -1,0 +1,9 @@
+{"iteration":6,"policy":"v5 (audience axis)",
+ "ads":[
+  {"id":"outcome-selfie","proof":"outcome","named_story":false,"demo":false,
+   "prompt":"UGC selfie, energetic: 'Intake auto-syncs to your CRM - no copy-paste.'"}],
+ "campaigns":[
+  {"id":"leads-broad","objective":"leads","audience":"broad","budget":5.0,"mode":"fixed"},
+  {"id":"sales-broad","objective":"sales","audience":"broad","budget":5.0,"mode":"fixed"},
+  {"id":"sales-biztools","objective":"sales","audience":"interest_biztools","budget":5.0,"mode":"fixed"},
+  {"id":"sales-niche","objective":"sales","audience":"interest_niche","budget":5.0,"mode":"fixed"}]}

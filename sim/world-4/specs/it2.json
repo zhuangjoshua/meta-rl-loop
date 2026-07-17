@@ -1,0 +1,13 @@
+{"iteration":2,"policy":"v1 (sweep completion)","ads":[
+ {"id":"story","proof":"story","named_story":true,"demo":false,
+  "prompt":"Comparator: named-story words (for the demo pair)"},
+ {"id":"story-demo","proof":"story","named_story":true,"demo":true,
+  "prompt":"Sweep DEMO: same story words over 60s product screen-demo"},
+ {"id":"count","proof":"count","named_story":false,"demo":false,
+  "prompt":"Sweep COUNT: adoption-count words (2,300 firms)"}],
+"campaigns":[
+ {"id":"pageviews","objective":"pageviews","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"leads","objective":"leads","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"sales-broad","objective":"sales","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"sales-niche","objective":"sales","audience":"interest_niche","budget":40,"mode":"fixed"},
+ {"id":"sales-auto","objective":"sales","audiences":["broad","interest_biztools"],"budget":40,"mode":"auto"}]}

@@ -1,0 +1,12 @@
+{"iteration":8,"policy":"v7 (consolidated rules)","ads":[
+ {"id":"outcome-calm-demo","proof":"outcome","named_story":false,"demo":true,
+  "prompt":"Lead per v7 rules: outcome words, calm VO, 60s screen-demo"},
+ {"id":"story-calm-demo","proof":"story","named_story":true,"demo":true,
+  "prompt":"Copy axis, last untested style: named-customer story ('Rivera Consulting cut intake 80%') over the same demo footage"},
+ {"id":"outcome-calm-demo-v2","proof":"outcome","named_story":false,"demo":true,
+  "prompt":"Production axis: same lead words, demo re-cut to open ON the proof moment (first 3s)"}],
+"campaigns":[
+ {"id":"leads","objective":"leads","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"sales-broad","objective":"sales","audience":"broad","budget":30,"mode":"fixed"},
+ {"id":"sales-interest","objective":"sales","audience":"interest_biztools","budget":30,"mode":"fixed"},
+ {"id":"sales-niche","objective":"sales","audience":"interest_niche","budget":100,"mode":"fixed"}]}

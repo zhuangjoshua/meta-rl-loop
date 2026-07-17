@@ -1,0 +1,16 @@
+{
+  "iteration": 3,
+  "policy": "v2",
+  "ads": [
+    {"id": "it3-story-demo-a", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Demo core: live screen recording of Formflow turning a messy intake doc into a working form in 90 seconds. Story wrapper: Diego Ramos, clinic manager, narrates how this replaced his paper intake. CTA: Start free."},
+    {"id": "it3-story-demo-b", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Demo core: screen recording building a client-onboarding form, conditional logic shown working. Story wrapper: Maya Chen, agency ops lead, narrates onboarding clients same-day. CTA: Start free."},
+    {"id": "it3-count-demo", "proof": "count", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Demo core: screen recording of a form going live and submissions streaming in. Count wrapper: 4,200 teams run intake on Formflow. CTA: Start free."}
+  ],
+  "campaigns": [
+    {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+    {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+    {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 60, "mode": "fixed"},
+    {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"}
+  ]
+}

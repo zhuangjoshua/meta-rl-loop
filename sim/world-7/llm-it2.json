@@ -1,0 +1,17 @@
+{
+  "iteration": 2,
+  "policy": "v1",
+  "ads": [
+    {"id": "it2-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): lead with adoption numbers - 4,200 teams now route their intake forms through Formflow. Count-first social proof copy, logos-and-numbers visual style, CTA: Start free."},
+    {"id": "it2-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): lead with a concrete outcome - teams cut form-handling time from hours to minutes and stop losing submissions. Outcome-first copy with before/after framing, CTA: Start free."},
+    {"id": "it2-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): same concrete outcome lead - teams cut form-handling time from hours to minutes - but the visual is a live screen-recording demo of a form becoming an automated workflow. CTA: Start free."}
+  ],
+  "campaigns": [
+    {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 28, "mode": "fixed"},
+    {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 28, "mode": "fixed"},
+    {"id": "clicks-broad", "objective": "clicks", "audience": "broad", "budget": 24, "mode": "fixed"},
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+    {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+    {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"}
+  ]
+}

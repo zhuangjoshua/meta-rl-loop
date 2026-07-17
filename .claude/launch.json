@@ -9,6 +9,15 @@
         "cd /Users/Zygote/Downloads/takyon/hermes-agent-main && TAKYON_HOME=/Users/Zygote/Downloads/takyon/.takyon .venv/bin/takyon-cli dashboard --host 127.0.0.1 --port 9119 --no-open --tui --skip-build"
       ],
       "port": 9119
+    },
+    {
+      "name": "dashboards",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-lc",
+        "cd /private/tmp/claude-501/-Users-joshuazhuang-Documents-fourmanifold-meta-rl-loop/1846e688-51fc-411b-8c45-0bb41a375372/scratchpad && python3 -m http.server 8642"
+      ],
+      "port": 8642
     }
   ]
 }

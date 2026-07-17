@@ -1,0 +1,11 @@
+{"iteration": 6, "policy": "v5", "ads": [
+  {"id": "it6-story-demo-a", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story with demo — 'Ruth at Harborline Events shows the RSVP form that replaced her spreadsheet chaos, live on screen'; screen-recording, her voice and results, CTA to start."},
+  {"id": "it6-story-demo-b", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow: named customer story with demo — 'Kofi at Brightgate Coaching builds his discovery-call form in 4 minutes and shows bookings landing'; live screen-recording, his words, CTA to start."},
+  {"id": "it6-story-plain-control", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow: named customer story, no demo footage — 'Elena at Windrose Travel tells how Formflow intake forms cut her quote turnaround from days to hours'; her words and results over lifestyle shots, CTA to start."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 25, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 15, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 140, "mode": "fixed"},
+  {"id": "probe-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 10, "mode": "fixed"},
+  {"id": "probe-niche", "objective": "sales", "audience": "interest_niche", "budget": 10, "mode": "fixed"}
+]}

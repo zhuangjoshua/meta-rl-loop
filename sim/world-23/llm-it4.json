@@ -1,0 +1,11 @@
+{"iteration": 4, "policy": "v3", "ads": [
+  {"id": "it4-story-ana", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Ana, clinic manager at a physiotherapy practice, moved patient intake to Formflow; front-desk data entry dropped by half and no-shows fell because forms arrive before the visit. First-person narrative, CTA to try Formflow."},
+  {"id": "it4-story-tom", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Tom, events director at a nonprofit, runs volunteer registration through Formflow; last gala he filled 200 volunteer slots in a week without a single spreadsheet. First-person narrative, CTA to try Formflow."},
+  {"id": "it4-story-rosa", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Rosa, co-founder of an online course studio, replaced her patchwork of survey tools with Formflow for enrollments and feedback; support emails about broken forms went to zero. First-person narrative, CTA to try Formflow."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"}
+]}

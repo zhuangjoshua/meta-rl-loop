@@ -1,0 +1,11 @@
+{"iteration": 2, "policy": "v1", "ads": [
+  {"id": "it2-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Dan, office manager at a dental group, explains how Formflow replaced paper intake forms across 3 locations in a week. Testimonial style, CTA to start."},
+  {"id": "it2-story-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story - Dan, office manager at a dental group, explains how Formflow replaced paper intake forms across 3 locations in a week - intercut with a live screen-recording demo of Formflow converting a doc into a working form. Testimonial + demo, CTA to start."},
+  {"id": "it2-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): adoption-count angle - 4,200 teams build their intake forms with Formflow; join them. Social-proof number front and center, CTA to start."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+  {"id": "clicks-broad", "objective": "clicks", "audience": "broad", "budget": 40, "mode": "fixed"}
+]}

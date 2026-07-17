@@ -1,0 +1,13 @@
+{
+  "iteration": 7,
+  "policy": "v6",
+  "ads": [
+    {"id": "it7-story-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Demo core: live screen recording turning a messy intake doc into a working form in 90 seconds, conditional logic shown. Story wrapper: Maya Chen, agency ops lead, narrates same-day client onboarding. CTA: Start free."},
+    {"id": "it7-count-demo", "proof": "count", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Demo core: screen recording of a form going live and submissions streaming in. Count wrapper: 4,200 teams run intake on Formflow. CTA: Start free."}
+  ],
+  "campaigns": [
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 100, "mode": "fixed"},
+    {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 80, "mode": "fixed"},
+    {"id": "pv-control", "objective": "pageviews", "audience": "broad", "budget": 20, "mode": "fixed"}
+  ]
+}

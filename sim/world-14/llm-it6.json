@@ -1,0 +1,11 @@
+{"iteration": 6, "policy": "v5", "ads": [
+  {"id": "it6-founder-priya-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named founder story — 'Priya Nair, founder of Brightside Studio, stopped chasing client briefs by hand; Formflow collects, routes, and follows up automatically.' Her quote, then a screen-recording demo of a client brief flowing to her project board. CTA: Start free trial."},
+  {"id": "it6-founder-sam-nodemo", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named founder story — 'Sam Okafor, founder of Ledgerline Consulting, ran onboarding from his inbox until Formflow made every new-client form route, remind, and follow up on its own.' His photo, pull-quotes, motion graphics; no screen recording. CTA: Start free trial."},
+  {"id": "it6-smb-rosa-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story, other-SMB vertical — 'Rosa Delgado, owner of Northside Fitness, moved member sign-ups and waivers onto Formflow; reminders and renewals now send themselves.' Her quote, then a screen-recording demo of a member waiver flowing through. CTA: Start free trial."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 20, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 60, "mode": "fixed"}
+]}

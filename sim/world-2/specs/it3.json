@@ -1,0 +1,13 @@
+{"iteration":3,"policy":"v2 (goal-heavy portfolio, calm register)","ads":[
+ {"id":"benefit-calm","proof":"benefit","named_story":false,"demo":false,
+  "prompt":"Calm credible benefit words (incumbent)"},
+ {"id":"outcome-calm","proof":"outcome","named_story":false,"demo":false,
+  "prompt":"Calm, outcome words: CRM auto-sync, no copy-paste (copy axis, retest)"},
+ {"id":"benefit-calm-demo","proof":"benefit","named_story":false,"demo":true,
+  "prompt":"Calm benefit words over 60s screen-demo of form being built (demo axis held per goal-layer rule)"}],
+"campaigns":[
+ {"id":"clicks","objective":"clicks","audience":"broad","budget":20,"mode":"fixed"},
+ {"id":"pageviews","objective":"pageviews","audience":"broad","budget":20,"mode":"fixed"},
+ {"id":"leads","objective":"leads","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"sales-broad","objective":"sales","audience":"broad","budget":60,"mode":"fixed"},
+ {"id":"sales-interest","objective":"sales","audience":"interest_biztools","budget":60,"mode":"fixed"}]}

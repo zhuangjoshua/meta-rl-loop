@@ -1,0 +1,14 @@
+{"iteration":1,"policy":"v0 (seed: original doctrine, taste control)","ads":[
+ {"id":"benefit-selfie","proof":"benefit","named_story":false,"demo":false,
+  "prompt":"UGC selfie, female consultant, energetic: 'Beautiful forms in minutes - no code. Pick a template, drop in your questions, done. Your brand, live today.'"},
+ {"id":"outcome-selfie","proof":"outcome","named_story":false,"demo":false,
+  "prompt":"IDENTICAL production; only words differ: 'Intake auto-syncs to your CRM - no copy-paste. Client fills the form, the record is already there.'"},
+ {"id":"benefit-calm","proof":"benefit","named_story":false,"demo":false,
+  "prompt":"Same words as benefit-selfie; CALM seated delivery. Style experiment."}],
+"campaigns":[
+ {"id":"clicks","objective":"clicks","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"pageviews","objective":"pageviews","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"leads","objective":"leads","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"sales-broad","objective":"sales","audience":"broad","budget":20,"mode":"fixed"},
+ {"id":"sales-interest","objective":"sales","audience":"interest_biztools","budget":20,"mode":"fixed"},
+ {"id":"sales-auto","objective":"sales","audiences":["broad","interest_biztools"],"budget":40,"mode":"auto"}]}

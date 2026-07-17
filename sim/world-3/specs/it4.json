@@ -1,0 +1,14 @@
+{"iteration":4,"policy":"v3 (working-cell expansion)","ads":[
+ {"id":"benefit","proof":"benefit","named_story":false,"demo":false,
+  "prompt":"Lead: benefit words (cumulative signup leader + 3-era buying cell)"},
+ {"id":"outcome","proof":"outcome","named_story":false,"demo":false,
+  "prompt":"Challenger: outcome words"},
+ {"id":"benefit-demo","proof":"benefit","named_story":false,"demo":true,
+  "prompt":"Demo on the working words: benefit script over 60s product screen-demo"}],
+"campaigns":[
+ {"id":"pageviews","objective":"pageviews","audience":"broad","budget":60,"mode":"fixed"},
+ {"id":"pageviews-2","objective":"pageviews","audience":"interest_biztools","budget":30,"mode":"fixed"},
+ {"id":"leads","objective":"leads","audience":"broad","budget":30,"mode":"fixed"},
+ {"id":"sales-broad","objective":"sales","audience":"broad","budget":20,"mode":"fixed"},
+ {"id":"sales-interest","objective":"sales","audience":"interest_biztools","budget":20,"mode":"fixed"},
+ {"id":"sales-auto","objective":"sales","audiences":["broad","interest_biztools"],"budget":40,"mode":"auto"}]}

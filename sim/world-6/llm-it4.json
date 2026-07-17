@@ -1,0 +1,11 @@
+{"iteration": 4, "policy": "v3", "ads": [
+  {"id": "it4-story-plain", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Tomas at Redline Cycles replaced his repair-intake clipboard with a Formflow form; no-shows dropped by half'; his words and results, CTA to start."},
+  {"id": "it4-story-demo-a", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow: named customer story with demo — 'Leah at Summit HR shows how she built her candidate screening form in 6 minutes'; screen-recording of her building and sharing it, her voiceover, CTA to start."},
+  {"id": "it4-story-demo-b", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow: named customer story with demo — 'Omar at Casita Property Group walks through his maintenance-request form catching issues in real time'; live screen-recording, his results, CTA to start."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 115, "mode": "fixed"},
+  {"id": "probe-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 12, "mode": "fixed"},
+  {"id": "probe-niche", "objective": "sales", "audience": "interest_niche", "budget": 13, "mode": "fixed"}
+]}

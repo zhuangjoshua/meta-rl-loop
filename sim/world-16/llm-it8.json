@@ -1,0 +1,11 @@
+{"iteration": 8, "policy": "v7", "ads": [
+  {"id": "benefit-demo-handsfree", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad: benefit-led demo variant. Hook: 'Your intake runs itself.' Screen-recording of a form submission landing and Formflow routing, tagging, and syncing it to the CRM with zero human touches; cursor never moves. End card: Formflow, $29/mo."},
+  {"id": "benefit-demo-hours", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad: benefit-led demo variant. Hook: 'Get your Tuesdays back.' Screen-recording shows a stack of form submissions auto-sorted, tagged, and synced while a timer counts hours saved this week. End card: Formflow, $29/mo."},
+  {"id": "benefit-demo-firstweek", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad: benefit-led demo variant. Hook: 'Set it up before lunch, forget it by Friday.' Screen-recording of a five-minute Formflow setup, then a week of submissions flowing through untouched while the team does real work. End card: Formflow, $29/mo."}
+], "campaigns": [
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 85, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 62, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 23, "mode": "fixed"},
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 15, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 15, "mode": "fixed"}
+]}

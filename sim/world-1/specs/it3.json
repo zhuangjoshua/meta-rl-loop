@@ -1,0 +1,9 @@
+{"iteration":3,"policy":"v2 (4 cells, pooled evidence)",
+ "ads":[
+  {"id":"benefit-selfie","proof":"benefit","named_story":false,"demo":false,
+   "prompt":"UGC selfie, energetic: 'Beautiful forms in minutes - no code.'"},
+  {"id":"outcome-selfie","proof":"outcome","named_story":false,"demo":false,
+   "prompt":"IDENTICAL spec; only words: 'Intake auto-syncs to your CRM - no copy-paste.'"}],
+ "campaigns":[
+  {"id":"leads","objective":"leads","audience":"broad","budget":10.0,"mode":"fixed"},
+  {"id":"sales-broad","objective":"sales","audience":"broad","budget":10.0,"mode":"fixed"}]}

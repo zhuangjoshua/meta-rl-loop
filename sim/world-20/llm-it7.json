@@ -1,0 +1,14 @@
+{
+  "iteration": 7,
+  "policy": "v6",
+  "ads": [
+    {"id": "it7-story-named", "proof": "story", "named_story": true, "demo": false, "prompt": "Named customer story video: 'Maya, ops lead at a 12-person agency' tells how Formflow cut her intake time from 3 hours to 20 minutes a week. Direct-to-camera, closes hard on the offer: 'Get Formflow for $29/mo — start today', buy-now CTA. (Non-demo rationale: standing exception — story remains a settled purchase source.)"},
+    {"id": "it7-count-demo", "proof": "count", "named_story": false, "demo": true, "prompt": "Screen-recording demo opening on '4,800 teams run intake on Formflow', then a form built and auto-routed in 60 seconds. Closes hard on the offer: 'Join them for $29/mo — buy now', direct purchase CTA."},
+    {"id": "it7-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Screen-recording demo framed on the outcome 'you never chase a form response again': a real intake form built, routed, and auto-followed-up in 60 seconds. Closes hard on the offer: 'All of this is $29/mo — buy now', direct purchase CTA."}
+  ],
+  "campaigns": [
+    {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 112, "mode": "fixed"},
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 48, "mode": "fixed"},
+    {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"}
+  ]
+}

@@ -1,0 +1,9 @@
+{"iteration":8,"policy":"v7 (signup-economics operating mode)",
+ "ads":[
+  {"id":"outcome-selfie","proof":"outcome","named_story":false,"demo":false,
+   "prompt":"UGC selfie, energetic: 'Intake auto-syncs to your CRM - no copy-paste.'"},
+  {"id":"outcome-count-support","proof":"count","named_story":false,"demo":false,
+   "prompt":"IDENTICAL spec; words lead with adoption count: '2,300 consultancies run intake on Formflow.'"}],
+ "campaigns":[
+  {"id":"leads-broad","objective":"leads","audience":"broad","budget":14.0,"mode":"fixed"},
+  {"id":"pageviews-broad","objective":"pageviews","audience":"broad","budget":6.0,"mode":"fixed"}]}

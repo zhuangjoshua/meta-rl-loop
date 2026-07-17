@@ -1,0 +1,9 @@
+{"iteration": 7, "policy": "v6", "ads": [
+  {"id": "it7-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): outcome-led house ad - teams cut form-handling time from hours to minutes with Formflow. Clear voiceover, product name on screen, CTA to start."},
+  {"id": "it7-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): rotating challenger, named customer story - Maya R., an ops manager, tells how she replaced her spreadsheet-and-email intake process with Formflow and stopped losing requests. Real name shown; same structure and CTA as the house ad, only the angle differs."}
+], "campaigns": [
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 120, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 27, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 27, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 26, "mode": "fixed"}
+]}

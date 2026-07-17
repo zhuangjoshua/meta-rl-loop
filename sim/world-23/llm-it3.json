@@ -1,0 +1,11 @@
+{"iteration": 3, "policy": "v2", "ads": [
+  {"id": "it3-story-lena", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Lena, HR lead at a 40-person logistics startup, replaced paper onboarding packets with Formflow and cut new-hire paperwork from two days to twenty minutes. First-person narrative, CTA to try Formflow."},
+  {"id": "it3-story-lena-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): the same named customer story with live demo - Lena, HR lead at a 40-person logistics startup, narrates over a screen-recording showing her onboarding packet rebuilt in Formflow in real time, from blank page to published form. Story voiceover over product demo footage, CTA to try Formflow."},
+  {"id": "it3-story-marc", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Marc, who runs a two-person photography studio, uses Formflow for booking and contracts; he stopped losing weekend inquiries and doubled booked shoots in a quarter. First-person narrative, CTA to try Formflow."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"}
+]}

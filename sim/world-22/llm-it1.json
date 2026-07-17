@@ -1,0 +1,12 @@
+{"iteration": 1, "policy": "v0", "ads": [
+  {"id": "it1-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad leading with the core benefit: Formflow turns messy intake forms into clean, automated workflows in minutes. Voiceover walks the benefit, closing CTA to start for $29/mo."},
+  {"id": "it1-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad leading with a concrete outcome: teams cut form-processing time 70% after switching to Formflow. Outcome-first hook, then how it works, CTA to try it."},
+  {"id": "it1-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad telling the named story of Dana Reyes, an ops lead who replaced three tools with Formflow and got her weekends back. Named-customer narrative arc, CTA at the end."}
+],
+"campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 40, "mode": "auto"}
+]}

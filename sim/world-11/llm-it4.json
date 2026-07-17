@@ -1,0 +1,11 @@
+{"iteration": 4, "policy": "v3", "ads": [
+  {"id": "it4-time", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Lived before/after: hours of form admin becomes minutes. Opens on someone buried in intake paperwork, cuts to a live screen-recording demo of Formflow turning a doc into a working form in seconds. Outcome voiceover, CTA to start."},
+  {"id": "it4-loss", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Lived before/after: submissions stop going missing. Opens on a lost-form fire drill — a client's intake vanished — then the after: every submission tracked and answered in Formflow. Outcome-first voiceover, CTA to start."},
+  {"id": "it4-drudge", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Lived before/after: nobody rebuilds the same intake form again. Opens on the fifth rebuild of the same form, then the after: one Formflow form reused everywhere. Outcome-first voiceover, CTA to start."}
+], "campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 55, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 60, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 55, "mode": "fixed"},
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 15, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 15, "mode": "fixed"}
+]}

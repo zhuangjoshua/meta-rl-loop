@@ -1,0 +1,8 @@
+{"iteration":1,"spend":199.95,"revenue":0,"roas":0.0,"dose":6,"thesis":"Demo variant shows the only mid-funnel motion (cheapest signups + 2/3 site demos); favor demo, confound with outcome angle to be settled by a matched pair"}
+{"iteration":2,"spend":199.98,"revenue":29,"roas":0.15,"dose":2,"thesis":"Named-story angle beats outcome in one-difference matched cells (CTR, per-dollar signups, only purchase); lean story"}
+{"iteration":3,"spend":200.01,"revenue":0,"roas":0.0,"dose":4,"thesis":"Story angle superiority replicates vs a second family (6 vs 1 signups matched); promote story to batch default"}
+{"iteration":4,"spend":200.04,"revenue":29,"roas":0.14,"dose":3,"thesis":"Three eras of same-angle ±demo pairs settle as a wash (13v13 signups); demote demo from default to per-ad choice"}
+{"iteration":5,"spend":200.01,"revenue":87,"roas":0.43,"dose":5,"thesis":"Story subject is the big lever: founder/agency automation story beat clinic story 17v4 signups with all 3 purchases; declare vertical axis, go founder-first"}
+{"iteration":6,"spend":199.98,"revenue":0,"roas":0.0,"dose":3,"thesis":"Founder-vertical dominance failed to replicate (rosa matched priya 6v5; era 0.43->0.0); soften founder-first to rotation with plurality"}
+{"iteration":7,"spend":199.98,"revenue":29,"roas":0.15,"dose":4,"thesis":"Fresh matched pair re-confirms founder vertical (10v5 signups + only buy; 2 of 3 matched eras); restore founder default with ledger-owed tests"}
+{"iteration":8,"spend":200.01,"revenue":58,"roas":0.29,"dose":5,"thesis":"Broad cells hold 7 of 8 lifetime purchases (~0.23 vs ~0.04 ROAS/dollar); interest spend passed the 3-expected-purchase bar with 1 buy — reshape portfolio broad-only with periodic interest probes"}

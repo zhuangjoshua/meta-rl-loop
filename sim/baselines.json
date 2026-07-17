@@ -1,0 +1,1002 @@
+{
+ "6": [
+  {
+   "iteration": 1,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "7": [
+  {
+   "iteration": 1,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "8": [
+  {
+   "iteration": 1,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 8,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "9": [
+  {
+   "iteration": 1,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 116,
+   "roas": 0.58
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 58,
+   "roas": 0.29
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 7,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "10": [
+  {
+   "iteration": 1,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 199.98,
+   "revenue": 58,
+   "roas": 0.29
+  },
+  {
+   "iteration": 8,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "11": [
+  {
+   "iteration": 1,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 6,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "12": [
+  {
+   "iteration": 1,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  }
+ ],
+ "13": [
+  {
+   "iteration": 1,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 7,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "14": [
+  {
+   "iteration": 1,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 200.01,
+   "revenue": 87,
+   "roas": 0.43
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "15": [
+  {
+   "iteration": 1,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 8,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "16": [
+  {
+   "iteration": 1,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  },
+  {
+   "iteration": 2,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 87,
+   "roas": 0.44
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  }
+ ],
+ "17": [
+  {
+   "iteration": 1,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  },
+  {
+   "iteration": 7,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  }
+ ],
+ "18": [
+  {
+   "iteration": 1,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  },
+  {
+   "iteration": 5,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 7,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  },
+  {
+   "iteration": 8,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "19": [
+  {
+   "iteration": 1,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  },
+  {
+   "iteration": 6,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "20": [
+  {
+   "iteration": 1,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "21": [
+  {
+   "iteration": 1,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  },
+  {
+   "iteration": 2,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 199.98,
+   "revenue": 58,
+   "roas": 0.29
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "22": [
+  {
+   "iteration": 1,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "23": [
+  {
+   "iteration": 1,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 4,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 200.01,
+   "revenue": 29,
+   "roas": 0.14
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "24": [
+  {
+   "iteration": 1,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 29,
+   "roas": 0.15
+  },
+  {
+   "iteration": 6,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ],
+ "25": [
+  {
+   "iteration": 1,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 2,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 3,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 4,
+   "spend": 200.01,
+   "revenue": 58,
+   "roas": 0.29
+  },
+  {
+   "iteration": 5,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 6,
+   "spend": 200.01,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 7,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  },
+  {
+   "iteration": 8,
+   "spend": 199.98,
+   "revenue": 0,
+   "roas": 0.0
+  }
+ ]
+}

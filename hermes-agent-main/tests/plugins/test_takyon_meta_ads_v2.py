@@ -1152,28 +1152,31 @@ def test_launch_requires_idempotency_key(harness):
 
 
 # --------------------------------------------------------------------------- #
-# Launch: one live campaign at a time (hard rail).
+# Launch: live campaign cap (hard rail; portfolio up to _MAX_LIVE_META_CAMPAIGNS).
 # --------------------------------------------------------------------------- #
-def _launch_image(harness, slug, key):
+def _launch_image(harness, slug, key, **extra):
     harness.write_business_file("clipbook", f"product/static-ads/{slug}/{slug}.png", b"png-bytes")
     return _result(harness.module.handle_business_meta_ad_launch(_launch_args(
         asset_kind="image", slug=slug, idempotency_key=key,
-        asset_path=f"product/static-ads/{slug}/{slug}.png",
+        asset_path=f"product/static-ads/{slug}/{slug}.png", **extra,
     )))
 
 
-def test_launch_blocked_while_another_campaign_holds_live_slot(harness):
+def test_launch_blocked_when_live_campaign_cap_reached(harness):
     harness.set_business_mode("clipbook", "live")
-    first = _launch_image(harness, "demo-meta", "clipbook-meta-demo-v1")
-    assert first["success"] is True  # holds the slot as created_paused
+    cap = harness.module._MAX_LIVE_META_CAMPAIGNS
+    # Portfolio launches up to the cap all succeed and hold slots as created_paused.
+    for n in range(cap):
+        launched = _launch_image(harness, f"demo-meta-{n}", f"clipbook-meta-demo-v{n}")
+        assert launched["success"] is True
 
-    second = _launch_image(harness, "demo-meta-2", "clipbook-meta-demo-v2")
-    assert second["success"] is False
-    assert "one live meta campaign at a time" in second["error"]
-    assert "demo-meta" in second["error"]
-    # Fails closed BEFORE any provider work for the second campaign: only the
-    # first campaign's object creates happened.
-    assert _mcp_tools(harness).count("ads_create_campaign") == 1
+    over_cap = _launch_image(harness, "demo-meta-over", "clipbook-meta-demo-over")
+    assert over_cap["success"] is False
+    assert "live meta campaign cap reached" in over_cap["error"]
+    assert "demo-meta-0" in over_cap["error"]
+    # Fails closed BEFORE any provider work for the over-cap campaign: only the
+    # in-cap campaigns' object creates happened.
+    assert _mcp_tools(harness).count("ads_create_campaign") == cap
 
 
 def test_launch_same_slug_retry_not_blocked_by_own_slot(harness):
@@ -1189,33 +1192,38 @@ def test_launch_same_slug_retry_not_blocked_by_own_slot(harness):
     assert retry.get("idempotent") is True
 
 
-def test_pause_frees_the_live_slot_for_the_next_launch(harness):
+def test_pause_frees_a_live_slot_for_the_next_launch(harness):
     harness.set_business_mode("clipbook", "live")
-    first = _launch_image(harness, "demo-meta", "clipbook-meta-demo-v1")
-    assert first["success"] is True
+    cap = harness.module._MAX_LIVE_META_CAMPAIGNS
+    for n in range(cap):
+        assert _launch_image(harness, f"demo-meta-{n}", f"clipbook-meta-demo-v{n}")["success"] is True
+    assert _launch_image(harness, "demo-meta-over", "clipbook-meta-demo-over")["success"] is False
 
     paused = _result(harness.module.handle_business_meta_ad_control(
-        _control_args(operation="pause", object_id="campaign-1")))
+        _control_args(operation="pause", object_id="campaign-1", slug="demo-meta-0")))
     assert paused["success"] is True
 
-    second = _launch_image(harness, "demo-meta-2", "clipbook-meta-demo-v2")
-    assert second["success"] is True
-    assert _mcp_tools(harness).count("ads_create_campaign") == 2
+    freed = _launch_image(harness, "demo-meta-freed", "clipbook-meta-demo-freed")
+    assert freed["success"] is True
+    assert _mcp_tools(harness).count("ads_create_campaign") == cap + 1
 
 
-def test_activate_blocked_while_another_campaign_holds_live_slot(harness):
+def test_activate_blocked_when_live_campaign_cap_reached(harness):
     harness.set_business_mode("clipbook", "live")
+    cap = harness.module._MAX_LIVE_META_CAMPAIGNS
     assert _launch_image(harness, "demo-meta", "clipbook-meta-demo-v1")["success"] is True
     assert _result(harness.module.handle_business_meta_ad_control(
         _control_args(operation="pause", object_id="campaign-1")))["success"] is True
-    assert _launch_image(harness, "demo-meta-2", "clipbook-meta-demo-v2")["success"] is True
+    # Fill every slot with other campaigns while demo-meta sits paused.
+    for n in range(cap):
+        assert _launch_image(harness, f"demo-meta-fill-{n}", f"clipbook-meta-fill-v{n}")["success"] is True
 
-    # demo-meta-2 now holds the slot; re-activating demo-meta must refuse.
+    # The cap is full; re-activating demo-meta must refuse.
     reactivate = _result(harness.module.handle_business_meta_ad_control(
         _control_args(operation="activate", object_id="campaign-1", slug="demo-meta",
                       idempotency_key="clipbook-meta-control-v2")))
     assert reactivate["success"] is False
-    assert "one live meta campaign at a time" in reactivate["error"]
+    assert "live meta campaign cap reached" in reactivate["error"]
 
 
 # --------------------------------------------------------------------------- #

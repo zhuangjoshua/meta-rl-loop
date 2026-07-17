@@ -1,0 +1,15 @@
+{
+  "iteration": 4,
+  "policy": "v3",
+  "ads": [
+    {"id": "it4-story-demo-a", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Demo core: live screen recording turning a messy intake doc into a working form in 90 seconds. Story wrapper: Diego Ramos, clinic manager, narrates replacing paper intake. CTA: Start free."},
+    {"id": "it4-story-demo-b", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Demo core: screen recording building a client-onboarding form with conditional logic working. Story wrapper: Maya Chen, agency ops lead, narrates same-day client onboarding. CTA: Start free."},
+    {"id": "it4-count-demo", "proof": "count", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Demo core: screen recording of a form going live and submissions streaming in. Count wrapper: 4,200 teams run intake on Formflow. CTA: Start free."}
+  ],
+  "campaigns": [
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 60, "mode": "fixed"},
+    {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 60, "mode": "fixed"},
+    {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 60, "mode": "fixed"},
+    {"id": "leads-control", "objective": "leads", "audience": "broad", "budget": 20, "mode": "fixed"}
+  ]
+}

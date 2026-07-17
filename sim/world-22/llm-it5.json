@@ -1,0 +1,10 @@
+{"iteration": 5, "policy": "v4", "ads": [
+  {"id": "it5-count-teams", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad leading with adoption numbers: 12,400 teams now run their intake on Formflow. Count-first hook, social-proof montage, CTA to join them at $29/mo."},
+  {"id": "it5-count-forms", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad leading with a different count surface: over 3 million forms processed through Formflow last quarter. Ticker-style counter visual, then product glimpse, CTA to start at $29/mo."},
+  {"id": "it5-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad leading with the core benefit: Formflow turns messy intake forms into clean, automated workflows in minutes. Voiceover walks the benefit, closing CTA to start for $29/mo."}
+],
+"campaigns": [
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 67, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 67, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 66, "mode": "fixed"}
+]}

@@ -1,0 +1,12 @@
+{"iteration": 2, "policy": "v1", "ads": [
+  {"id": "it2-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): lead with adoption numbers — 4,200 teams build their intake forms with Formflow. Count-first social proof, quick montage of forms being created, CTA to start."},
+  {"id": "it2-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): outcome-first opening — cut form-building from hours to minutes — then a screen-recording demo of Formflow turning a doc into a live form, submissions arriving in real time. CTA to start."},
+  {"id": "it2-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — Dan, operations manager at a home-services firm, explains how Formflow replaced his paper intake sheets and stopped double data entry. First-person named testimonial, CTA to start."}
+],
+"campaigns": [
+  {"id": "clicks-broad", "objective": "clicks", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 50, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 40, "mode": "auto"}
+]}

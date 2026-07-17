@@ -1,0 +1,11 @@
+{"iteration": 6, "policy": "v5", "ads": [
+  {"id": "it6-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Story-led, named customer: 'Priya Nair, program manager at Fernwell Labs, standardized every request queue on Formflow and cleared a two-week backlog in days.' Customer-voice testimonial, office footage, CTA: Start free."},
+  {"id": "it6-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Count-led: 'Over 12,000 teams already ship their forms with Formflow.' Adoption ticker visual, logos-style social proof montage, CTA: Join them — start free."},
+  {"id": "it6-outcome", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Outcome-led: 'Teams using Formflow cut form build time from days to 20 minutes and doubled completion rates.' Before/after framing, results on screen, CTA: Start free."}
+], "campaigns": [
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 60, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "exp-sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"}
+]}

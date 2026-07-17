@@ -1,0 +1,16 @@
+{
+  "iteration": 3,
+  "policy": "v2",
+  "ads": [
+    {"id": "it3-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): benefit lead — build intake forms in minutes, not hours. Clean UI shots, benefit-first voiceover, CTA to start. No screen-recording demo footage."},
+    {"id": "it3-benefit-demo", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): identical benefit lead — build intake forms in minutes, not hours — but shown over a live screen-recording demo of building and publishing a form end to end. CTA to start."},
+    {"id": "it3-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Lena K., agency founder' tells how client intake stopped leaking after moving to Formflow. Talking head with product cutaways, CTA to start."}
+  ],
+  "campaigns": [
+    {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 25, "mode": "fixed"},
+    {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 35, "mode": "fixed"},
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 45, "mode": "fixed"},
+    {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+    {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 55, "mode": "fixed"}
+  ]
+}

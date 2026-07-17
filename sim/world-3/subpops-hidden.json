@@ -1,0 +1,439 @@
+{
+ "world": 3,
+ "seed": 6182,
+ "landing_style": "benefit",
+ "price_usd": 29,
+ "offer": "card_required_trial",
+ "archetypes": [
+  {
+   "name": "peer_proof",
+   "weight": 0.1328,
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.298,
+     "outcome": 0.772,
+     "count": 0.355,
+     "story": 1.407
+    },
+    "demo_gate": 0.68,
+    "trial_gate": 0.622,
+    "base": 0.824,
+    "mismatch_bounce": 0.342,
+    "clickiness": 0.608,
+    "buyiness": 0.916
+   },
+   "subs": [
+    {
+     "name": "peer_proof_s1",
+     "frac": 0.663,
+     "delta_base": 0.08,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.07,
+      "interest_niche": 0.65
+     }
+    },
+    {
+     "name": "peer_proof_s2",
+     "frac": 0.337,
+     "delta_base": 0.18,
+     "reach": {
+      "broad": 0.5,
+      "interest_biztools": 0.11,
+      "interest_niche": 0.42
+     }
+    }
+   ]
+  },
+  {
+   "name": "skeptic",
+   "weight": 0.0397,
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.076,
+     "outcome": 0.549,
+     "count": 0.241,
+     "story": 0.614
+    },
+    "demo_gate": 0.118,
+    "trial_gate": 0.916,
+    "base": 0.643,
+    "mismatch_bounce": 0.468,
+    "clickiness": 0.296,
+    "buyiness": 0.93
+   },
+   "subs": [
+    {
+     "name": "skeptic_s1",
+     "frac": 0.45,
+     "delta_base": 0.09,
+     "reach": {
+      "broad": 0.53,
+      "interest_biztools": 0.62,
+      "interest_niche": 0.62
+     }
+    },
+    {
+     "name": "skeptic_s2",
+     "frac": 0.55,
+     "delta_base": 0.17,
+     "reach": {
+      "broad": 0.96,
+      "interest_biztools": 0.44,
+      "interest_niche": 0.89
+     }
+    }
+   ]
+  },
+  {
+   "name": "herd",
+   "weight": 0.0912,
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.357,
+     "outcome": 0.422,
+     "count": 1.506,
+     "story": 0.479
+    },
+    "demo_gate": 0.677,
+    "trial_gate": 0.656,
+    "base": 0.603,
+    "mismatch_bounce": 0.189,
+    "clickiness": 0.581,
+    "buyiness": 0.511
+   },
+   "subs": [
+    {
+     "name": "herd_s1",
+     "frac": 0.495,
+     "delta_base": 0.0,
+     "reach": {
+      "broad": 0.54,
+      "interest_biztools": 0.52,
+      "interest_niche": 0.42
+     }
+    },
+    {
+     "name": "herd_s2",
+     "frac": 0.505,
+     "delta_base": 0.09,
+     "reach": {
+      "broad": 0.83,
+      "interest_biztools": 0.56,
+      "interest_niche": 0.77
+     }
+    }
+   ]
+  },
+  {
+   "name": "bargain",
+   "weight": 0.0816,
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.523,
+     "outcome": 0.586,
+     "count": 0.529,
+     "story": 0.767
+    },
+    "demo_gate": 0.63,
+    "trial_gate": 0.227,
+    "base": 0.863,
+    "mismatch_bounce": 0.349,
+    "clickiness": 0.638,
+    "buyiness": 0.492
+   },
+   "subs": [
+    {
+     "name": "bargain_s1",
+     "frac": 0.756,
+     "delta_base": 0.08,
+     "reach": {
+      "broad": 0.88,
+      "interest_biztools": 0.13,
+      "interest_niche": 0.06
+     }
+    },
+    {
+     "name": "bargain_s2",
+     "frac": 0.043,
+     "delta_base": -0.06,
+     "reach": {
+      "broad": 0.49,
+      "interest_biztools": 0.98,
+      "interest_niche": 0.96
+     }
+    },
+    {
+     "name": "bargain_s3",
+     "frac": 0.201,
+     "delta_base": 0.1,
+     "reach": {
+      "broad": 0.67,
+      "interest_biztools": 0.05,
+      "interest_niche": 0.33
+     }
+    }
+   ]
+  },
+  {
+   "name": "novelty",
+   "weight": 0.2109,
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.841,
+     "outcome": 0.752,
+     "count": 0.398,
+     "story": 0.616
+    },
+    "demo_gate": 1.092,
+    "trial_gate": 0.671,
+    "base": 1.5,
+    "mismatch_bounce": 0.121,
+    "clickiness": 1.023,
+    "buyiness": 0.235
+   },
+   "subs": [
+    {
+     "name": "novelty_s1",
+     "frac": 0.308,
+     "delta_base": -0.05,
+     "reach": {
+      "broad": 0.72,
+      "interest_biztools": 0.33,
+      "interest_niche": 0.63
+     }
+    },
+    {
+     "name": "novelty_s2",
+     "frac": 0.494,
+     "delta_base": 0.12,
+     "reach": {
+      "broad": 0.78,
+      "interest_biztools": 0.38,
+      "interest_niche": 0.82
+     }
+    },
+    {
+     "name": "novelty_s3",
+     "frac": 0.198,
+     "delta_base": -0.01,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.06,
+      "interest_niche": 0.62
+     }
+    }
+   ]
+  },
+  {
+   "name": "authority",
+   "weight": 0.0696,
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.215,
+     "outcome": 0.684,
+     "count": 0.683,
+     "story": 0.853
+    },
+    "demo_gate": 0.645,
+    "trial_gate": 0.702,
+    "base": 0.788,
+    "mismatch_bounce": 0.345,
+    "clickiness": 0.446,
+    "buyiness": 0.517
+   },
+   "subs": [
+    {
+     "name": "authority_s1",
+     "frac": 0.43,
+     "delta_base": 0.2,
+     "reach": {
+      "broad": 0.72,
+      "interest_biztools": 0.06,
+      "interest_niche": 0.45
+     }
+    },
+    {
+     "name": "authority_s2",
+     "frac": 0.2,
+     "delta_base": -0.02,
+     "reach": {
+      "broad": 0.52,
+      "interest_biztools": 0.22,
+      "interest_niche": 0.9
+     }
+    },
+    {
+     "name": "authority_s3",
+     "frac": 0.37,
+     "delta_base": 0.15,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.16,
+      "interest_niche": 0.22
+     }
+    }
+   ]
+  },
+  {
+   "name": "committee",
+   "weight": 0.0779,
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.154,
+     "outcome": 0.739,
+     "count": 0.655,
+     "story": 0.689
+    },
+    "demo_gate": 0.421,
+    "trial_gate": 1.082,
+    "base": 0.333,
+    "mismatch_bounce": 0.416,
+    "clickiness": 0.227,
+    "buyiness": 0.541
+   },
+   "subs": [
+    {
+     "name": "committee_s1",
+     "frac": 0.221,
+     "delta_base": -0.08,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.9,
+      "interest_niche": 0.4
+     }
+    },
+    {
+     "name": "committee_s2",
+     "frac": 0.779,
+     "delta_base": -0.09,
+     "reach": {
+      "broad": 0.99,
+      "interest_biztools": 0.69,
+      "interest_niche": 0.75
+     }
+    }
+   ]
+  },
+  {
+   "name": "scroller",
+   "weight": 0.0612,
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.648,
+     "outcome": 0.422,
+     "count": 0.485,
+     "story": 0.679
+    },
+    "demo_gate": 0.772,
+    "trial_gate": 0.398,
+    "base": 0.55,
+    "mismatch_bounce": 0.251,
+    "clickiness": 1.222,
+    "buyiness": 0.086
+   },
+   "subs": [
+    {
+     "name": "scroller_s1",
+     "frac": 0.646,
+     "delta_base": -0.01,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.99,
+      "interest_niche": 0.17
+     }
+    },
+    {
+     "name": "scroller_s2",
+     "frac": 0.354,
+     "delta_base": 0.05,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.91,
+      "interest_niche": 0.56
+     }
+    }
+   ]
+  },
+  {
+   "name": "pragmatist",
+   "weight": 0.0121,
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.333,
+     "outcome": 1.517,
+     "count": 0.46,
+     "story": 0.558
+    },
+    "demo_gate": 0.496,
+    "trial_gate": 0.747,
+    "base": 0.697,
+    "mismatch_bounce": 0.23,
+    "clickiness": 0.358,
+    "buyiness": 0.963
+   },
+   "subs": [
+    {
+     "name": "pragmatist_s1",
+     "frac": 0.207,
+     "delta_base": -0.0,
+     "reach": {
+      "broad": 1.0,
+      "interest_biztools": 0.19,
+      "interest_niche": 0.09
+     }
+    },
+    {
+     "name": "pragmatist_s2",
+     "frac": 0.793,
+     "delta_base": -0.04,
+     "reach": {
+      "broad": 0.99,
+      "interest_biztools": 0.68,
+      "interest_niche": 0.2
+     }
+    }
+   ]
+  },
+  {
+   "name": "impulse",
+   "weight": 0.2231,
+   "dims": {
+    "proof_pref": {
+     "benefit": 1.242,
+     "outcome": 0.537,
+     "count": 0.423,
+     "story": 0.895
+    },
+    "demo_gate": 0.999,
+    "trial_gate": 0.547,
+    "base": 0.908,
+    "mismatch_bounce": 0.074,
+    "clickiness": 1.2,
+    "buyiness": 0.42
+   },
+   "subs": [
+    {
+     "name": "impulse_s1",
+     "frac": 0.836,
+     "delta_base": 0.17,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.42,
+      "interest_niche": 0.49
+     }
+    },
+    {
+     "name": "impulse_s2",
+     "frac": 0.164,
+     "delta_base": -0.08,
+     "reach": {
+      "broad": 0.82,
+      "interest_biztools": 0.05,
+      "interest_niche": 0.7
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,11 @@
+{"iteration": 2, "policy": "v1", "ads": [
+  {"id": "it2-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): benefit-led control - stop rebuilding the same intake forms; Formflow turns any form into a reusable automated workflow in minutes. Clear voiceover, product name on screen, CTA to start."},
+  {"id": "it2-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): count-led challenger - 12,000 teams route their intake through Formflow. Adoption numbers on screen, same structure and CTA as the benefit control, only the leading angle differs."},
+  {"id": "it2-benefit-demo", "proof": "benefit", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo): same benefit-led script as the control, but shown as a screen-recording demo of building a form and watching submissions auto-route. Only the demo treatment differs from the control."}
+], "campaigns": [
+  {"id": "clicks-broad", "objective": "clicks", "audience": "broad", "budget": 35, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 45, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 40, "mode": "auto"}
+]}

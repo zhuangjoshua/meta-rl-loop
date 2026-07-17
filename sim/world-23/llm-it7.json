@@ -1,0 +1,11 @@
+{"iteration": 7, "policy": "v6", "ads": [
+  {"id": "it7-story-buy-sam", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow, purchase-intent framing: named customer story - Sam, managing partner at a small law office, put client intake on Formflow and billed 20 percent more hours in month one. Price-forward close: Formflow is $29/mo flat, no per-seat fees - buy it today and take intake off your plate this week. Buy-now CTA."},
+  {"id": "it7-story-try-ines", "proof": "story", "named_story": true, "demo": false, "prompt": "Trial-intent control. Video ad for Formflow ($29/mo): named customer story - Ines, studio manager at a dance academy, runs registrations and recital permissions through Formflow; season signup week went from chaos to calm. First-person narrative, CTA to try Formflow."},
+  {"id": "it7-story-buy-ray", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow, purchase-intent framing: named customer story - Ray, service manager at an HVAC company, routes every job request through Formflow and stopped double-booking crews. Price-forward close: $29/mo covers the whole team - buy Formflow now and your dispatch board is clean by Friday. Buy-now CTA."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 5, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 5, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 63, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 64, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 63, "mode": "fixed"}
+]}

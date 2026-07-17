@@ -1,0 +1,13 @@
+{"iteration":5,"policy":"v4 (niche confirmation)","ads":[
+ {"id":"outcome-calm","proof":"outcome","named_story":false,"demo":false,
+  "prompt":"Calm outcome words (promoted lead: 4/4 directional + the purchase)"},
+ {"id":"benefit-calm","proof":"benefit","named_story":false,"demo":false,
+  "prompt":"Calm benefit words (former lead, now challenger)"},
+ {"id":"outcome-calm-demo","proof":"outcome","named_story":false,"demo":true,
+  "prompt":"Outcome words over 60s product screen-demo (demo axis moved onto the lead words)"}],
+"campaigns":[
+ {"id":"pageviews","objective":"pageviews","audience":"broad","budget":20,"mode":"fixed"},
+ {"id":"leads","objective":"leads","audience":"broad","budget":40,"mode":"fixed"},
+ {"id":"sales-broad","objective":"sales","audience":"broad","budget":30,"mode":"fixed"},
+ {"id":"sales-interest","objective":"sales","audience":"interest_biztools","budget":30,"mode":"fixed"},
+ {"id":"sales-niche","objective":"sales","audience":"interest_niche","budget":80,"mode":"fixed"}]}

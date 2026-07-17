@@ -1,0 +1,23 @@
+{
+ "audiences": {
+  "broad": "~180M, all adults US",
+  "interest_biztools": "~2.1M, business-tools interest",
+  "interest_niche": "~600k, niche professional communities"
+ },
+ "cpm_usd": {
+  "broad": 8,
+  "interest_biztools": 14,
+  "interest_niche": 12
+ },
+ "objectives": [
+  "clicks",
+  "pageviews",
+  "leads",
+  "sales"
+ ],
+ "budget_modes": [
+  "fixed",
+  "auto"
+ ],
+ "note": "Landing page leads with generic-benefit copy; $29/mo, card-required trial."
+}

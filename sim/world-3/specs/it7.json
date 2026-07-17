@@ -1,0 +1,13 @@
+{"iteration":7,"policy":"v6 (demo-variant lead)","ads":[
+ {"id":"benefit-demo","proof":"benefit","named_story":false,"demo":true,
+  "prompt":"Lead: benefit script over product screen-demo"},
+ {"id":"benefit","proof":"benefit","named_story":false,"demo":false,
+  "prompt":"No-demo control (same words)"},
+ {"id":"benefit-demo-prooffirst","proof":"benefit","named_story":false,"demo":true,
+  "prompt":"Production variant: same demo, re-cut to open ON the product working (first 3s)"}],
+"campaigns":[
+ {"id":"pageviews","objective":"pageviews","audience":"broad","budget":80,"mode":"fixed"},
+ {"id":"pageviews-2","objective":"pageviews","audience":"interest_biztools","budget":40,"mode":"fixed"},
+ {"id":"leads","objective":"leads","audience":"broad","budget":20,"mode":"fixed"},
+ {"id":"sales-broad","objective":"sales","audience":"broad","budget":30,"mode":"fixed"},
+ {"id":"sales-interest","objective":"sales","audience":"interest_biztools","budget":30,"mode":"fixed"}]}

@@ -1,0 +1,16 @@
+{
+  "iteration": 7,
+  "policy": "v6",
+  "ads": [
+    {"id": "it7-story-a", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Ruth A., dental practice manager' on how new-patient forms stopped getting lost between front desk and clinicians once they moved to Formflow. Talking head with product cutaways, CTA to start."},
+    {"id": "it7-story-b", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story — 'Jonah B., IT helpdesk lead' on cutting ticket triage in half by routing requests through one Formflow intake. Screen-adjacent b-roll with captions, CTA to start."},
+    {"id": "it7-outcome-decision", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo): outcome decision test — 'zero dropped requests in 30 days' — calendar wiping clean day by day as requests route themselves, CTA to start."}
+  ],
+  "campaigns": [
+    {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 10, "mode": "fixed"},
+    {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 65, "mode": "fixed"},
+    {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+    {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 55, "mode": "fixed"}
+  ]
+}

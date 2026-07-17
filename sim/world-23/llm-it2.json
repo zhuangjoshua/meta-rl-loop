@@ -1,0 +1,11 @@
+{"iteration": 2, "policy": "v1", "ads": [
+  {"id": "it2-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo): named customer story - Dario, founder of a 6-person bookkeeping firm, moved client onboarding to Formflow and stopped chasing PDFs; new clients now onboard in one sitting. First-person narrative, CTA to try Formflow."},
+  {"id": "it2-story-demo", "proof": "story", "named_story": true, "demo": true, "prompt": "Video ad for Formflow ($29/mo): named customer story with live demo - Priya, operations manager at a tutoring company, narrates while a screen-recording shows her rebuilding their enrollment form in Formflow in 90 seconds. Story voiceover over real product demo footage, CTA to try Formflow."},
+  {"id": "it2-count", "proof": "count", "named_story": false, "demo": false, "prompt": "Coverage-test slot. Video ad for Formflow ($29/mo): lead with adoption numbers - 12,000 teams build their forms on Formflow, 1.4 million responses collected last month. Count-first social proof framing, CTA to join them."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 40, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 40, "mode": "auto"}
+]}

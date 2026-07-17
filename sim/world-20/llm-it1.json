@@ -1,0 +1,16 @@
+{
+  "iteration": 1,
+  "policy": "v0",
+  "ads": [
+    {"id": "it1-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad leading with the core benefit: Formflow turns messy intake forms into clean, automated workflows in minutes. Voiceover over motion graphics, ends with $29/mo offer and CTA."},
+    {"id": "it1-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Screen-recording demo video: watch a real form get built and auto-routed in 60 seconds, framed around the outcome 'you never chase a form response again'. Ends with $29/mo offer and CTA."},
+    {"id": "it1-story-named", "proof": "story", "named_story": true, "demo": false, "prompt": "Named customer story video: 'Maya, ops lead at a 12-person agency' tells how Formflow cut her intake time from 3 hours to 20 minutes a week. Direct-to-camera style, $29/mo offer, CTA."}
+  ],
+  "campaigns": [
+    {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 40, "mode": "fixed"},
+    {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 40, "mode": "fixed"},
+    {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 40, "mode": "fixed"},
+    {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 40, "mode": "fixed"},
+    {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 40, "mode": "auto"}
+  ]
+}

@@ -1,0 +1,11 @@
+{"iteration": 1, "policy": "v0", "ads": [
+  {"id": "it1-benefit", "proof": "benefit", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Lead with the core benefit: stop rebuilding the same forms — Formflow turns any workflow into a reusable form in minutes. Clean UI shots, benefit-first voiceover, CTA: start your trial."},
+  {"id": "it1-outcome-demo", "proof": "outcome", "named_story": false, "demo": true, "prompt": "Video ad for Formflow ($29/mo). Outcome-first: teams cut form-admin time from hours to minutes. Screen-recording demo of building and publishing a live form end-to-end in 60 seconds. CTA: start your trial."},
+  {"id": "it1-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo). Named customer story: Maya R., ops lead at a 12-person agency, explains how she replaced her intake spreadsheet chaos with Formflow and got evenings back. Direct-to-camera testimonial style. CTA: start your trial."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 30, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 50, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 50, "mode": "fixed"},
+  {"id": "sales-auto", "objective": "sales", "audiences": ["broad", "interest_biztools"], "budget": 40, "mode": "auto"}
+]}

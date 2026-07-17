@@ -1,0 +1,11 @@
+{"iteration": 6, "policy": "v5", "ads": [
+  {"id": "it6-outcome-q", "proof": "outcome", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo, card-required trial — stated plainly on screen and in voiceover). Outcome-first: teams cut form-admin time from hours to minutes. Words-led motion graphics, no screen recording. CTA: start your $29/mo trial."},
+  {"id": "it6-story-q", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad for Formflow ($29/mo, card-required trial — stated plainly on screen and in voiceover). Named customer story: Maya R., ops lead at a 12-person agency, direct-to-camera testimonial about replacing intake spreadsheet chaos with Formflow. Words-led, no screen recording. CTA: start your $29/mo trial."},
+  {"id": "it6-count-q", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad for Formflow ($29/mo, card-required trial — stated plainly on screen and in voiceover). Count-led: 4,800 teams already build their forms in Formflow. Words-led motion graphics with adoption-number overlays, no screen recording. CTA: start your $29/mo trial."}
+], "campaigns": [
+  {"id": "pv-broad", "objective": "pageviews", "audience": "broad", "budget": 20, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 20, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 55, "mode": "fixed"},
+  {"id": "sales-biztools", "objective": "sales", "audience": "interest_biztools", "budget": 60, "mode": "fixed"},
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 45, "mode": "fixed"}
+]}

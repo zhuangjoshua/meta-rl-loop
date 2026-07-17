@@ -1,0 +1,10 @@
+{"iteration": 7, "policy": "v6", "ads": [
+  {"id": "it7-count-reviews", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad leading with a count surface: 4,800 five-star reviews from ops teams using Formflow. Review-wall visual counting up, product glimpse, CTA to start at $29/mo."},
+  {"id": "it7-count-hours", "proof": "count", "named_story": false, "demo": false, "prompt": "Video ad leading with a fresh count surface: 1.2 million hours of manual form work eliminated by Formflow customers. Rolling counter visual, quick product beat, CTA to start at $29/mo."},
+  {"id": "it7-story", "proof": "story", "named_story": true, "demo": false, "prompt": "Video ad telling the named story of Dana Reyes, an ops lead who replaced three tools with Formflow and got her weekends back. Named-customer narrative arc, CTA at the end."}
+],
+"campaigns": [
+  {"id": "sales-niche", "objective": "sales", "audience": "interest_niche", "budget": 90, "mode": "fixed"},
+  {"id": "sales-broad", "objective": "sales", "audience": "broad", "budget": 44, "mode": "fixed"},
+  {"id": "leads-broad", "objective": "leads", "audience": "broad", "budget": 66, "mode": "fixed"}
+]}
