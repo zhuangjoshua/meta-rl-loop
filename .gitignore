@@ -8,6 +8,9 @@
 
 # OS/editor noise.
 .DS_Store
+sim/cache/
+sim/runs/
+sim/__pycache__/
 **/.DS_Store
 .vscode/
 .idea/

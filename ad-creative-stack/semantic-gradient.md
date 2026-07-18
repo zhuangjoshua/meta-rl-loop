@@ -5,7 +5,9 @@ the current policy and produce K updated policies (K = 6 unless the operator say
 otherwise). You do not select among them, launch ads, or judge campaigns — you only
 generate the revision ladder. The noise schedule (a separate step) chooses which
 rung, if any, is adopted; the incumbent policy always remains available as "no
-change."
+change." Every ladder expresses one falsifiable organizing thesis. That thesis may
+have coordinated consequences across the entire policy when one mechanism supports
+them all.
 
 ## Inputs
 
@@ -72,10 +74,13 @@ weeks and are confounded by market drift, seasonality, and fatigue.
 
 ## Stage 1 — Diagnosis
 
-State exactly ONE falsifiable thesis: the single change of direction this evidence
-best supports in service of the goal.
+State exactly ONE falsifiable organizing thesis: the single explanatory direction
+this evidence best supports in service of the goal.
 
-- One conclusion, not a list of ideas. If you find yourself writing "and also," stop.
+- One mechanism, not a list of ideas. A thesis may change creative, campaigns,
+  judgment, and experimentation together when each change is a direct consequence
+  of that same mechanism. If an edit needs a second explanation, it is a second
+  thesis and is forbidden.
 - Weigh evidence by quantity and spend: a pattern repeated across many funded ads
   justifies confidence; a single lucky read on five dollars of spend does not.
 - **Readable-evidence floor (the 20-world audit lesson).** A cell's receipts
@@ -114,24 +119,27 @@ best supports in service of the goal.
   (same objective, same audience); a funnel shape computed over your whole
   portfolio reflects your own mix, never the market.
 
-The thesis may come from any of THREE classes, and its class caps how boldly it
-may be rendered:
+Evidence types are NOT mutually exclusive thesis classes and do not cap the ladder.
+For the one thesis, report all three evidence bases independently:
 
-- **Pair thesis** (strongest tier): built from one-difference comparisons. May
-  claim causation. Any dose is available to it.
-- **Pattern thesis** (middle tier): built from portfolio-wide or cross-era
-  regularities no single pair isolates (e.g. "every ad in every era converts
-  sign-ups cheaply but purchases rarely — the bottleneck is after the click").
-  May claim direction, not causation; middle doses at most; and every pattern
-  thesis MUST name the experiment or instrumentation that would confirm it.
-- **Design thesis** (structural): the target is the experiment itself — what
-  the batches vary, which campaigns exist, how budget is shaped (e.g. "the
-  Clicks campaign has never produced a goal event in any era; restructure the
-  portfolio"). This is how the loop expands or reallocates its own learnable
-  surface. Requires replication across eras, not one batch.
+- **Matched-pair evidence:** one-difference comparisons. This is the only basis
+  that may independently support a causal claim.
+- **Replicated-pattern evidence:** portfolio-wide or cross-era regularities.
+  These support direction, not causation, and must name the future matched test or
+  instrumentation that would confirm the proposed mechanism.
+- **Design evidence:** repeated evidence about what the experiment varies, which
+  campaigns exist, how budget is shaped, or whether measurement is readable.
+  Structural conclusions require replication across eras, not one batch.
 
-Grade all candidate findings across all three classes in one tournament; the
-strongest graded finding wins regardless of class.
+A thesis may combine any or all of these evidence bases when they support the same
+falsifiable mechanism. Prefer the broadest thesis that explains multiple independent
+observations without joining unrelated conclusions. Report two calibrated scalars:
+
+- **confidence** from 0 to 1: how strongly the available evidence supports the
+  stated direction after accounting for spend, replication, confounding, and
+  contradiction;
+- **breadth** from 0 to 1: how much of the policy is genuinely implicated by the
+  thesis, not how much the writer would like to rewrite.
 
 **Coverage rule (the world-3 lesson).** For every axis the policy owns (copy
 family, creative format, objective, audience, budget mode), keep a coverage
@@ -192,12 +200,14 @@ Write K complete revised policy documents. Every rung applies ONLY the thesis �
 rung may introduce a second direction, a new theory, or an unrelated cleanup. The
 rungs differ in dose, not in direction:
 
-- **Rung 1** — the minimal change the thesis justifies: a sentence added or a
-  number nudged; most future decisions unchanged.
-- **Middle rungs** — each goes further than the last: the thesis moves from a lean,
-  to a default, to a rule; a growing share of future briefs and verdicts change.
-- **Rung K** — the policy's core is rewritten around the thesis; almost every
-  future decision changes.
+- **Rung 1** — add one lean or preference; most future decisions stay unchanged.
+- **Rung 2** — rewrite one operational rule around the thesis.
+- **Rung 3** — rewrite one complete policy section around the thesis.
+- **Rung 4** — apply the thesis across every directly implicated section.
+- **Rung 5** — reorganize defaults, portfolio, experimentation, and judgment
+  around the thesis wherever it has a real consequence.
+- **Rung K** — cleanly rewrite the entire policy around the thesis, preserving
+  only the goal, verified facts, protected rails, and evidence discipline.
 
 Each rung is an **independent rendering of the same thesis at its own
 magnitude** — the thesis applied at dose i, standing alone. Do not build rungs
@@ -209,6 +219,15 @@ only the one thesis and a bolder rung would change strictly more future
 decisions than a smaller one.
 
 Rules for every rung:
+
+- Stay inside the caller's executable action contract. A policy may reorganize
+  supported controls but must not invent additional ads, campaign fields,
+  delivery machinery, instrumentation, or enforcement hooks that the next
+  action cannot express.
+
+- Include a change map for creative, campaigns, judgment, and experimentation.
+  For each surface, state the direct implication of the one thesis or state that
+  the surface remains unchanged because the thesis has no implication there.
 
 - **Short policy (fits comfortably in full):** write each rung as a complete,
   self-contained document — a reader needs no other rung and no prior version to
@@ -233,15 +252,19 @@ Rules for every rung:
   owns the decision your thesis is about, whatever it is called.
 - The one non-negotiable is the gradient's own honesty, not any policy text:
   never fabricate evidence, never weaken the truthfulness of records, and never
-  render a dose bolder than the thesis's class allows.
+  use a broad rewrite to smuggle in an edit that the one thesis does not imply.
 
 ## Output
 
 Produce, in order, nothing else:
 
 1. `THESIS:` one sentence.
-2. The K policy documents, each under a heading `## Rung 1` … `## Rung K`,
-   smallest change first, boldest last.
+2. `MECHANISM:` one sentence.
+3. `EVIDENCE BASIS:` matched-pair, replicated-pattern, and design evidence.
+4. `CONFIDENCE:` and `BREADTH:`, each from 0 to 1.
+5. `FALSIFIER:` one future result that would reject the thesis.
+6. The K policy documents, each with its change map under a heading
+   `## Rung 1` … `## Rung K`, smallest change first, boldest last.
 
 Each rung should note its parent (the incumbent's version) so lineage survives.
 Selection, adoption, versioning, and hashing happen downstream — your job ends at

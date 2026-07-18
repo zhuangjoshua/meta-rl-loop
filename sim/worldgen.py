@@ -28,6 +28,61 @@ TEMPLATES = {
 }
 AUDIENCES = ["broad", "interest_biztools", "interest_niche"]
 
+# These descriptions are hidden from the policy learner and shown only to the Tier-B
+# judge.  They encode decision behavior rather than demographic stereotypes, so the
+# same world generator remains useful across products.
+PERSONA_PROFILES = {
+ "peer_proof": dict(
+   decision_style="Looks for a relatable peer who had the same problem and can describe the before/after in concrete terms.",
+   trust_signals=["named customer", "specific workflow", "credible limitation or tradeoff"],
+   rejection_triggers=["anonymous testimonial", "generic superlative", "results without context"]),
+ "skeptic": dict(
+   decision_style="Assumes marketing claims are exaggerated and wants to inspect the mechanism before believing the outcome.",
+   trust_signals=["visible product demonstration", "precise mechanism", "falsifiable claim"],
+   rejection_triggers=["unsupported promise", "vague transformation", "manufactured urgency"]),
+ "herd": dict(
+   decision_style="Uses broad adoption and category momentum as evidence that a choice is safe.",
+   trust_signals=["credible adoption count", "recognizable community", "clear category norm"],
+   rejection_triggers=["isolated anecdote", "uncited number", "fringe positioning"]),
+ "bargain": dict(
+   decision_style="Compares the immediate cost with a concrete near-term saving and avoids uncertain commitments.",
+   trust_signals=["specific savings", "transparent price", "easy exit"],
+   rejection_triggers=["hidden commitment", "premium framing", "unclear time to value"]),
+ "novelty": dict(
+   decision_style="Explores new tools quickly when the experience looks distinctive and immediately useful.",
+   trust_signals=["fresh mechanism", "fast visual payoff", "clear first action"],
+   rejection_triggers=["conventional corporate copy", "long setup", "feature inventory"]),
+ "authority": dict(
+   decision_style="Defers to credible expertise, standards, and evidence that the method is professionally accepted.",
+   trust_signals=["relevant expert", "methodology", "verifiable credentials"],
+   rejection_triggers=["casual unsupported advice", "irrelevant celebrity", "anti-expert framing"]),
+ "committee": dict(
+   decision_style="Needs a choice that can be explained to coworkers and defended against operational and financial objections.",
+   trust_signals=["shared workflow", "risk controls", "clear implementation path"],
+   rejection_triggers=["single-user framing", "missing security or process detail", "impulse CTA"]),
+ "scroller": dict(
+   decision_style="Offers very little attention and responds only when the first moment is concrete, legible, and personally relevant.",
+   trust_signals=["immediate visual clarity", "one simple benefit", "low-friction next step"],
+   rejection_triggers=["slow opening", "dense explanation", "multiple competing claims"]),
+ "pragmatist": dict(
+   decision_style="Wants a dependable improvement to an existing workflow and judges the product by operational fit.",
+   trust_signals=["specific outcome", "real workflow", "implementation detail"],
+   rejection_triggers=["aspirational lifestyle copy", "unclear integration", "novelty without utility"]),
+ "impulse": dict(
+   decision_style="Acts on an immediately vivid benefit when the next step feels easy and the downside feels bounded.",
+   trust_signals=["fast payoff", "simple CTA", "low perceived risk"],
+   rejection_triggers=["delayed value", "complex comparison", "high-friction signup"]),
+}
+
+DECISION_CONTEXTS = [
+ "evaluating alone during a short break and unwilling to research for long",
+ "actively comparing two alternatives after a painful recent workflow failure",
+ "collecting evidence for a recommendation to a small team",
+ "curious but not yet convinced the problem deserves a paid tool",
+ "under deadline pressure and willing to switch only if setup looks immediate",
+ "returning after seeing similar claims several times without acting",
+]
+
 def gen(world, seed):
     rng = random.Random(seed)
     # Dirichlet-ish weights: different worlds -> different dominant archetypes
@@ -48,8 +103,16 @@ def gen(world, seed):
             reach["broad"] = round(max(reach["broad"], .4), 2)  # broad reaches most of everyone
             subs.append(dict(name=f"{name}_s{i+1}", frac=round(fr[i]/fz, 3),
                              delta_base=round(rng.uniform(-.2, .2), 2), reach=reach))
-        archetypes.append(dict(name=name, weight=round(raw[name]/z, 4), dims=d, subs=subs))
-    hidden = dict(world=world, seed=seed, landing_style="benefit", price_usd=29,
+        for sub in subs:
+            sub["decision_context"] = rng.choice(DECISION_CONTEXTS)
+        archetypes.append(dict(
+            name=name,
+            weight=round(raw[name]/z, 4),
+            persona=PERSONA_PROFILES[name],
+            dims=d,
+            subs=subs,
+        ))
+    hidden = dict(schema="takyon.hidden-market.v2", world=world, seed=seed, landing_style="benefit", price_usd=29,
                   offer="card_required_trial", archetypes=archetypes)
     out = Path(f"sim/world-{world}"); out.mkdir(parents=True, exist_ok=True)
     (out/"subpops-hidden.json").write_text(json.dumps(hidden, indent=1))
