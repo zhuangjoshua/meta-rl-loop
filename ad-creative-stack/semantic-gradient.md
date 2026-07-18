@@ -78,6 +78,29 @@ best supports in service of the goal.
 - One conclusion, not a list of ideas. If you find yourself writing "and also," stop.
 - Weigh evidence by quantity and spend: a pattern repeated across many funded ads
   justifies confidence; a single lucky read on five dollars of spend does not.
+- **Readable-evidence floor (the 20-world audit lesson).** A cell's receipts
+  price a config only when its funded spend expects at least ONE goal event at
+  the portfolio's observed rate. Below that, a zero is arithmetic, not
+  information: the config stays UNTESTED no matter what its receipts show, and
+  no thesis may cite a sub-readable cell as evidence for or against anything.
+  (Audited failure: agents repeatedly killed an axis value on $13 slices that
+  expected ~0.1 purchases — verdicts drawn from cells that could not have
+  produced a purchase even when the config was the world's best.)
+  The floor's arithmetic is FIXED, not live (the world-26 lesson). When a
+  config goes under test, compute its floor ONCE from the portfolio rate
+  observed at that moment and record it; later zeros are the test's outcome,
+  never a revision of its target. Spend toward the floor accumulates across
+  batches — readability never requires one giant batch. The test carries a
+  stop-loss: a config that reaches its recorded floor, or has consumed two
+  to three full-budget batches, while staying silent is parked as UNPRICED —
+  it keeps its ledger and may resume when evidence warrants, but it loses
+  any priority claim on budget and may not consume further consecutive
+  batches. Worked example (substitute the portfolio's own numbers): rate ~1
+  purchase per $400 at test start → floor $400, recorded; ledger $80 + $120
+  + $200 = $400, readable; still zero at the floor → park UNPRICED, move on.
+  (Audited failure: an agent recomputing the floor from live receipts chased
+  a receding target — each zero batch lowered the observed rate, which
+  raised the dollar floor — through five consecutive zero-revenue batches.)
 - If the evidence is thin or contradictory, the honest thesis is a small one
   ("slightly favor X") — never invent a bold conclusion the receipts don't carry.
 - The thesis must be checkable against future ads: a reader should know exactly
@@ -127,6 +150,41 @@ axis's values (e.g. copy angle families), the gradient's first thesis on that
 axis is to make the policy declare one — an unenumerated choice space is
 itself a policy defect, because nothing can ever report that whole families
 went untested.
+
+Coverage counts COMBINATIONS, not only values (the world-15 lesson). A value
+tested only alongside losing values of other axes has never been tested where
+it matters: whenever a value becomes an axis's incumbent best, its crosses
+with the incumbent-best values of the other axes become unpriced and are owed
+a funded test at readable spend, best-with-best. (Audited failure: two axes'
+best values each "priced" separately — their combination, the world's single
+best cell, never funded in eight batches.)
+
+**Drought escalation (the world-11 lesson).** A goal-event drought is a
+coverage alarm before it is a verdict. While any incumbent-best cross remains
+unpriced at readable spend, a drought thesis MUST target the unpriced crosses
+— fund them, boldest-untested first. A thesis blaming the destination, offer,
+or market is licensed only after every incumbent-best cross has been funded
+at readable spend and returned nothing; that exhausted ledger is also the
+only state in which the market may be declared dead. "We cannot learn here"
+is a conclusion the evidence must earn, never an escape from a drought the
+policy's own creative choices may be causing. (Audited failure: an agent
+with zero purchases on $1,600 froze its conclusions and blamed the offer
+while the world's best config — never authored in eight batches — was worth
+~9 purchases.)
+
+**Demotion floor (binds the act, not the wording — the 20-world audit
+lesson).** Any rendering that reduces or ends an axis value's funding counts
+as a demotion of that value, however the thesis phrases it: "demote,"
+"retire," "neutral," "a wash," "non-additive," "revert to default," or simple
+omission from the next slate are all the same act. A demotion is licensed
+only when the value's funded spend to date expects at least THREE goal events
+at the portfolio's observed rate. This threshold uses the same FIXED
+arithmetic as the readable-evidence floor: compute it from the rate observed
+when the question is opened, record it, and never let later zeros raise the
+target. Below that floor the honest verdict is UNKNOWN, and an UNKNOWN value
+keeps its funded slot. (Audited failure: the
+prior floor was evaded in eleven of twenty worlds by exactly this rewording —
+the axis was never "demoted," it just quietly stopped being made.)
 
 ## Stage 2 — Render the thesis at K magnitudes
 
