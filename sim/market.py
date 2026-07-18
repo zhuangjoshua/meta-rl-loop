@@ -1,4 +1,7 @@
-"""Tier A market runner: batch spec in -> noisy receipts out, secrets stay sealed.
+"""Tier A feature-control runner: declared tags in -> noisy receipts out.
+
+Tier A deliberately scores learner-supplied feature tags. It is not evidence of
+semantic adaptation and must not be compared with the Tier-B actual-content market.
 
 Usage: python3 sim/market.py <world> <iteration_seed> <batch_spec.json>
 Prints an iteration block (markdown, evidence.md format) + a JSON summary line.
@@ -93,7 +96,8 @@ def simulate(world, seed, spec):
     spend_t = round(sum(r["spend"] for r in rows),2)
     rev = funnel_tot["purchases"]*W["price_usd"]
     roas = round(rev/spend_t,2) if spend_t else 0
-    return dict(rows=rows, funnel=funnel_tot, spend=spend_t, revenue=rev, roas=roas, cells=cells)
+    return dict(tier="A-feature-control", semantic_valid=False, rows=rows, funnel=funnel_tot,
+                spend=spend_t, revenue=rev, roas=roas, cells=cells)
 
 def run(world, seed, specpath):
     spec = json.loads(Path(specpath).read_text())
@@ -116,7 +120,8 @@ def run(world, seed, specpath):
               f"demos {funnel_tot['demos']} · purchases {funnel_tot['purchases']}")
     md.append(f"ITERATION {it} TOTALS: spend ${spend_t} · settled revenue ${rev} · ROAS {roas}")
     print("\n".join(md))
-    print("@@SUMMARY " + json.dumps(dict(iteration=it, spend=spend_t, revenue=rev, roas=roas)))
+    print("@@SUMMARY " + json.dumps(dict(tier="A-feature-control", semantic_valid=False,
+                                         iteration=it, spend=spend_t, revenue=rev, roas=roas)))
 
 if __name__ == "__main__":
     run(int(sys.argv[1]), int(sys.argv[2]), sys.argv[3])

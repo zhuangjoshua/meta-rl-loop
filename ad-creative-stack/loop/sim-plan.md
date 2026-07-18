@@ -99,7 +99,17 @@ has to genuinely discover what the population wants.
   are an LLM's taste, not human buyers. Directional only; real ads remain the
   final rung.
 
-## Build steps
+## Implementation status
+
+Tier B is now implemented in `sim/tier_b_market.py` and the complete adaptive
+runner is `sim/tier_b_experiment.py`. `sim/TIER-B.md` documents the isolation
+boundary, real provider backends, schedule controls, exact call counts, caches,
+and run commands. There is no Tier-A or heuristic fallback in the Tier-B path.
+
+The remaining work in this original plan is empirical: run multi-world schedule
+comparisons and then compare the synthetic judge with real advertising outcomes.
+
+## Original build steps
 
 1. Subpopulation generator (LLM writes ~10 weighted segments from a spec;
    hidden traits sampled with a seed; saved sealed).                              ~1 session
@@ -108,7 +118,7 @@ has to genuinely discover what the population wants.
 3. Run 6–10 full wake cycles at Tier A; tune noise schedule and thesis
    procedure against oracle regret.                    fast, same day
 4. Tier B upgrade: LLM-persona judging with response caching; rerun the same
-   seeds; compare Tier A vs B divergence.              ~1 session + API cost
+   seeds; compare Tier A vs B divergence.              **IMPLEMENTED**
 5. (optional) Plug into the existing rl_sim/rl_wake_rig harness family so the
    sim market becomes a driver there too.
 

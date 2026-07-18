@@ -1,5 +1,12 @@
 # Handoff — Meta-ads RL loop (semantic gradient) — session of 2026-07-15/16
 
+> Update 2026-07-18: the statement below that Tier B was not built is historical.
+> The real cached LLM-persona market, complete adaptive runner, schedule controls,
+> and paired sweep runner now live in `sim/tier_b_market.py`,
+> `sim/tier_b_experiment.py`, `sim/noise_schedule.py`, and
+> `sim/tier_b_sweep.py`; see `sim/TIER-B.md`. The original session record is
+> otherwise preserved verbatim.
+
 Everything below was built and tested in one long session. All artifacts are on
 disk; nothing depends on the old session's memory. Nothing here touched the VPS,
 any git remote (none is configured), or real ads/money. All ad/market data is
@@ -34,9 +41,9 @@ Operator's key design decisions (argued and settled in-session):
 THE LOOP (prose, canonical):
 - ad-creative-stack/semantic-gradient.md — THE improvement operator. Contains the
   full accumulated rule stack: 3 inputs (goal / current policy / evidence grouped
-  by policy version with full texts+prompts+settings+outcomes), thesis classes
-  (pair=causation any dose; pattern=direction mid-dose+must name confirming
-  experiment; design=structural, needs cross-era replication), coverage rule
+  by policy version with full texts+prompts+settings+outcomes), one organizing
+  thesis that may combine matched-pair, replicated-pattern, and design evidence
+  when they support the same mechanism, coverage rule
   (sweep unpriced axis values before refining; unfunded=UNKNOWN), composition
   rule (never compare rates across differently-targeted cells — adopted at ~90%
   confidence), demotion floor (no axis demoted till funded spend expects >=3

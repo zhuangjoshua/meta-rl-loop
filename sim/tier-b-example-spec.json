@@ -1,0 +1,53 @@
+{
+  "iteration": 1,
+  "policy": "v0",
+  "landing_page_path": "formflow-landing-page.md",
+  "ads": [
+    {
+      "id": "story-demo",
+      "headline": "Maya stopped chasing intake emails",
+      "message": "See how an independent consultant moved every client request into one clear intake flow and stopped copying answers between inboxes. Start with the same workflow in Formflow.",
+      "visual": "A natural screen recording moves a real-looking request from New to Ready while a small portrait of Maya remains in the corner and narrates what changed.",
+      "call_to_action": "START_TRIAL",
+      "proof": "story",
+      "named_story": true,
+      "demo": true
+    },
+    {
+      "id": "outcome",
+      "headline": "Every client request, ready when you are",
+      "message": "Collect the brief, files, and missing answers before work begins. Formflow keeps the request and every follow-up in one status board.",
+      "visual": "A split screen changes from a crowded email inbox to a clean board with New, Waiting, Ready, and Complete columns.",
+      "call_to_action": "START_TRIAL",
+      "proof": "outcome",
+      "named_story": false,
+      "demo": false
+    },
+    {
+      "id": "count-demo",
+      "headline": "One link replaces five intake follow-ups",
+      "message": "Send one branded intake link. Conditional questions gather the right details and automatic reminders ask for anything the client missed.",
+      "visual": "Five follow-up email cards collapse into one branded Formflow link, followed by a completed structured client record on screen.",
+      "call_to_action": "LEARN_MORE",
+      "proof": "count",
+      "named_story": false,
+      "demo": true
+    }
+  ],
+  "campaigns": [
+    {
+      "id": "sales-broad",
+      "objective": "sales",
+      "audience": "broad",
+      "budget": 100,
+      "mode": "fixed"
+    },
+    {
+      "id": "sales-interests-auto",
+      "objective": "sales",
+      "audiences": ["interest_biztools", "interest_niche"],
+      "budget": 100,
+      "mode": "auto"
+    }
+  ]
+}

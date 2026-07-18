@@ -6,7 +6,8 @@ your task). You run the full RL loop for 8 iterations. Work from
 
 ## Sealed-world integrity (absolute)
 NEVER read: sim/world-*/subpops-hidden.json, sim/worldgen.py, sim/score.py,
-sim/driver.py, sim/market.py, any other world's directory or files. These
+sim/driver.py, sim/market.py, sim/tier_b_market.py, sim/cache/**,
+any other world's directory or files. These
 contain or imply the hidden ground truth; reading any of them voids the run.
 Your ONLY information about the world is the receipts your own batches produce.
 
@@ -33,10 +34,12 @@ interest_biztools $14, interest_niche $12).
 2. Run the market:  python3 sim/market.py W $((W*100+I)) sim/world-W/llm-itI.json
    Append its full stdout to llm-evidence.md.
 3. Read the receipts. Following ad-creative-stack/semantic-gradient.md TO THE
-   LETTER (one falsifiable thesis; thesis classes and dose caps; coverage rule —
-   sweep unpriced options early; composition rule — compare only matched cells;
-   evidence sized honestly), write into llm-lineage.md: the thesis (2-3
-   sentences) and SIX one-line doses, smallest to boldest.
+   LETTER (one falsifiable organizing thesis; matched-pair, replicated-pattern,
+   and design evidence may combine when they support one mechanism; coverage
+   rule — sweep unpriced options early; composition rule — compare only matched
+   cells; evidence sized honestly), write into llm-lineage.md: the thesis (2-3
+   sentences) and SIX complete policy rewrites, smallest to boldest. Each dose
+   must state consequences for creative, campaigns, judgment, and experimentation.
 4. THE DRAW — run it BEFORE writing any adoption text:
    python3 -c "import math,random;t0,dc,fl,wd=1.0,.92,.05,.18;t=(max(fl,t0*dc**I)-fl)/(t0-fl);w=[math.exp(-((j/6)-t)**2/(2*wd**2)) for j in range(7)];z=sum(w);r=random.Random(W*1000+I);p=r.random()*z;a=0
 for j,x in enumerate(w):
@@ -59,8 +62,8 @@ for j,x in enumerate(w):
   your portfolio's observed rate.
 - Judge cells per-dollar, never raw counts; never compare conversion rates
   across differently-targeted cells.
-- Auto-mode cells unreadable 2 iterations running -> a design thesis to cut
-  them is licensed.
+- Auto-mode cells unreadable 2 iterations running -> structural evidence for
+  cutting them is licensed.
 
 ## When finished
 Reply with ONLY the 8 result lines (the jsonl content) plus one sentence naming
