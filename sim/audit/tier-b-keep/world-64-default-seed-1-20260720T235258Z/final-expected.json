@@ -1,0 +1,391 @@
+{
+  "tier": "B",
+  "world": 64,
+  "seed": 6400190,
+  "expected": true,
+  "rows": [
+    {
+      "ad": "ad_demo_workflow",
+      "cell": "sales_broad_demo_dedicated",
+      "spend": 50.0,
+      "impressions": 6250.0,
+      "clicks": 163.34913843850558,
+      "ctr": 2.613586215016089,
+      "visits": 151.77882992156313,
+      "load_rate": 92.91682305303483,
+      "signups": 19.582008839168644,
+      "cpl": 2.5533641829426705,
+      "demos": 10.186370094742243,
+      "purchases": 1.4678753750427016,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_outcome_followup",
+      "cell": "sales_broad_outcome_dedicated",
+      "spend": 50.0,
+      "impressions": 6250.0,
+      "clicks": 207.51377746591152,
+      "ctr": 3.320220439454584,
+      "visits": 190.36416851009093,
+      "load_rate": 91.7356769438416,
+      "signups": 24.383527176094262,
+      "cpl": 2.0505646963586246,
+      "demos": 12.87183691061153,
+      "purchases": 1.7331992388622581,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_count_templates",
+      "cell": "sales_broad_count_dedicated",
+      "spend": 50.0,
+      "impressions": 6250.0,
+      "clicks": 179.5557120225552,
+      "ctr": 2.8728913923608834,
+      "visits": 160.47927937853888,
+      "load_rate": 89.37575840437756,
+      "signups": 17.312812830093947,
+      "cpl": 2.888034456947842,
+      "demos": 6.1040661774859455,
+      "purchases": 1.1815031869976111,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_demo_workflow",
+      "cell": "sales_broad_pool",
+      "spend": 3.33,
+      "impressions": 416.6666666666667,
+      "clicks": 10.876955271937762,
+      "ctr": 2.6104692652650625,
+      "visits": 10.106380608246022,
+      "load_rate": 92.9155297192423,
+      "signups": 1.3035817054608823,
+      "cpl": 2.5545004091804713,
+      "demos": 0.6779222983495929,
+      "purchases": 0.09759438126846307,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_outcome_followup",
+      "cell": "sales_broad_pool",
+      "spend": 3.33,
+      "impressions": 416.6666666666667,
+      "clicks": 13.81879077078782,
+      "ctr": 3.316509784989077,
+      "visits": 12.676720391888287,
+      "load_rate": 91.73538120778406,
+      "signups": 1.623577498523078,
+      "cpl": 2.0510262078830275,
+      "demos": 0.8569278727775117,
+      "purchases": 0.11522805914283762,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_count_templates",
+      "cell": "sales_broad_pool",
+      "spend": 3.33,
+      "impressions": 416.6666666666667,
+      "clicks": 11.957393510874402,
+      "ctr": 2.8697744426098564,
+      "visits": 10.686670317856995,
+      "load_rate": 89.37290813535765,
+      "signups": 1.1525727686665048,
+      "cpl": 2.8891885098523704,
+      "demos": 0.4062272536962359,
+      "purchases": 0.07855696119900545,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_demo_workflow",
+      "cell": "pageviews_broad",
+      "spend": 3.33,
+      "impressions": 416.6666666666667,
+      "clicks": 11.707083929082856,
+      "ctr": 2.809700142979885,
+      "visits": 10.878487644878746,
+      "load_rate": 92.92226579032459,
+      "signups": 1.3685459180366384,
+      "cpl": 2.433239510719033,
+      "demos": 0.693338386540712,
+      "purchases": 0.08857304841736537,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_outcome_followup",
+      "cell": "pageviews_broad",
+      "spend": 3.33,
+      "impressions": 416.6666666666667,
+      "clicks": 14.905176418971672,
+      "ctr": 3.5772423405532017,
+      "visits": 13.68441364730687,
+      "load_rate": 91.80980662455637,
+      "signups": 1.7538120711095082,
+      "cpl": 1.8987211086381413,
+      "demos": 0.9294936043136605,
+      "purchases": 0.1139035917603502,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_count_templates",
+      "cell": "pageviews_broad",
+      "spend": 3.33,
+      "impressions": 416.6666666666667,
+      "clicks": 13.572894431788743,
+      "ctr": 3.2574946636292985,
+      "visits": 12.035896814978344,
+      "load_rate": 88.67597751876242,
+      "signups": 1.2812019695862114,
+      "cpl": 2.5991218239193676,
+      "demos": 0.4487660184221075,
+      "purchases": 0.08073676749397027,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_demo_workflow",
+      "cell": "leads_broad",
+      "spend": 3.33,
+      "impressions": 416.6666666666667,
+      "clicks": 11.412621031028419,
+      "ctr": 2.73902904744682,
+      "visits": 10.604957850281133,
+      "load_rate": 92.92307018211307,
+      "signups": 1.3469297038072356,
+      "cpl": 2.472289378270753,
+      "demos": 0.6888778970705565,
+      "purchases": 0.09205246779997961,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_outcome_followup",
+      "cell": "leads_broad",
+      "spend": 3.33,
+      "impressions": 416.6666666666667,
+      "clicks": 14.522294472767703,
+      "ctr": 3.4853506734642483,
+      "visits": 13.329567048309858,
+      "load_rate": 91.78692164179391,
+      "signups": 1.708961332742838,
+      "cpl": 1.9485519866359047,
+      "demos": 0.904554044516974,
+      "purchases": 0.11462721932571118,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_count_templates",
+      "cell": "leads_broad",
+      "spend": 3.33,
+      "impressions": 416.6666666666667,
+      "clicks": 12.994700784442221,
+      "ctr": 3.118728188266133,
+      "visits": 11.553807324490302,
+      "load_rate": 88.91168420224793,
+      "signups": 1.2361849463166654,
+      "cpl": 2.6937716802991836,
+      "demos": 0.433996669128484,
+      "purchases": 0.0801154889034066,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_demo_workflow",
+      "cell": "sales_biztools",
+      "spend": 3.33,
+      "impressions": 238.0952380952381,
+      "clicks": 6.518664456384854,
+      "ctr": 2.7378390716816385,
+      "visits": 6.060894712651741,
+      "load_rate": 92.97755319673283,
+      "signups": 0.6945761229296548,
+      "cpl": 4.794290920848795,
+      "demos": 0.3402078115874237,
+      "purchases": 0.045314846431381124,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_outcome_followup",
+      "cell": "sales_biztools",
+      "spend": 3.33,
+      "impressions": 238.0952380952381,
+      "clicks": 8.3778916281151,
+      "ctr": 3.518714483808342,
+      "visits": 7.677724530573652,
+      "load_rate": 91.64268137353581,
+      "signups": 0.956312256503132,
+      "cpl": 3.4821262379053217,
+      "demos": 0.48743358314827845,
+      "purchases": 0.06169242180319479,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_count_templates",
+      "cell": "sales_biztools",
+      "spend": 3.33,
+      "impressions": 238.0952380952381,
+      "clicks": 7.535048866624206,
+      "ctr": 3.1647205239821665,
+      "visits": 6.703157954615687,
+      "load_rate": 88.95971443936745,
+      "signups": 0.7332574263930772,
+      "cpl": 4.541379166632384,
+      "demos": 0.24767821720656846,
+      "purchases": 0.04695142672592526,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_demo_workflow",
+      "cell": "sales_niche",
+      "spend": 3.33,
+      "impressions": 277.77777777777777,
+      "clicks": 7.570635790888523,
+      "ctr": 2.7254288847198684,
+      "visits": 7.033096368726353,
+      "load_rate": 92.89967927384495,
+      "signups": 0.8929705549451781,
+      "cpl": 3.7291263206371212,
+      "demos": 0.45529347521901903,
+      "purchases": 0.06476984412904219,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_outcome_followup",
+      "cell": "sales_niche",
+      "spend": 3.33,
+      "impressions": 277.77777777777777,
+      "clicks": 9.585427202134566,
+      "ctr": 3.450753792768444,
+      "visits": 8.789634389771065,
+      "load_rate": 91.6978889351297,
+      "signups": 1.1466240183054717,
+      "cpl": 2.904177783508505,
+      "demos": 0.5968743768821825,
+      "purchases": 0.0799491626973959,
+      "trust": "trust"
+    },
+    {
+      "ad": "ad_count_templates",
+      "cell": "sales_niche",
+      "spend": 3.33,
+      "impressions": 277.77777777777777,
+      "clicks": 8.48034994087035,
+      "ctr": 3.0529259787133265,
+      "visits": 7.555940957813571,
+      "load_rate": 89.09940050231103,
+      "signups": 0.8336604772853814,
+      "cpl": 3.994431894916452,
+      "demos": 0.28832968105079426,
+      "purchases": 0.05593252702775105,
+      "trust": "trust"
+    }
+  ],
+  "funnel": {
+    "visits": 651.9996283725816,
+    "signups": 79.31111761596831,
+    "demos": 37.61819437274983,
+    "purchases": 5.598576015028352
+  },
+  "spend": 199.95,
+  "revenue": 162.3587044358222,
+  "roas": 0.8119965213094384,
+  "cells": [
+    {
+      "id": "sales_broad_demo_dedicated",
+      "objective": "sales",
+      "audience": "broad",
+      "budget": 50.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_demo_workflow"
+      ]
+    },
+    {
+      "id": "sales_broad_outcome_dedicated",
+      "objective": "sales",
+      "audience": "broad",
+      "budget": 50.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_outcome_followup"
+      ]
+    },
+    {
+      "id": "sales_broad_count_dedicated",
+      "objective": "sales",
+      "audience": "broad",
+      "budget": 50.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_count_templates"
+      ]
+    },
+    {
+      "id": "sales_broad_pool",
+      "objective": "sales",
+      "audience": "broad",
+      "budget": 10.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_demo_workflow",
+        "ad_outcome_followup",
+        "ad_count_templates"
+      ]
+    },
+    {
+      "id": "pageviews_broad",
+      "objective": "pageviews",
+      "audience": "broad",
+      "budget": 10.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_demo_workflow",
+        "ad_outcome_followup",
+        "ad_count_templates"
+      ]
+    },
+    {
+      "id": "leads_broad",
+      "objective": "leads",
+      "audience": "broad",
+      "budget": 10.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_demo_workflow",
+        "ad_outcome_followup",
+        "ad_count_templates"
+      ]
+    },
+    {
+      "id": "sales_biztools",
+      "objective": "sales",
+      "audience": "interest_biztools",
+      "budget": 10.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_demo_workflow",
+        "ad_outcome_followup",
+        "ad_count_templates"
+      ]
+    },
+    {
+      "id": "sales_niche",
+      "objective": "sales",
+      "audience": "interest_niche",
+      "budget": 10.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_demo_workflow",
+        "ad_outcome_followup",
+        "ad_count_templates"
+      ]
+    }
+  ],
+  "judge": {
+    "identity": "6a250aae017de06e",
+    "provider": "openai",
+    "model": "gpt-5.6-luna",
+    "stats": {
+      "calls": 15,
+      "cache_hits": 150,
+      "input_tokens": 77000,
+      "output_tokens": 21021,
+      "elapsed_seconds": 144.71032700198703
+    }
+  }
+}

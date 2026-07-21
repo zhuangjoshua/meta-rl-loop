@@ -1,0 +1,120 @@
+{
+  "iteration": 2,
+  "policy": "v1",
+  "landing_page": "# Turn client intake emails into one clean workflow\n\nFormflow gives independent consultants and small service teams a structured intake page, automatic follow-up, and a live status board without forcing clients to create an account.\n\n## Stop rebuilding the same intake process for every client\n\nCreate a reusable form from a template or start from scratch. Conditional questions collect the right details for each service. New responses become organized client records, attachments stay with the request, and missing answers trigger an automatic reminder.\n\n## See what needs attention\n\nThe status board shows every request as New, Waiting on Client, Ready, or Complete. Assign an owner, add an internal note, and send a client update from the same record. Clients receive a secure link that works without a password.\n\n## Start in minutes\n\nImport an existing questionnaire, publish a branded intake link, and embed it on your site. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests.\n\nFormflow costs $29 per month after a 14-day trial. A card is required to start the trial. Cancel from account settings at any time. The plan includes unlimited forms, 500 active client records, two team members, and email support.\n\nStart your 14-day trial and publish your first intake flow today.",
+  "ads": [
+    {
+      "id": "ad_demo_workflow",
+      "headline": "Turn every client intake email into one clear workflow.",
+      "message": "Move client intake out of scattered emails and into one organized workflow. In Formflow, publish a branded intake page with conditional questions, collect the right details and attachments, and turn each submission into a client record your team can track from New to Complete. Start a 14-day trial. Then it’s $29/month. Card required; cancel anytime from account settings.",
+      "visual": "30-second vertical product walkthrough with clear on-screen captions. Open on a client-intake email with an attachment and missing project details, then transition to a Formflow-branded conditional intake page. Show a client selecting a service option, revealing a conditional question, attaching a file, and submitting. Cut to the request appearing on the status board and visibly moving through New, Waiting on Client, Ready, and Complete. End on the branded intake link and a pricing card reading: “14-day trial • $29/month after trial • Card required • Cancel anytime.”",
+      "call_to_action": "Start Free Trial",
+      "proof": "benefit",
+      "named_story": false,
+      "demo": true,
+      "actual": {
+        "id": "ad_demo_workflow",
+        "headline": "Turn every client intake email into one clear workflow.",
+        "message": "Move client intake out of scattered emails and into one organized workflow. In Formflow, publish a branded intake page with conditional questions, collect the right details and attachments, and turn each submission into a client record your team can track from New to Complete. Start a 14-day trial. Then it’s $29/month. Card required; cancel anytime from account settings.",
+        "visual": "30-second vertical product walkthrough with clear on-screen captions. Open on a client-intake email with an attachment and missing project details, then transition to a Formflow-branded conditional intake page. Show a client selecting a service option, revealing a conditional question, attaching a file, and submitting. Cut to the request appearing on the status board and visibly moving through New, Waiting on Client, Ready, and Complete. End on the branded intake link and a pricing card reading: “14-day trial • $29/month after trial • Card required • Cancel anytime.”",
+        "call_to_action": "Start Free Trial"
+      }
+    },
+    {
+      "id": "ad_outcome_followup",
+      "headline": "Stop chasing missing client details.",
+      "message": "A vague request should not create another email thread. Formflow sends clients one secure link to complete the details you need—no account required. When an answer is missing, send an automatic reminder and see every request on a live status board. Start your 14-day trial today.",
+      "visual": "25-second vertical motion video. Open with a vague client email: “Here’s the brief—I’ll send the remaining details soon.” Highlight blank fields in a simple request card. Show Formflow sending a missing-answer reminder, then show the client opening a secure link and completing the missing field without a login. Finish on a live Formflow status board with columns labeled New, Waiting on Client, Ready, and Complete. Captions read: “One secure link.” “Automatic reminders.” “Know what needs attention.” End card: “14-day trial.”",
+      "call_to_action": "Start Free Trial",
+      "proof": "outcome",
+      "named_story": false,
+      "demo": false,
+      "actual": {
+        "id": "ad_outcome_followup",
+        "headline": "Stop chasing missing client details.",
+        "message": "A vague request should not create another email thread. Formflow sends clients one secure link to complete the details you need—no account required. When an answer is missing, send an automatic reminder and see every request on a live status board. Start your 14-day trial today.",
+        "visual": "25-second vertical motion video. Open with a vague client email: “Here’s the brief—I’ll send the remaining details soon.” Highlight blank fields in a simple request card. Show Formflow sending a missing-answer reminder, then show the client opening a secure link and completing the missing field without a login. Finish on a live Formflow status board with columns labeled New, Waiting on Client, Ready, and Complete. Captions read: “One secure link.” “Automatic reminders.” “Know what needs attention.” End card: “14-day trial.”",
+        "call_to_action": "Start Free Trial"
+      }
+    },
+    {
+      "id": "ad_count_templates",
+      "headline": "One intake link for briefs, onboarding, and document collection.",
+      "message": "Stop rebuilding client intake from scratch. Formflow templates cover project briefs, discovery calls, onboarding, document collection, and change requests—then turn into a branded link clients can complete. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial.",
+      "visual": "20-second vertical product-card video. Show five clean template cards in sequence: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards into a single branded Formflow intake link, then show a client completing the link on a phone. Close with a plan card reading: “Unlimited forms • 500 active client records • 2 team members” followed by “Start your 14-day trial.”",
+      "call_to_action": "Start Free Trial",
+      "proof": "count",
+      "named_story": false,
+      "demo": false,
+      "actual": {
+        "id": "ad_count_templates",
+        "headline": "One intake link for briefs, onboarding, and document collection.",
+        "message": "Stop rebuilding client intake from scratch. Formflow templates cover project briefs, discovery calls, onboarding, document collection, and change requests—then turn into a branded link clients can complete. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial.",
+        "visual": "20-second vertical product-card video. Show five clean template cards in sequence: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards into a single branded Formflow intake link, then show a client completing the link on a phone. Close with a plan card reading: “Unlimited forms • 500 active client records • 2 team members” followed by “Start your 14-day trial.”",
+        "call_to_action": "Start Free Trial"
+      }
+    }
+  ],
+  "campaigns": [
+    {
+      "id": "pageviews_broad",
+      "objective": "pageviews",
+      "audience": "broad",
+      "budget": 40.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_demo_workflow",
+        "ad_outcome_followup",
+        "ad_count_templates"
+      ]
+    },
+    {
+      "id": "leads_broad",
+      "objective": "leads",
+      "audience": "broad",
+      "budget": 40.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_demo_workflow",
+        "ad_outcome_followup",
+        "ad_count_templates"
+      ]
+    },
+    {
+      "id": "sales_broad",
+      "objective": "sales",
+      "audience": "broad",
+      "budget": 40.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_demo_workflow",
+        "ad_outcome_followup",
+        "ad_count_templates"
+      ]
+    },
+    {
+      "id": "sales_biztools",
+      "objective": "sales",
+      "audience": "interest_biztools",
+      "budget": 40.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_demo_workflow",
+        "ad_outcome_followup",
+        "ad_count_templates"
+      ]
+    },
+    {
+      "id": "sales_niche",
+      "objective": "sales",
+      "audience": "interest_niche",
+      "budget": 40.0,
+      "mode": "fixed",
+      "ad_ids": [
+        "ad_demo_workflow",
+        "ad_outcome_followup",
+        "ad_count_templates"
+      ]
+    }
+  ]
+}

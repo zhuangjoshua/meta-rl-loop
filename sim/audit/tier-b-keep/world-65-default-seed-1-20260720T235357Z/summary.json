@@ -1,0 +1,93 @@
+{
+  "schema": "takyon.tier-b-experiment.v2",
+  "world": 65,
+  "run_seed": 1,
+  "iterations": 8,
+  "budget_per_iteration": 200.0,
+  "goal": "maximize settled purchase ROAS",
+  "schedule_name": "default",
+  "schedule": {
+    "tau0": 1.0,
+    "decay": 0.92,
+    "floor": 0.05,
+    "width": 0.18,
+    "rungs": 6,
+    "pair_scale": 1.0,
+    "pattern_scale": 1.0,
+    "design_scale": 1.0
+  },
+  "loop": {
+    "spend": 1599.9,
+    "revenue": 928.0,
+    "mean_roas": 0.5800543885971493,
+    "aggregate_roas": 0.5800362522657666,
+    "roas_by_iteration": [
+      0.725181295323831,
+      1.0152538134533633,
+      1.015,
+      1.015,
+      0.145,
+      0.435,
+      0.0,
+      0.29
+    ],
+    "final_policy_version": 8
+  },
+  "frozen_baseline": {
+    "spend": 1599.6,
+    "revenue": 957.0,
+    "mean_roas": 0.5982745686421606,
+    "aggregate_roas": 0.5982745686421606,
+    "roas_by_iteration": [
+      0.725181295323831,
+      0.5801450362590648,
+      0.725181295323831,
+      0.2900725181295324,
+      0.4351087771942986,
+      0.1450362590647662,
+      1.0152538134533633,
+      0.8702175543885972
+    ]
+  },
+  "held_out_expected": {
+    "initial_roas": 0.4962204867227744,
+    "final_roas": 0.4505577945488452,
+    "change": -0.04566269217392921,
+    "ratio": 0.9079790266711826
+  },
+  "selected_rungs": [
+    4,
+    6,
+    5,
+    3,
+    4,
+    3,
+    2,
+    6
+  ],
+  "judge": {
+    "provider": "openai",
+    "model": "gpt-5.6-luna",
+    "identity": "6a250aae017de06e",
+    "stats": {
+      "calls": 17,
+      "cache_hits": 370,
+      "input_tokens": 98731,
+      "output_tokens": 24102,
+      "elapsed_seconds": 151.15039645612705
+    }
+  },
+  "agent": {
+    "provider": "openai",
+    "model": "gpt-5.6-terra",
+    "identity": "aa40afc8f7ef8228",
+    "stats": {
+      "calls": 16,
+      "cache_hits": 1,
+      "input_tokens": 338200,
+      "output_tokens": 70640,
+      "elapsed_seconds": 555.1256854158128
+    }
+  },
+  "output_dir": "/Users/joshuazhuang/Documents/fourmanifold/meta-rl-loop/sim/runs/tier-b/world-65-default-seed-1-20260720T235357Z"
+}

@@ -230,8 +230,7 @@ class StructuredLLM:
                 },
                 {"role": "user", "content": prompt},
             ],
-            "temperature": self.config.temperature,
-            "max_tokens": self.config.max_output_tokens,
+            "max_completion_tokens": self.config.max_output_tokens,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {"name": "tier_b_response", "strict": True, "schema": schema},

@@ -21,7 +21,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 try:  # package import in tests; direct import when run as `python sim/...py`
     from .llm_client import LLMConfig, LLMError, StructuredLLM
@@ -326,6 +326,40 @@ def _normalize_design(
     return str(payload.get("design_thesis") or "").strip(), validate_spec(spec, platform)
 
 
+def _complete_validated(
+    agent: Any,
+    *,
+    prompt: str,
+    schema: Mapping[str, Any],
+    cache_namespace: str,
+    validate: Callable[[Any], Any],
+    attempts: int = 3,
+) -> Any:
+    """Call the agent and validate its payload; on validation failure, retry with
+    the rejection reason appended so the model can repair its output. Appending the
+    error also changes the prompt, which bypasses the response cache — a bare retry
+    would return the same cached invalid payload. Fails closed after `attempts`."""
+    last_error: ExperimentError | None = None
+    current_prompt = prompt
+    for attempt in range(1, attempts + 1):
+        payload = agent.complete(
+            prompt=current_prompt, schema=schema, cache_namespace=cache_namespace
+        )
+        try:
+            return validate(payload)
+        except ExperimentError as exc:
+            last_error = exc
+            current_prompt = (
+                prompt
+                + f"\n\nYour previous response was rejected (attempt {attempt}): {exc}. "
+                + "Return a corrected response that satisfies every stated requirement, "
+                + "including assigning every ad to at least one campaign."
+            )
+    raise ExperimentError(
+        f"agent output failed validation after {attempts} attempts: {last_error}"
+    )
+
+
 def _gradient_prompt(
     *, operator: str, goal: str, current_policy: str, current_version: int,
     history: list[dict[str, Any]],
@@ -447,7 +481,8 @@ def run_experiment(
     output_dir.mkdir(parents=True, exist_ok=False)
 
     for iteration in range(1, iterations + 1):
-        design_payload = agent.complete(
+        design_thesis, spec = _complete_validated(
+            agent,
             prompt=_design_prompt(
                 iteration=iteration,
                 policy_version=policy_version,
@@ -460,14 +495,14 @@ def run_experiment(
             ),
             schema=_design_schema(),
             cache_namespace="tier-b-design",
-        )
-        design_thesis, spec = _normalize_design(
-            design_payload,
-            iteration=iteration,
-            policy_version=policy_version,
-            landing_page=landing_page,
-            platform=platform,
-            budget=budget,
+            validate=lambda payload: _normalize_design(
+                payload,
+                iteration=iteration,
+                policy_version=policy_version,
+                landing_page=landing_page,
+                platform=platform,
+                budget=budget,
+            ),
         )
         if first_spec is None:
             first_spec = spec
@@ -489,7 +524,8 @@ def run_experiment(
             "result": result,
         }
         history.append(record)
-        gradient_payload = agent.complete(
+        gradient = _complete_validated(
+            agent,
             prompt=_gradient_prompt(
                 operator=operator,
                 goal=goal,
@@ -499,8 +535,10 @@ def run_experiment(
             ),
             schema=_gradient_schema(),
             cache_namespace="tier-b-gradient",
+            validate=lambda payload: _validate_gradient(
+                payload, current_policy=current_policy
+            ),
         )
-        gradient = _validate_gradient(gradient_payload, current_policy=current_policy)
         draw_seed = world_number * 1_000_000 + run_seed * 100 + iteration
         selected_rung = schedule.draw(iteration, draw_seed)
         prior_version = policy_version
@@ -530,7 +568,8 @@ def run_experiment(
         (output_dir / "current-policy.md").write_text(current_policy, encoding="utf-8")
 
     assert first_spec is not None
-    final_design_payload = agent.complete(
+    _, final_spec = _complete_validated(
+        agent,
         prompt=_design_prompt(
             iteration=iterations + 1,
             policy_version=policy_version,
@@ -544,14 +583,14 @@ def run_experiment(
         + "\nThis is a held-out final evaluation design. Do not revise the policy.",
         schema=_design_schema(),
         cache_namespace="tier-b-final-design",
-    )
-    _, final_spec = _normalize_design(
-        final_design_payload,
-        iteration=iterations + 1,
-        policy_version=policy_version,
-        landing_page=landing_page,
-        platform=platform,
-        budget=budget,
+        validate=lambda payload: _normalize_design(
+            payload,
+            iteration=iterations + 1,
+            policy_version=policy_version,
+            landing_page=landing_page,
+            platform=platform,
+            budget=budget,
+        ),
     )
     initial_expected = simulate(
         world_number=world_number,

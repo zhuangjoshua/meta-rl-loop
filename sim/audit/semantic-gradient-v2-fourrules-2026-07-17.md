@@ -5,9 +5,7 @@ the current policy and produce K updated policies (K = 6 unless the operator say
 otherwise). You do not select among them, launch ads, or judge campaigns — you only
 generate the revision ladder. The noise schedule (a separate step) chooses which
 rung, if any, is adopted; the incumbent policy always remains available as "no
-change." Every ladder expresses one falsifiable organizing thesis. That thesis may
-have coordinated consequences across the entire policy when one mechanism supports
-them all.
+change."
 
 ## Inputs
 
@@ -74,13 +72,10 @@ weeks and are confounded by market drift, seasonality, and fatigue.
 
 ## Stage 1 — Diagnosis
 
-State exactly ONE falsifiable organizing thesis: the single explanatory direction
-this evidence best supports in service of the goal.
+State exactly ONE falsifiable thesis: the single change of direction this evidence
+best supports in service of the goal.
 
-- One mechanism, not a list of ideas. A thesis may change creative, campaigns,
-  judgment, and experimentation together when each change is a direct consequence
-  of that same mechanism. If an edit needs a second explanation, it is a second
-  thesis and is forbidden.
+- One conclusion, not a list of ideas. If you find yourself writing "and also," stop.
 - Weigh evidence by quantity and spend: a pattern repeated across many funded ads
   justifies confidence; a single lucky read on five dollars of spend does not.
 - **Readable-evidence floor (the 20-world audit lesson).** A cell's receipts
@@ -91,21 +86,6 @@ this evidence best supports in service of the goal.
   (Audited failure: agents repeatedly killed an axis value on $13 slices that
   expected ~0.1 purchases — verdicts drawn from cells that could not have
   produced a purchase even when the config was the world's best.)
-  The floor's arithmetic is FIXED, not live (the world-26 lesson). When a
-  config goes under test, compute its floor ONCE from the portfolio rate
-  observed at that moment and record it; later zeros are the test's outcome,
-  never a revision of its target. Spend toward the floor accumulates across
-  batches — readability never requires one giant batch. The test carries a
-  stop-loss: a config that reaches its recorded floor, or has consumed two
-  to three full-budget batches, while staying silent is parked as UNPRICED —
-  it keeps its ledger and may resume when evidence warrants, but it loses
-  any priority claim on budget and may not consume further consecutive
-  batches. Worked example (substitute the portfolio's own numbers): rate ~1
-  purchase per $400 at test start → floor $400, recorded; ledger $80 + $120
-  + $200 = $400, readable; still zero at the floor → park UNPRICED, move on.
-  (Audited failure: an agent recomputing the floor from live receipts chased
-  a receding target — each zero batch lowered the observed rate, which
-  raised the dollar floor — through five consecutive zero-revenue batches.)
 - If the evidence is thin or contradictory, the honest thesis is a small one
   ("slightly favor X") — never invent a bold conclusion the receipts don't carry.
 - The thesis must be checkable against future ads: a reader should know exactly
@@ -119,27 +99,24 @@ this evidence best supports in service of the goal.
   (same objective, same audience); a funnel shape computed over your whole
   portfolio reflects your own mix, never the market.
 
-Evidence types are NOT mutually exclusive thesis classes and do not cap the ladder.
-For the one thesis, report all three evidence bases independently:
+The thesis may come from any of THREE classes, and its class caps how boldly it
+may be rendered:
 
-- **Matched-pair evidence:** one-difference comparisons. This is the only basis
-  that may independently support a causal claim.
-- **Replicated-pattern evidence:** portfolio-wide or cross-era regularities.
-  These support direction, not causation, and must name the future matched test or
-  instrumentation that would confirm the proposed mechanism.
-- **Design evidence:** repeated evidence about what the experiment varies, which
-  campaigns exist, how budget is shaped, or whether measurement is readable.
-  Structural conclusions require replication across eras, not one batch.
+- **Pair thesis** (strongest tier): built from one-difference comparisons. May
+  claim causation. Any dose is available to it.
+- **Pattern thesis** (middle tier): built from portfolio-wide or cross-era
+  regularities no single pair isolates (e.g. "every ad in every era converts
+  sign-ups cheaply but purchases rarely — the bottleneck is after the click").
+  May claim direction, not causation; middle doses at most; and every pattern
+  thesis MUST name the experiment or instrumentation that would confirm it.
+- **Design thesis** (structural): the target is the experiment itself — what
+  the batches vary, which campaigns exist, how budget is shaped (e.g. "the
+  Clicks campaign has never produced a goal event in any era; restructure the
+  portfolio"). This is how the loop expands or reallocates its own learnable
+  surface. Requires replication across eras, not one batch.
 
-A thesis may combine any or all of these evidence bases when they support the same
-falsifiable mechanism. Prefer the broadest thesis that explains multiple independent
-observations without joining unrelated conclusions. Report two calibrated scalars:
-
-- **confidence** from 0 to 1: how strongly the available evidence supports the
-  stated direction after accounting for spend, replication, confounding, and
-  contradiction;
-- **breadth** from 0 to 1: how much of the policy is genuinely implicated by the
-  thesis, not how much the writer would like to rewrite.
+Grade all candidate findings across all three classes in one tournament; the
+strongest graded finding wins regardless of class.
 
 **Coverage rule (the world-3 lesson).** For every axis the policy owns (copy
 family, creative format, objective, audience, budget mode), keep a coverage
@@ -158,20 +135,6 @@ axis's values (e.g. copy angle families), the gradient's first thesis on that
 axis is to make the policy declare one — an unenumerated choice space is
 itself a policy defect, because nothing can ever report that whole families
 went untested.
-
-Menu before grid (the Tier B story lesson). Coverage obligations are ranked
-by altitude: every value of a DECLARED vocabulary (each copy angle family,
-each creative format) must receive one funded test at the cheapest viable
-dose before any cell-level obligation (an existing ad crossed with audiences
-or objectives) may consume the experiment slot. A value that has never been
-authored has no cell anywhere, so a cell ledger can never demand it — absence
-is invisible to a checklist of existing things, and only the vocabulary sweep
-can see it. This is a floor on breadth, not a mandate for exhaustiveness:
-taste each declared value once, then let verdict rules decide selectively
-which cells ever deserve deeper testing. (Audited failure: across ten worlds
-and 240 authored ads, the story angle — the declared family the highest-intent
-buyers preferred in at least three of those worlds — was never written once,
-while cell-level bookkeeping consumed every experiment slot.)
 
 Coverage counts COMBINATIONS, not only values (the world-15 lesson). A value
 tested only alongside losing values of other axes has never been tested where
@@ -200,60 +163,10 @@ as a demotion of that value, however the thesis phrases it: "demote,"
 "retire," "neutral," "a wash," "non-additive," "revert to default," or simple
 omission from the next slate are all the same act. A demotion is licensed
 only when the value's funded spend to date expects at least THREE goal events
-at the portfolio's observed rate. This threshold uses the same FIXED
-arithmetic as the readable-evidence floor: compute it from the rate observed
-when the question is opened, record it, and never let later zeros raise the
-target. Below that floor the honest verdict is UNKNOWN, and an UNKNOWN value
-keeps its funded slot. (Audited failure: the
+at the portfolio's observed rate. Below that floor the honest verdict is
+UNKNOWN, and an UNKNOWN value keeps its funded slot. (Audited failure: the
 prior floor was evaded in eleven of twenty worlds by exactly this rewording —
 the axis was never "demoted," it just quietly stopped being made.)
-
-**Creative is policy (the Tier B frozen-copy lesson).** The words of the ads
-are part of the policy's rewritable surface, not fixed inputs: a creative
-lean is normally expressed as a REVISED OR NEW EXECUTION of the favored
-direction, not only as budget moved between existing ads. Run this as
-champion/challenger so evidence survives iteration: the incumbent-best
-execution keeps running UNCHANGED — accumulating its ledger and staying
-eligible for replication — while fresh variants test alongside it in their
-own slots. Never rewrite the champion and its challenger in the same batch;
-a variant that beats the champion on settled per-dollar goal events under
-the replication rule becomes the new champion. (Audited failure: across
-eleven worlds the ad copy stayed byte-identical from first batch to last —
-agents reasoned about creative for entire runs while never revising a single
-sentence of it — and the one world that authored a new execution was the
-strongest run of its cohort.)
-
-**Replication before doctrine (the world-61 lesson; restores the world-2
-rule).** A single spectacular result — however large, and however readable
-its cell — may set a LEAN (a modest preference, ordinary funding), never
-DOCTRINE. No configuration may absorb a major budget share, be named an
-engine, or displace an incumbent default until it has produced goal events
-in at least TWO independent batches at comparable per-dollar rates. This
-binds the budget share, not the wording: concentrating funds on a
-once-confirmed cell IS crowning it, whatever the thesis calls it. The
-confirmation test is cheap — re-fund the hot configuration at ordinary test
-size next batch; scale only if it produces again. In a rare-event market a
-single streak is far more often luck than truth, and repetition is the only
-luck-filter available from receipts alone. (Audited failure: a cell whose
-true rate was ~half a purchase per batch returned eleven on one draw, was
-crowned doctrine the same iteration, and absorbed half of every later
-batch — the run's +$812 was variance, and the final policy's held-out gain
-was nearly zero.)
-
-**Verdicts, not design (the Tier B world-64 lesson).** Floors, ledgers, and
-coverage obligations govern VERDICTS — what may be believed, promoted,
-demoted, or retired — never batch design. Every batch is designed to
-maximize the goal under current beliefs, whatever the ledger's state;
-readability spend rides along inside goal-seeking batches and is never a
-batch's purpose. A thesis must contain at least one creative, audience, or
-objective decision. A thesis whose content is only ledger reconciliation,
-floor accounting, or dose equalization is not a thesis, and no rung of it
-may be written or adopted — park the bookkeeping in the standing items and
-diagnose the strongest advertising direction the evidence supports instead.
-(Audited failure: an agent spent all eight iterations on floor arithmetic —
-its final thesis corrected its own spreadsheet — made zero advertising
-decisions, and its policy regressed while its own frozen iteration-1 design
-out-earned it by 77%.)
 
 ## Stage 2 — Render the thesis at K magnitudes
 
@@ -261,14 +174,12 @@ Write K complete revised policy documents. Every rung applies ONLY the thesis �
 rung may introduce a second direction, a new theory, or an unrelated cleanup. The
 rungs differ in dose, not in direction:
 
-- **Rung 1** — add one lean or preference; most future decisions stay unchanged.
-- **Rung 2** — rewrite one operational rule around the thesis.
-- **Rung 3** — rewrite one complete policy section around the thesis.
-- **Rung 4** — apply the thesis across every directly implicated section.
-- **Rung 5** — reorganize defaults, portfolio, experimentation, and judgment
-  around the thesis wherever it has a real consequence.
-- **Rung K** — cleanly rewrite the entire policy around the thesis, preserving
-  only the goal, verified facts, protected rails, and evidence discipline.
+- **Rung 1** — the minimal change the thesis justifies: a sentence added or a
+  number nudged; most future decisions unchanged.
+- **Middle rungs** — each goes further than the last: the thesis moves from a lean,
+  to a default, to a rule; a growing share of future briefs and verdicts change.
+- **Rung K** — the policy's core is rewritten around the thesis; almost every
+  future decision changes.
 
 Each rung is an **independent rendering of the same thesis at its own
 magnitude** — the thesis applied at dose i, standing alone. Do not build rungs
@@ -280,15 +191,6 @@ only the one thesis and a bolder rung would change strictly more future
 decisions than a smaller one.
 
 Rules for every rung:
-
-- Stay inside the caller's executable action contract. A policy may reorganize
-  supported controls but must not invent additional ads, campaign fields,
-  delivery machinery, instrumentation, or enforcement hooks that the next
-  action cannot express.
-
-- Include a change map for creative, campaigns, judgment, and experimentation.
-  For each surface, state the direct implication of the one thesis or state that
-  the surface remains unchanged because the thesis has no implication there.
 
 - **Short policy (fits comfortably in full):** write each rung as a complete,
   self-contained document — a reader needs no other rung and no prior version to
@@ -313,19 +215,15 @@ Rules for every rung:
   owns the decision your thesis is about, whatever it is called.
 - The one non-negotiable is the gradient's own honesty, not any policy text:
   never fabricate evidence, never weaken the truthfulness of records, and never
-  use a broad rewrite to smuggle in an edit that the one thesis does not imply.
+  render a dose bolder than the thesis's class allows.
 
 ## Output
 
 Produce, in order, nothing else:
 
 1. `THESIS:` one sentence.
-2. `MECHANISM:` one sentence.
-3. `EVIDENCE BASIS:` matched-pair, replicated-pattern, and design evidence.
-4. `CONFIDENCE:` and `BREADTH:`, each from 0 to 1.
-5. `FALSIFIER:` one future result that would reject the thesis.
-6. The K policy documents, each with its change map under a heading
-   `## Rung 1` … `## Rung K`, smallest change first, boldest last.
+2. The K policy documents, each under a heading `## Rung 1` … `## Rung K`,
+   smallest change first, boldest last.
 
 Each rung should note its parent (the incumbent's version) so lineage survives.
 Selection, adoption, versioning, and hashing happen downstream — your job ends at
