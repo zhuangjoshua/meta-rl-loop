@@ -1,0 +1,2577 @@
+[
+  {
+    "iteration": 1,
+    "policy_version": 0,
+    "policy": "# Meta Ads Policy — v0 (seed, identical for every sim world)\n\nGOAL this policy serves: maximize settled ROAS (revenue / spend) for a $29/mo\nproduct (\"Formflow\"); purchases are the goal event.\n\n## Creative\nRun three video ads per batch. The words may lead with any angle the writer\njudges best (no earned bias yet). Declared angle families: benefit, outcome,\ncount (adoption numbers), story (named customer). A demo variant (screen-\nrecording of the product working) is an available production option, untested.\n\n## Campaigns\nStandard cold-start portfolio per batch, $200 total: a pageviews campaign\n(broad), a leads campaign (broad), sales campaigns, and optionally an\nauto-budget sales campaign (platform allocates between audiences).\nAudiences available: broad, interest_biztools, interest_niche.\n\n## Judgment\nJudge only settled results. An ad/cell with no measurement is unknown, not\nbad. Never repeat an approach that measurably failed. Unreadable cells\n(starved/short-window) are evidence of nothing.\n\n## Process\nAfter each batch, the semantic gradient reads all receipts and revises this\npolicy; a noise schedule picks the revision dose. Every batch's full receipts\naccumulate as evidence.",
+    "design_thesis": "With no prior settled-purchase evidence, use the seed portfolio to establish broad pageview and lead baselines while measuring purchases directly across all three available sales audiences. Creative exploration spans a product-working demo, a follow-up/status outcome, and reusable-template/plan-capacity framing; all claims and trial terms match the landing page.",
+    "ads": [
+      {
+        "id": "ad_demo_workflow",
+        "headline": "Turn every client intake email into one clear workflow",
+        "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. With Formflow, publish a branded intake page, collect the right details with conditional questions, and turn each response into an organized client record. See what is New, Waiting on Client, Ready, or Complete—and send updates from the same record. Start a 14-day trial for $29/month after the trial. Card required; cancel anytime from account settings.",
+        "visual": "30-second vertical screen-recording video. Open with a cluttered email inbox and several attachment thumbnails, then cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request. Show the submitted request appearing on the status board, moving from New to Waiting on Client, with an attachment and internal note visible. End on the published intake page and on-screen text: “14-day trial • $29/month after trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "benefit",
+        "named_story": false,
+        "demo": true,
+        "actual": {
+          "id": "ad_demo_workflow",
+          "headline": "Turn every client intake email into one clear workflow",
+          "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. With Formflow, publish a branded intake page, collect the right details with conditional questions, and turn each response into an organized client record. See what is New, Waiting on Client, Ready, or Complete—and send updates from the same record. Start a 14-day trial for $29/month after the trial. Card required; cancel anytime from account settings.",
+          "visual": "30-second vertical screen-recording video. Open with a cluttered email inbox and several attachment thumbnails, then cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request. Show the submitted request appearing on the status board, moving from New to Waiting on Client, with an attachment and internal note visible. End on the published intake page and on-screen text: “14-day trial • $29/month after trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_outcome_followup",
+        "headline": "Stop chasing missing client details",
+        "message": "When a project brief arrives half-finished, the work often becomes more emails, more reminders, and less visibility for the team. Formflow lets you collect project details and attachments in one structured request, automatically remind clients about missing answers, and keep every request on a live status board. Clients use a secure link—no account needed. Start your 14-day trial today.",
+        "visual": "25-second live-action-style motion video. A consultant opens a vague client email reading “I’ll send the rest soon,” then a simple animated sequence shows a missing field triggering a reminder and the client completing it through a secure link. Finish with a clean four-column status board labeled New, Waiting on Client, Ready, Complete. Large captions throughout: “Collect details.” “Follow up automatically.” “Know what’s next.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "outcome",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_outcome_followup",
+          "headline": "Stop chasing missing client details",
+          "message": "When a project brief arrives half-finished, the work often becomes more emails, more reminders, and less visibility for the team. Formflow lets you collect project details and attachments in one structured request, automatically remind clients about missing answers, and keep every request on a live status board. Clients use a secure link—no account needed. Start your 14-day trial today.",
+          "visual": "25-second live-action-style motion video. A consultant opens a vague client email reading “I’ll send the rest soon,” then a simple animated sequence shows a missing field triggering a reminder and the client completing it through a secure link. Finish with a clean four-column status board labeled New, Waiting on Client, Ready, Complete. Large captions throughout: “Collect details.” “Follow up automatically.” “Know what’s next.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_count_templates",
+        "headline": "One intake link for briefs, onboarding, and document collection",
+        "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Import an existing questionnaire or start from scratch, then share one branded link clients can complete without creating an account. Your plan includes unlimited forms, 500 active client records, and two team members. Try Formflow free for 14 days.",
+        "visual": "20-second fast-paced vertical video using crisp product-style cards. Five cards appear one at a time: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” The cards collapse into one branded intake-link card, followed by a simple plan card: “Unlimited forms • 500 active client records • 2 team members.” Close on Formflow logo and “Start your 14-day trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "count",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_count_templates",
+          "headline": "One intake link for briefs, onboarding, and document collection",
+          "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Import an existing questionnaire or start from scratch, then share one branded link clients can complete without creating an account. Your plan includes unlimited forms, 500 active client records, and two team members. Try Formflow free for 14 days.",
+          "visual": "20-second fast-paced vertical video using crisp product-style cards. Five cards appear one at a time: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” The cards collapse into one branded intake-link card, followed by a simple plan card: “Unlimited forms • 500 active client records • 2 team members.” Close on Formflow logo and “Start your 14-day trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      }
+    ],
+    "campaigns": [
+      {
+        "id": "pageviews_broad",
+        "objective": "pageviews",
+        "audience": "broad",
+        "budget": 40.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "leads_broad",
+        "objective": "leads",
+        "audience": "broad",
+        "budget": 40.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_broad",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 40.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_biztools",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 40.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_niche",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 40.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      }
+    ],
+    "receipt": {
+      "rows": [
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 73.0,
+          "ctr": 4.38,
+          "visits": 67.0,
+          "load_rate": 91.78082191780823,
+          "signups": 7.0,
+          "cpl": 1.9042857142857144,
+          "demos": 3.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 102.0,
+          "ctr": 6.12,
+          "visits": 93.0,
+          "load_rate": 91.17647058823529,
+          "signups": 11.0,
+          "cpl": 1.211818181818182,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 63.0,
+          "ctr": 3.7800000000000002,
+          "visits": 58.0,
+          "load_rate": 92.06349206349206,
+          "signups": 2.0,
+          "cpl": 6.665,
+          "demos": 2.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 46.0,
+          "ctr": 2.76,
+          "visits": 44.0,
+          "load_rate": 95.65217391304348,
+          "signups": 5.0,
+          "cpl": 2.666,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 57.0,
+          "ctr": 3.42,
+          "visits": 56.0,
+          "load_rate": 98.24561403508771,
+          "signups": 14.0,
+          "cpl": 0.9521428571428572,
+          "demos": 5.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 33.0,
+          "ctr": 1.9799999999999998,
+          "visits": 30.0,
+          "load_rate": 90.9090909090909,
+          "signups": 2.0,
+          "cpl": 6.665,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 31.0,
+          "ctr": 1.8599999999999999,
+          "visits": 29.0,
+          "load_rate": 93.54838709677419,
+          "signups": 0.0,
+          "cpl": null,
+          "demos": 0.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 79.0,
+          "ctr": 4.74,
+          "visits": 74.0,
+          "load_rate": 93.67088607594937,
+          "signups": 4.0,
+          "cpl": 3.3325,
+          "demos": 2.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "sales_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 46.0,
+          "ctr": 2.76,
+          "visits": 43.0,
+          "load_rate": 93.47826086956522,
+          "signups": 1.0,
+          "cpl": 13.33,
+          "demos": 0.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_biztools",
+          "spend": 13.33,
+          "impressions": 952,
+          "clicks": 24.0,
+          "ctr": 2.52,
+          "visits": 23.0,
+          "load_rate": 95.83333333333334,
+          "signups": 3.0,
+          "cpl": 4.443333333333333,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_biztools",
+          "spend": 13.33,
+          "impressions": 952,
+          "clicks": 23.0,
+          "ctr": 2.4149999999999996,
+          "visits": 22.0,
+          "load_rate": 95.65217391304348,
+          "signups": 5.0,
+          "cpl": 2.666,
+          "demos": 4.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "sales_biztools",
+          "spend": 13.33,
+          "impressions": 952,
+          "clicks": 20.0,
+          "ctr": 2.0999999999999996,
+          "visits": 20.0,
+          "load_rate": 100.0,
+          "signups": 3.0,
+          "cpl": 4.443333333333333,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_niche",
+          "spend": 13.33,
+          "impressions": 1111,
+          "clicks": 22.0,
+          "ctr": 1.9800000000000002,
+          "visits": 21.0,
+          "load_rate": 95.45454545454545,
+          "signups": 3.0,
+          "cpl": 4.443333333333333,
+          "demos": 3.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_niche",
+          "spend": 13.33,
+          "impressions": 1111,
+          "clicks": 42.0,
+          "ctr": 3.7800000000000002,
+          "visits": 40.0,
+          "load_rate": 95.23809523809523,
+          "signups": 5.0,
+          "cpl": 2.666,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "sales_niche",
+          "spend": 13.33,
+          "impressions": 1111,
+          "clicks": 24.0,
+          "ctr": 2.16,
+          "visits": 23.0,
+          "load_rate": 95.83333333333334,
+          "signups": 5.0,
+          "cpl": 2.666,
+          "demos": 2.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        }
+      ],
+      "funnel": {
+        "visits": 643.0,
+        "signups": 70.0,
+        "demos": 31.0,
+        "purchases": 3.0
+      },
+      "spend": 199.95,
+      "revenue": 87.0,
+      "roas": 0.4351087771942986
+    }
+  },
+  {
+    "iteration": 2,
+    "policy_version": 1,
+    "policy": "# Meta Ads Policy — candidate from v0, Rung 5\n\nGOAL: maximize settled purchase ROAS for Formflow; purchases are the goal event.\n\n## Creative\nCreate exactly three video ads:\n1. `ad_demo_workflow`: Headline: “Turn every client intake email into one clear workflow.” Message: Formflow lets teams publish a branded intake page, use conditional questions, collect attachments, and move each response through New, Waiting on Client, Ready, and Complete. Visual: a 30-second vertical screen recording from cluttered inbox to template, conditional question, published link, submitted request, and status board. CTA: Start Free Trial. End card: “14-day trial • $29/month after trial.”\n2. `ad_outcome_followup`: Headline: “Stop chasing missing client details.” Message: Formflow collects project details and attachments in one structured request, reminds clients about missing answers, and keeps requests on a live status board; clients use a secure link without an account. Visual: a 25-second vertical video showing a vague email, a missing-field reminder, completed secure-link response, and a four-column status board. CTA: Start Free Trial.\n3. `ad_count_templates`: Headline: “One intake link for briefs, onboarding, and document collection.” Message: Formflow provides templates for project briefs, discovery calls, onboarding, document collection, and change requests, plus a branded client link, unlimited forms, 500 active client records, and two team members. Visual: a 20-second vertical sequence of template cards collapsing into one branded link and plan card. CTA: Start Free Trial.\nA story-family ad requires a verified named-customer fact; until one exists, record story as unavailable and untested rather than negative.\n\n## Campaigns\nRun exactly these five fixed campaigns, totaling $830:\n- `pageviews_broad`: objective pageviews; audience broad; budget $40; ad_ids [`ad_demo_workflow`, `ad_outcome_followup`, `ad_count_templates`].\n- `leads_broad`: objective leads; audience broad; budget $40; ad_ids [`ad_demo_workflow`, `ad_outcome_followup`, `ad_count_templates`].\n- `sales_broad`: objective sales; audience broad; budget $250; ad_ids [`ad_demo_workflow`].\n- `sales_biztools`: objective sales; audience interest_biztools; budget $250; ad_ids [`ad_outcome_followup`].\n- `sales_niche`: objective sales; audience interest_niche; budget $250; ad_ids [`ad_count_templates`].\n\n## Evidence and judgment\nThe portfolio's observed starting rate is 3 purchases per $199.95. Therefore every open configuration question records once, before further receipts, a $66.65 readable-evidence floor and a $199.95 demotion floor. Accumulate spend by configuration across batches. Do not move either floor in response to later zeros or wins. A sub-$66.65 cell is UNKNOWN. At $66.65 or more, use only settled purchases and settled purchase ROAS to price that exact objective-by-audience-by-ad configuration. Portfolio comparisons across eras are directional only. A readable silent configuration may be parked UNPRICED and cannot consume further consecutive batches. Do not reduce, end, neutralize, or omit an axis value before its $199.95 demotion floor. Never repeat a measurably failed readable configuration.\n\n## Experimentation\nThe default portfolio uses three high-dose, single-ad sales cells because readable purchase evidence is the immediate constraint. Keep a coverage ledger for creative family, format, objective, audience, and combinations. Unknown values retain funding. Before refining priced choices, assign an owed incumbent-best combination to a sales test slot in a later revision. No destination, offer, or market conclusion is permitted while an incumbent-best combination remains unpriced at its readable floor.",
+    "design_thesis": "Settled-purchase evidence is still below the $66.65 readable floor for every exact sales objective-audience-ad cell. This batch preserves broad pageview and lead coverage while concentrating $160 in the three fixed single-ad sales cells; each reaches approximately $66.66 cumulative spend with prior spend, making direct settled-purchase pricing possible without treating signup results as purchase evidence. Story creative remains unavailable because no verified named-customer fact exists.",
+    "ads": [
+      {
+        "id": "ad_demo_workflow",
+        "headline": "Turn every client intake email into one clear workflow.",
+        "message": "Formflow lets teams publish a branded intake page, use conditional questions, collect attachments, and move each response through New, Waiting on Client, Ready, and Complete. Start a 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+        "visual": "30-second vertical screen recording. Open on a cluttered inbox with client emails, attachment files, and unanswered follow-up threads. Show a Formflow template being selected, a conditional question added, and a branded intake link published. Submit a sample request with an attachment, then show it appear on the status board and move through New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "benefit",
+        "named_story": false,
+        "demo": true,
+        "actual": {
+          "id": "ad_demo_workflow",
+          "headline": "Turn every client intake email into one clear workflow.",
+          "message": "Formflow lets teams publish a branded intake page, use conditional questions, collect attachments, and move each response through New, Waiting on Client, Ready, and Complete. Start a 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+          "visual": "30-second vertical screen recording. Open on a cluttered inbox with client emails, attachment files, and unanswered follow-up threads. Show a Formflow template being selected, a conditional question added, and a branded intake link published. Submit a sample request with an attachment, then show it appear on the status board and move through New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_outcome_followup",
+        "headline": "Stop chasing missing client details.",
+        "message": "Formflow collects project details and attachments in one structured request, reminds clients about missing answers, and keeps requests on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today.",
+        "visual": "25-second vertical video. Open with a vague email reading, “I’ll send the rest soon.” Cut to a Formflow intake request with one required field incomplete, followed by an automated reminder. Show the client completing the missing answer through a secure link, then reveal a clean four-column status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "outcome",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_outcome_followup",
+          "headline": "Stop chasing missing client details.",
+          "message": "Formflow collects project details and attachments in one structured request, reminds clients about missing answers, and keeps requests on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today.",
+          "visual": "25-second vertical video. Open with a vague email reading, “I’ll send the rest soon.” Cut to a Formflow intake request with one required field incomplete, followed by an automated reminder. Show the client completing the missing answer through a secure link, then reveal a clean four-column status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_count_templates",
+        "headline": "One intake link for briefs, onboarding, and document collection.",
+        "message": "Formflow provides templates for project briefs, discovery calls, onboarding, document collection, and change requests, plus a branded client link, unlimited forms, 500 active client records, and two team members. Start your 14-day trial today.",
+        "visual": "20-second vertical product-style video. Show five template cards in sequence: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and text: “Start your 14-day trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "count",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_count_templates",
+          "headline": "One intake link for briefs, onboarding, and document collection.",
+          "message": "Formflow provides templates for project briefs, discovery calls, onboarding, document collection, and change requests, plus a branded client link, unlimited forms, 500 active client records, and two team members. Start your 14-day trial today.",
+          "visual": "20-second vertical product-style video. Show five template cards in sequence: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and text: “Start your 14-day trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      }
+    ],
+    "campaigns": [
+      {
+        "id": "pageviews_broad",
+        "objective": "pageviews",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "leads_broad",
+        "objective": "leads",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_broad",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 53.33,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_biztools",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 53.33,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      },
+      {
+        "id": "sales_niche",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 53.34,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_count_templates"
+        ]
+      }
+    ],
+    "receipt": {
+      "rows": [
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 27.0,
+          "ctr": 3.2399999999999998,
+          "visits": 25.0,
+          "load_rate": 92.5925925925926,
+          "signups": 5.0,
+          "cpl": 1.334,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 38.0,
+          "ctr": 4.56,
+          "visits": 35.0,
+          "load_rate": 92.10526315789474,
+          "signups": 3.0,
+          "cpl": 2.223333333333333,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 24.0,
+          "ctr": 2.88,
+          "visits": 19.0,
+          "load_rate": 79.16666666666666,
+          "signups": 2.0,
+          "cpl": 3.335,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 31.0,
+          "ctr": 3.7199999999999998,
+          "visits": 29.0,
+          "load_rate": 93.54838709677419,
+          "signups": 6.0,
+          "cpl": 1.1116666666666666,
+          "demos": 0.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 32.0,
+          "ctr": 3.84,
+          "visits": 26.0,
+          "load_rate": 81.25,
+          "signups": 1.0,
+          "cpl": 6.67,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 25.0,
+          "ctr": 3.0,
+          "visits": 23.0,
+          "load_rate": 92.0,
+          "signups": 1.0,
+          "cpl": 6.67,
+          "demos": 0.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_broad",
+          "spend": 53.33,
+          "impressions": 6666,
+          "clicks": 136.0,
+          "ctr": 2.040127507969248,
+          "visits": 116.0,
+          "load_rate": 85.29411764705883,
+          "signups": 11.0,
+          "cpl": 4.848181818181818,
+          "demos": 5.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_biztools",
+          "spend": 53.33,
+          "impressions": 3809,
+          "clicks": 167.0,
+          "ctr": 4.384024001500094,
+          "visits": 154.0,
+          "load_rate": 92.21556886227546,
+          "signups": 16.0,
+          "cpl": 3.333125,
+          "demos": 9.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "sales_niche",
+          "spend": 53.34,
+          "impressions": 4445,
+          "clicks": 80.0,
+          "ctr": 1.799775028121485,
+          "visits": 66.0,
+          "load_rate": 82.5,
+          "signups": 9.0,
+          "cpl": 5.926666666666667,
+          "demos": 5.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        }
+      ],
+      "funnel": {
+        "visits": 493.0,
+        "signups": 54.0,
+        "demos": 26.0,
+        "purchases": 3.0
+      },
+      "spend": 200.02,
+      "revenue": 87.0,
+      "roas": 0.434956504349565
+    }
+  },
+  {
+    "iteration": 3,
+    "policy_version": 2,
+    "policy": "Parent: v1.\n\nGOAL: maximize settled purchase ROAS for Formflow; purchases are the goal event.\n\nCreative portfolio: Create exactly three video ads and treat each as a creative-family value requiring separate sales pricing by audience. `ad_demo_workflow`: headline “Turn every client intake email into one clear workflow”; show cluttered inbox, Formflow template, conditional question, branded link, submitted request, and New/Waiting on Client/Ready/Complete board; CTA Start Free Trial; end card “14-day trial • $29/month after trial.” `ad_outcome_followup`: headline “Stop chasing missing client details”; show vague email, missing-field reminder, secure-link completion, and status board; CTA Start Free Trial. `ad_count_templates`: headline “One intake link for briefs, onboarding, and document collection”; show five template cards becoming a branded link and “Unlimited forms • 500 active client records • 2 team members”; CTA Start Free Trial. Story requires a verified named-customer fact and otherwise remains unavailable and untested.\n\nCampaign portfolio: Run exactly eight fixed campaigns totaling $830. Retain objective coverage: `pageviews_broad`, pageviews, broad, $40, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`]; `leads_broad`, leads, broad, $40, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`]. Run the sales cross sweep: `sales_broad_outcome`, sales, broad, $125, ad_ids [`ad_outcome_followup`]; `sales_broad_count`, sales, broad, $125, ad_ids [`ad_count_templates`]; `sales_biztools_demo`, sales, interest_biztools, $125, ad_ids [`ad_demo_workflow`]; `sales_biztools_count`, sales, interest_biztools, $125, ad_ids [`ad_count_templates`]; `sales_niche_demo`, sales, interest_niche, $125, ad_ids [`ad_demo_workflow`]; `sales_niche_outcome`, sales, interest_niche, $125, ad_ids [`ad_outcome_followup`].\n\nEvidence discipline: The fixed opening rate is 3 purchases per $199.95. On opening any exact configuration question, record a $66.65 readable floor and $199.95 demotion floor once; accumulate spending across batches and never revise either number. Below $66.65, label the cell UNKNOWN. At $66.65 or higher, use only settled purchases and settled purchase ROAS for that exact objective-by-audience-by-ad cell. Never pool audience results to price creative. A readable zero may be parked UNPRICED and may not consume further consecutive batches. No axis value may lose funding before its $199.95 demotion floor, and no measurably failed readable configuration may be repeated.\n\nDecision order: Maintain a ledger for creative family, format, objective, audience, and every combination. First service unpriced sales creative-by-audience crosses, including any newly owed incumbent-best cross. Then price readable crosses using settled purchase ROAS. Only then may a later policy refine among priced crosses. The pageviews and leads values remain funded at $40 each because they have not reached their demotion floors. Portfolio-era comparisons are directional only. A destination, offer, or market diagnosis is prohibited while an incumbent-best sales cross remains unpriced.",
+    "design_thesis": "Hold broad pageview and lead coverage at $40 each while using the remaining $120 to service the six still-unpriced sales creative-by-audience crosses at equal $20 doses. The previously readable single-ad sales cells are not repeated: broad demo recorded a readable zero and is parked, while biztools outcome and niche count are already priced from settled purchases. The three required video families remain distinct—workflow demo, missing-detail follow-up outcome, and template/capacity framing—and no named-customer story is introduced without verified customer evidence.",
+    "ads": [
+      {
+        "id": "ad_demo_workflow",
+        "headline": "Turn every client intake email into one clear workflow",
+        "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. With Formflow, choose a template, publish a branded intake page, use conditional questions to collect the right details, and keep every response in one organized record. See each request move through New, Waiting on Client, Ready, and Complete. Start a 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+        "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachment files, and unanswered follow-up threads. Show a Formflow template selected, a conditional question added, and a branded intake link published. Submit a sample request with an attachment, then show it appear on the status board and move through New, Waiting on Client, Ready, and Complete. End card reads: “14-day trial • $29/month after trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "benefit",
+        "named_story": false,
+        "demo": true,
+        "actual": {
+          "id": "ad_demo_workflow",
+          "headline": "Turn every client intake email into one clear workflow",
+          "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. With Formflow, choose a template, publish a branded intake page, use conditional questions to collect the right details, and keep every response in one organized record. See each request move through New, Waiting on Client, Ready, and Complete. Start a 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+          "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachment files, and unanswered follow-up threads. Show a Formflow template selected, a conditional question added, and a branded intake link published. Submit a sample request with an attachment, then show it appear on the status board and move through New, Waiting on Client, Ready, and Complete. End card reads: “14-day trial • $29/month after trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_outcome_followup",
+        "headline": "Stop chasing missing client details",
+        "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required.",
+        "visual": "25-second vertical video. Open with a vague email reading, “I’ll send the rest soon.” Cut to a Formflow intake request with a required field incomplete, followed by an automated reminder. Show the client completing the missing answer through a secure link, then reveal a clean four-column status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "outcome",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_outcome_followup",
+          "headline": "Stop chasing missing client details",
+          "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required.",
+          "visual": "25-second vertical video. Open with a vague email reading, “I’ll send the rest soon.” Cut to a Formflow intake request with a required field incomplete, followed by an automated reminder. Show the client completing the missing answer through a secure link, then reveal a clean four-column status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_count_templates",
+        "headline": "One intake link for briefs, onboarding, and document collection",
+        "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link that clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required.",
+        "visual": "20-second vertical product-style video. Show five template cards in sequence: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and text: “Start your 14-day trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "count",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_count_templates",
+          "headline": "One intake link for briefs, onboarding, and document collection",
+          "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link that clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required.",
+          "visual": "20-second vertical product-style video. Show five template cards in sequence: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and text: “Start your 14-day trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      }
+    ],
+    "campaigns": [
+      {
+        "id": "pageviews_broad",
+        "objective": "pageviews",
+        "audience": "broad",
+        "budget": 40.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "leads_broad",
+        "objective": "leads",
+        "audience": "broad",
+        "budget": 40.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_broad_outcome",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      },
+      {
+        "id": "sales_broad_count",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_biztools_demo",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_biztools_count",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_niche_demo",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_niche_outcome",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      }
+    ],
+    "receipt": {
+      "rows": [
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 82.0,
+          "ctr": 4.92,
+          "visits": 77.0,
+          "load_rate": 93.90243902439023,
+          "signups": 12.0,
+          "cpl": 1.1108333333333333,
+          "demos": 8.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 92.0,
+          "ctr": 5.52,
+          "visits": 86.0,
+          "load_rate": 93.47826086956522,
+          "signups": 10.0,
+          "cpl": 1.333,
+          "demos": 5.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 64.0,
+          "ctr": 3.84,
+          "visits": 58.0,
+          "load_rate": 90.625,
+          "signups": 10.0,
+          "cpl": 1.333,
+          "demos": 4.0,
+          "purchases": 2.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 48.0,
+          "ctr": 2.88,
+          "visits": 44.0,
+          "load_rate": 91.66666666666666,
+          "signups": 5.0,
+          "cpl": 2.666,
+          "demos": 3.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 78.0,
+          "ctr": 4.68,
+          "visits": 70.0,
+          "load_rate": 89.74358974358975,
+          "signups": 8.0,
+          "cpl": 1.66625,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 69.0,
+          "ctr": 4.14,
+          "visits": 62.0,
+          "load_rate": 89.85507246376811,
+          "signups": 7.0,
+          "cpl": 1.9042857142857144,
+          "demos": 3.0,
+          "purchases": 2.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_broad_outcome",
+          "spend": 20.0,
+          "impressions": 2500,
+          "clicks": 79.0,
+          "ctr": 3.16,
+          "visits": 73.0,
+          "load_rate": 92.40506329113924,
+          "signups": 15.0,
+          "cpl": 1.3333333333333333,
+          "demos": 7.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "sales_broad_count",
+          "spend": 20.0,
+          "impressions": 2500,
+          "clicks": 83.0,
+          "ctr": 3.32,
+          "visits": 78.0,
+          "load_rate": 93.97590361445783,
+          "signups": 10.0,
+          "cpl": 2.0,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_biztools_demo",
+          "spend": 20.0,
+          "impressions": 1428,
+          "clicks": 56.0,
+          "ctr": 3.92,
+          "visits": 53.0,
+          "load_rate": 94.64285714285714,
+          "signups": 7.0,
+          "cpl": 2.857142857142857,
+          "demos": 2.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "sales_biztools_count",
+          "spend": 20.0,
+          "impressions": 1428,
+          "clicks": 52.0,
+          "ctr": 3.6399999999999997,
+          "visits": 50.0,
+          "load_rate": 96.15384615384616,
+          "signups": 10.0,
+          "cpl": 2.0,
+          "demos": 2.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_niche_demo",
+          "spend": 20.0,
+          "impressions": 1666,
+          "clicks": 61.0,
+          "ctr": 3.66,
+          "visits": 58.0,
+          "load_rate": 95.08196721311475,
+          "signups": 7.0,
+          "cpl": 2.857142857142857,
+          "demos": 3.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_niche_outcome",
+          "spend": 20.0,
+          "impressions": 1666,
+          "clicks": 50.0,
+          "ctr": 3.0,
+          "visits": 42.0,
+          "load_rate": 84.0,
+          "signups": 6.0,
+          "cpl": 3.3333333333333335,
+          "demos": 5.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        }
+      ],
+      "funnel": {
+        "visits": 751.0,
+        "signups": 107.0,
+        "demos": 45.0,
+        "purchases": 9.0
+      },
+      "spend": 199.98,
+      "revenue": 261.0,
+      "roas": 1.3051305130513051
+    }
+  },
+  {
+    "iteration": 4,
+    "policy_version": 3,
+    "policy": "Parent: v2.\n\nGOAL: maximize settled purchase ROAS for Formflow; purchases are the goal event.\n\nCreative: Create exactly three video ads. `ad_demo_workflow`: headline “Turn every client intake email into one clear workflow”; show a cluttered inbox, Formflow template, conditional question, branded link, submitted request, and New/Waiting on Client/Ready/Complete board; CTA Start Free Trial; end card “14-day trial • $29/month after trial.” `ad_outcome_followup`: headline “Stop chasing missing client details”; show a vague email, missing-field reminder, secure-link completion, and status board; CTA Start Free Trial. `ad_count_templates`: headline “One intake link for briefs, onboarding, and document collection”; show five template cards becoming a branded link and “Unlimited forms • 500 active client records • 2 team members”; CTA Start Free Trial. Each is a separate creative-family value and must be priced separately by sales audience. A story-family ad requires a verified named-customer fact; without one, story is unavailable and untested.\n\nCampaigns: Run exactly eight fixed campaigns totaling $279.92. Preserve objective coverage without changing its creative mix: `pageviews_broad`, objective pageviews, audience broad, budget $40.00, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`]; `leads_broad`, objective leads, audience broad, budget $40.00, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`]. Complete every currently open sales creative-by-audience question at its exact remaining dose: `sales_broad_outcome`, objective sales, audience broad, budget $33.32, ad_ids [`ad_outcome_followup`]; `sales_broad_count`, objective sales, audience broad, budget $33.32, ad_ids [`ad_count_templates`]; `sales_biztools_demo`, objective sales, audience interest_biztools, budget $33.32, ad_ids [`ad_demo_workflow`]; `sales_biztools_count`, objective sales, audience interest_biztools, budget $33.32, ad_ids [`ad_count_templates`]; `sales_niche_demo`, objective sales, audience interest_niche, budget $33.32, ad_ids [`ad_demo_workflow`]; `sales_niche_outcome`, objective sales, audience interest_niche, budget $33.32, ad_ids [`ad_outcome_followup`]. Each listed sales cell has accumulated $33.33 and this campaign budget brings it to at least its $66.65 recorded readable floor. No sales allocation is made beyond those completion doses in this policy.\n\nEvidence, coverage, and judgment: The fixed opening rate is 3 purchases per $199.95. When an exact configuration question opens, permanently record a $66.65 readable floor and a $199.95 demotion floor from that opening rate. Accumulate exact-cell spend across batches and never revise either floor in response to later receipts. Below $66.65, an exact objective-by-audience-by-ad cell is UNKNOWN, not negative. At or above $66.65, use only settled purchases and settled purchase ROAS to price that exact cell. Never pool audiences to price creative or compare funnel conversion rates across unmatched objectives or audiences. A readable zero may be parked UNPRICED and may not consume further consecutive batches. No creative family, format, objective, audience, or combination value may lose funding before its recorded $199.95 demotion floor; omission or reduced funding counts as demotion. Never repeat a measurably failed readable configuration.\n\nDecision order: Maintain a ledger for creative family, format, objective, audience, and every combination. The first sales priority is completing every open exact sales cross to its recorded readable floor; the present six $33.32 doses satisfy that priority. Once settled results are available, price only those exact cells. Then fund any newly owed incumbent-best cross at its fixed readable dose before refining among priced cells. The pageviews and leads values remain funded at $40.00 each because they have not reached their demotion floors. Portfolio-era comparisons are directional only. A destination, offer, or market diagnosis is prohibited while any incumbent-best sales cross remains unpriced.",
+    "design_thesis": "Preserve broad pageview and lead coverage while maintaining equal direct-sales exploration across the six open creative-by-audience cells. Do not use signup or click results to price sales performance; each video retains its distinct workflow, follow-up, or template-and-capacity value proposition.",
+    "ads": [
+      {
+        "id": "ad_demo_workflow",
+        "headline": "Turn every client intake email into one clear workflow",
+        "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. With Formflow, choose a template, add conditional questions, publish a branded intake link, and turn each response into an organized client record. Track every request from New to Waiting on Client, Ready, and Complete. Start a 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+        "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachments, and unanswered follow-up threads. Cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request with an attachment. Show the request on a board moving through columns labeled New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "benefit",
+        "named_story": false,
+        "demo": true,
+        "actual": {
+          "id": "ad_demo_workflow",
+          "headline": "Turn every client intake email into one clear workflow",
+          "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. With Formflow, choose a template, add conditional questions, publish a branded intake link, and turn each response into an organized client record. Track every request from New to Waiting on Client, Ready, and Complete. Start a 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+          "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachments, and unanswered follow-up threads. Cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request with an attachment. Show the request on a board moving through columns labeled New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_outcome_followup",
+        "headline": "Stop chasing missing client details",
+        "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request visible on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required.",
+        "visual": "25-second vertical video. Open with a vague client email reading, “I’ll send the rest soon.” Show a Formflow request with a required field missing, then an automatic reminder being sent. Cut to the client completing the answer through a secure link, followed by a clean status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "outcome",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_outcome_followup",
+          "headline": "Stop chasing missing client details",
+          "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request visible on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required.",
+          "visual": "25-second vertical video. Open with a vague client email reading, “I’ll send the rest soon.” Show a Formflow request with a required field missing, then an automatic reminder being sent. Cut to the client completing the answer through a secure link, followed by a clean status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_count_templates",
+        "headline": "One intake link for briefs, onboarding, and document collection",
+        "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required.",
+        "visual": "20-second fast-paced vertical product video. Show five template cards: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and “Start your 14-day trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "count",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_count_templates",
+          "headline": "One intake link for briefs, onboarding, and document collection",
+          "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required.",
+          "visual": "20-second fast-paced vertical product video. Show five template cards: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and “Start your 14-day trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      }
+    ],
+    "campaigns": [
+      {
+        "id": "pageviews_broad",
+        "objective": "pageviews",
+        "audience": "broad",
+        "budget": 40.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "leads_broad",
+        "objective": "leads",
+        "audience": "broad",
+        "budget": 40.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_broad_outcome",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      },
+      {
+        "id": "sales_broad_count",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_biztools_demo",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_biztools_count",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_niche_demo",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_niche_outcome",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      }
+    ],
+    "receipt": {
+      "rows": [
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 73.0,
+          "ctr": 4.38,
+          "visits": 67.0,
+          "load_rate": 91.78082191780823,
+          "signups": 8.0,
+          "cpl": 1.66625,
+          "demos": 4.0,
+          "purchases": 2.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 67.0,
+          "ctr": 4.02,
+          "visits": 62.0,
+          "load_rate": 92.53731343283582,
+          "signups": 8.0,
+          "cpl": 1.66625,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 67.0,
+          "ctr": 4.02,
+          "visits": 65.0,
+          "load_rate": 97.01492537313433,
+          "signups": 7.0,
+          "cpl": 1.9042857142857144,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 56.0,
+          "ctr": 3.36,
+          "visits": 48.0,
+          "load_rate": 85.71428571428571,
+          "signups": 7.0,
+          "cpl": 1.9042857142857144,
+          "demos": 4.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 61.0,
+          "ctr": 3.66,
+          "visits": 55.0,
+          "load_rate": 90.1639344262295,
+          "signups": 6.0,
+          "cpl": 2.2216666666666667,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 61.0,
+          "ctr": 3.66,
+          "visits": 58.0,
+          "load_rate": 95.08196721311475,
+          "signups": 3.0,
+          "cpl": 4.443333333333333,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_broad_outcome",
+          "spend": 20.0,
+          "impressions": 2500,
+          "clicks": 91.0,
+          "ctr": 3.64,
+          "visits": 89.0,
+          "load_rate": 97.8021978021978,
+          "signups": 13.0,
+          "cpl": 1.5384615384615385,
+          "demos": 7.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "sales_broad_count",
+          "spend": 20.0,
+          "impressions": 2500,
+          "clicks": 73.0,
+          "ctr": 2.92,
+          "visits": 68.0,
+          "load_rate": 93.15068493150685,
+          "signups": 2.0,
+          "cpl": 10.0,
+          "demos": 0.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_biztools_demo",
+          "spend": 20.0,
+          "impressions": 1428,
+          "clicks": 54.0,
+          "ctr": 3.7800000000000002,
+          "visits": 46.0,
+          "load_rate": 85.18518518518519,
+          "signups": 7.0,
+          "cpl": 2.857142857142857,
+          "demos": 3.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "sales_biztools_count",
+          "spend": 20.0,
+          "impressions": 1428,
+          "clicks": 35.0,
+          "ctr": 2.4499999999999997,
+          "visits": 32.0,
+          "load_rate": 91.42857142857143,
+          "signups": 5.0,
+          "cpl": 4.0,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_niche_demo",
+          "spend": 20.0,
+          "impressions": 1666,
+          "clicks": 54.0,
+          "ctr": 3.2399999999999998,
+          "visits": 51.0,
+          "load_rate": 94.44444444444444,
+          "signups": 10.0,
+          "cpl": 2.0,
+          "demos": 3.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_niche_outcome",
+          "spend": 20.0,
+          "impressions": 1666,
+          "clicks": 63.0,
+          "ctr": 3.7800000000000002,
+          "visits": 60.0,
+          "load_rate": 95.23809523809523,
+          "signups": 10.0,
+          "cpl": 2.0,
+          "demos": 2.0,
+          "purchases": 2.0,
+          "trust": "trust"
+        }
+      ],
+      "funnel": {
+        "visits": 701.0,
+        "signups": 86.0,
+        "demos": 32.0,
+        "purchases": 6.0
+      },
+      "spend": 199.98,
+      "revenue": 174.0,
+      "roas": 0.8700870087008701
+    }
+  },
+  {
+    "iteration": 5,
+    "policy_version": 4,
+    "policy": "Parent: v3.\n\nGOAL: maximize settled purchase ROAS for Formflow; purchases are the goal event.\n\nPortfolio principle: Sales funding exists first to create settled, readable evidence for exact sales objective-by-audience-by-ad cells. Until an open cell reaches its recorded readable floor, neither attractive pageview or lead receipts nor sub-floor purchases authorize a sales reallocation. The declared creative-family vocabulary is workflow demo, follow-up outcome, and templates/capacity count. Story is unavailable and untested until a verified named-customer fact exists.\n\nCreative: Create exactly three video ads. `ad_demo_workflow`: headline “Turn every client intake email into one clear workflow”; show a cluttered inbox, Formflow template, conditional question, branded link, submitted request, and New/Waiting on Client/Ready/Complete board; CTA “Start Free Trial”; end card “14-day trial • $29/month after trial.” `ad_outcome_followup`: headline “Stop chasing missing client details”; show a vague email, missing-field reminder, secure-link completion, and status board; CTA “Start Free Trial.” `ad_count_templates`: headline “One intake link for briefs, onboarding, and document collection”; show five template cards becoming a branded link and “Unlimited forms • 500 active client records • 2 team members”; CTA “Start Free Trial.” These three ads are retained because each belongs to an open required sales cross; they are not ranked using non-sales objectives.\n\nCampaigns: Run exactly eight fixed campaigns totaling $279.92. The protected coverage layer is `pageviews_broad`, objective pageviews, audience broad, budget $40.00, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`], and `leads_broad`, objective leads, audience broad, budget $40.00, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`]. The readable-sales completion layer is `sales_broad_outcome`, objective sales, audience broad, budget $33.32, ad_ids [`ad_outcome_followup`]; `sales_broad_count`, objective sales, audience broad, budget $33.32, ad_ids [`ad_count_templates`]; `sales_biztools_demo`, objective sales, audience interest_biztools, budget $33.32, ad_ids [`ad_demo_workflow`]; `sales_biztools_count`, objective sales, audience interest_biztools, budget $33.32, ad_ids [`ad_count_templates`]; `sales_niche_demo`, objective sales, audience interest_niche, budget $33.32, ad_ids [`ad_demo_workflow`]; `sales_niche_outcome`, objective sales, audience interest_niche, budget $33.32, ad_ids [`ad_outcome_followup`]. Each completion cell has $33.33 accumulated spend and reaches at least $66.65 with this $33.32 dose.\n\nEvidence rules: The opening rate is 3 purchases per $199.95. At the opening of any exact question, fix its readable floor at $66.65 and demotion floor at $199.95; accumulate exact-cell spend across batches and never recalculate those floors. A cell below $66.65 is UNKNOWN. A cell at or above $66.65 is priced only by settled purchases and settled purchase ROAS for its exact objective, audience, and ad. Never pool audiences or use unmatched-objective funnel rates to price sales creative. A readable zero may be parked UNPRICED and may not consume further consecutive batches. A configuration that measurably fails after readable settled evidence is never repeated. No owned creative family, format, objective, audience, or combination loses funding before its recorded $199.95 demotion floor.\n\nDecision sequence: First complete all open exact sales cells. Second, after settlement, price those cells separately. Third, service every newly owed incumbent-best cross at its fixed readable dose. Only fourth, refine among priced cells. Maintain coverage records for creative family, format, objective, audience, and combinations; unknown values remain funded and no axis is settled while an owned value or incumbent-best cross is unpriced. The $40.00 pageviews and $40.00 leads campaigns remain because their objective values are below their demotion floors. Portfolio-era comparisons are directional only. No destination, offer, or market diagnosis is permitted while an incumbent-best sales cross remains unpriced.",
+    "design_thesis": "Maintain the protected broad pageview and lead coverage at $40 each. Use the remaining sales budget in equal fixed, single-ad audience cells to complete and preserve direct settled-purchase evidence for every still-open workflow-demo, follow-up-outcome, and templates-capacity cross. Sales judgments remain limited to matched sales objective, audience, and ad cells; no named-customer story is introduced without verified evidence.",
+    "ads": [
+      {
+        "id": "ad_demo_workflow",
+        "headline": "Turn every client intake email into one clear workflow",
+        "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. With Formflow, choose a template, add conditional questions, publish a branded intake link, and turn each response into an organized client record. Track every request from New to Waiting on Client, Ready, and Complete. Start a 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+        "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachments, and unanswered follow-up threads. Cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request with an attachment. Show the request on a board moving through columns labeled New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "benefit",
+        "named_story": false,
+        "demo": true,
+        "actual": {
+          "id": "ad_demo_workflow",
+          "headline": "Turn every client intake email into one clear workflow",
+          "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. With Formflow, choose a template, add conditional questions, publish a branded intake link, and turn each response into an organized client record. Track every request from New to Waiting on Client, Ready, and Complete. Start a 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+          "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachments, and unanswered follow-up threads. Cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request with an attachment. Show the request on a board moving through columns labeled New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_outcome_followup",
+        "headline": "Stop chasing missing client details",
+        "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request visible on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required.",
+        "visual": "25-second vertical video. Open with a vague client email reading, “I’ll send the rest soon.” Show a Formflow request with a required field missing, then an automatic reminder being sent. Cut to the client completing the answer through a secure link, followed by a clean status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "outcome",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_outcome_followup",
+          "headline": "Stop chasing missing client details",
+          "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request visible on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required.",
+          "visual": "25-second vertical video. Open with a vague client email reading, “I’ll send the rest soon.” Show a Formflow request with a required field missing, then an automatic reminder being sent. Cut to the client completing the answer through a secure link, followed by a clean status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_count_templates",
+        "headline": "One intake link for briefs, onboarding, and document collection",
+        "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required.",
+        "visual": "20-second fast-paced vertical product video. Show five template cards: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and “Start your 14-day trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "count",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_count_templates",
+          "headline": "One intake link for briefs, onboarding, and document collection",
+          "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required.",
+          "visual": "20-second fast-paced vertical product video. Show five template cards: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and “Start your 14-day trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      }
+    ],
+    "campaigns": [
+      {
+        "id": "pageviews_broad",
+        "objective": "pageviews",
+        "audience": "broad",
+        "budget": 40.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "leads_broad",
+        "objective": "leads",
+        "audience": "broad",
+        "budget": 40.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_broad_outcome",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      },
+      {
+        "id": "sales_broad_count",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_biztools_demo",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_biztools_count",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_niche_demo",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_niche_outcome",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      }
+    ],
+    "receipt": {
+      "rows": [
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 65.0,
+          "ctr": 3.9,
+          "visits": 56.0,
+          "load_rate": 86.15384615384616,
+          "signups": 5.0,
+          "cpl": 2.666,
+          "demos": 3.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 85.0,
+          "ctr": 5.1,
+          "visits": 78.0,
+          "load_rate": 91.76470588235294,
+          "signups": 13.0,
+          "cpl": 1.0253846153846153,
+          "demos": 6.0,
+          "purchases": 2.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "pageviews_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 54.0,
+          "ctr": 3.2399999999999998,
+          "visits": 50.0,
+          "load_rate": 92.5925925925926,
+          "signups": 6.0,
+          "cpl": 2.2216666666666667,
+          "demos": 4.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 67.0,
+          "ctr": 4.02,
+          "visits": 63.0,
+          "load_rate": 94.02985074626866,
+          "signups": 10.0,
+          "cpl": 1.333,
+          "demos": 4.0,
+          "purchases": 2.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 74.0,
+          "ctr": 4.4399999999999995,
+          "visits": 69.0,
+          "load_rate": 93.24324324324324,
+          "signups": 10.0,
+          "cpl": 1.333,
+          "demos": 4.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "leads_broad",
+          "spend": 13.33,
+          "impressions": 1666,
+          "clicks": 59.0,
+          "ctr": 3.54,
+          "visits": 53.0,
+          "load_rate": 89.83050847457628,
+          "signups": 8.0,
+          "cpl": 1.66625,
+          "demos": 4.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_broad_outcome",
+          "spend": 20.0,
+          "impressions": 2500,
+          "clicks": 93.0,
+          "ctr": 3.7199999999999998,
+          "visits": 85.0,
+          "load_rate": 91.39784946236558,
+          "signups": 10.0,
+          "cpl": 2.0,
+          "demos": 6.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "sales_broad_count",
+          "spend": 20.0,
+          "impressions": 2500,
+          "clicks": 50.0,
+          "ctr": 2.0,
+          "visits": 47.0,
+          "load_rate": 94.0,
+          "signups": 2.0,
+          "cpl": 10.0,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_biztools_demo",
+          "spend": 20.0,
+          "impressions": 1428,
+          "clicks": 43.0,
+          "ctr": 3.01,
+          "visits": 40.0,
+          "load_rate": 93.02325581395348,
+          "signups": 8.0,
+          "cpl": 2.5,
+          "demos": 4.0,
+          "purchases": 3.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "sales_biztools_count",
+          "spend": 20.0,
+          "impressions": 1428,
+          "clicks": 45.0,
+          "ctr": 3.15,
+          "visits": 41.0,
+          "load_rate": 91.11111111111111,
+          "signups": 4.0,
+          "cpl": 5.0,
+          "demos": 3.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_niche_demo",
+          "spend": 20.0,
+          "impressions": 1666,
+          "clicks": 40.0,
+          "ctr": 2.4,
+          "visits": 36.0,
+          "load_rate": 90.0,
+          "signups": 2.0,
+          "cpl": 10.0,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_niche_outcome",
+          "spend": 20.0,
+          "impressions": 1666,
+          "clicks": 51.0,
+          "ctr": 3.06,
+          "visits": 45.0,
+          "load_rate": 88.23529411764706,
+          "signups": 5.0,
+          "cpl": 4.0,
+          "demos": 3.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        }
+      ],
+      "funnel": {
+        "visits": 663.0,
+        "signups": 83.0,
+        "demos": 43.0,
+        "purchases": 9.0
+      },
+      "spend": 199.98,
+      "revenue": 261.0,
+      "roas": 1.3051305130513051
+    }
+  },
+  {
+    "iteration": 6,
+    "policy_version": 5,
+    "policy": "Parent: v4.\n\nGOAL: maximize settled purchase ROAS for Formflow; purchases are the goal event.\n\nPortfolio principle: Settled readable sales evidence supports an audience-specific creative portfolio: use follow-up outcome in broad and interest_niche and workflow demo in interest_biztools. Templates/capacity has accumulated about $213.33 in sales funding, exceeding its $199.95 recorded demotion floor, and it underperformed the matched preferred creative in broad and biztools; it is therefore demoted from sales eligibility. Story remains unavailable and untested until a verified named-customer fact exists.\n\nCreative: Create exactly three video ads. `ad_demo_workflow`: headline “Turn every client intake email into one clear workflow”; show a cluttered inbox, Formflow template, conditional question, branded link, submitted request, and New/Waiting on Client/Ready/Complete board; CTA “Start Free Trial”; end card “14-day trial • $29/month after trial.” `ad_outcome_followup`: headline “Stop chasing missing client details”; show a vague email, missing-field reminder, secure-link completion, and status board; CTA “Start Free Trial.” `ad_count_templates`: headline “One intake link for briefs, onboarding, and document collection”; show five template cards becoming a branded link and “Unlimited forms • 500 active client records • 2 team members”; CTA “Start Free Trial.” The templates/capacity ad is not sales-eligible under this policy because its family is demoted on readable settled sales evidence.\n\nCampaigns: Run exactly five fixed campaigns totaling $305.00. `pageviews_broad`: objective pageviews, audience broad, budget $40.00, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`]. `leads_broad`: objective leads, audience broad, budget $40.00, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`]. `sales_broad_outcome`: objective sales, audience broad, budget $75.00, ad_ids [`ad_outcome_followup`]. `sales_biztools_demo`: objective sales, audience interest_biztools, budget $75.00, ad_ids [`ad_demo_workflow`]. `sales_niche_outcome`: objective sales, audience interest_niche, budget $75.00, ad_ids [`ad_outcome_followup`].\n\nEvidence and decisions: Exact sales questions retain the $66.65 readable floor and $199.95 demotion floor fixed at opening from 3 purchases per $199.95; exact-cell spend accumulates and floors never change. Below $66.65, a cell is UNKNOWN. At or above $66.65, price only settled purchases and settled purchase ROAS in the exact sales objective, audience, and ad cell. Never pool audiences or use non-sales outcomes to price sales creative. A readable zero may be parked UNPRICED and may not consume further consecutive batches. Never relaunch a measurably failed configuration. The templates/capacity demotion is licensed by its recorded family spend above $199.95; no other family, audience, objective, format, or combination loses funding before its own recorded demotion floor. Maintain coverage records and fund an owed unpriced incumbent-best cross before any further refinement. Portfolio-era comparisons are directional only; do not diagnose destination, offer, or market while an incumbent-best sales cross remains unpriced.",
+    "design_thesis": "Keep the three sales-eligible, audience-specific creative crosses identified by settled matched sales evidence: follow-up outcome in broad and interest_niche, and workflow demo in interest_biztools. Templates/capacity remains excluded from sales eligibility after its recorded family-level demotion. Preserve broad pageview and lead creative coverage without using those proxy outcomes to price purchase performance. The five fixed campaigns total exactly $200.00.",
+    "ads": [
+      {
+        "id": "ad_demo_workflow",
+        "headline": "Turn every client intake email into one clear workflow",
+        "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. Formflow lets you choose a template, add conditional questions, publish a branded intake link, and turn each response into an organized client record. Track requests from New to Waiting on Client, Ready, and Complete. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+        "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachments, and unanswered follow-up threads. Cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request with an attachment. Show the request appearing on a board and moving through columns labeled New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "benefit",
+        "named_story": false,
+        "demo": true,
+        "actual": {
+          "id": "ad_demo_workflow",
+          "headline": "Turn every client intake email into one clear workflow",
+          "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. Formflow lets you choose a template, add conditional questions, publish a branded intake link, and turn each response into an organized client record. Track requests from New to Waiting on Client, Ready, and Complete. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+          "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachments, and unanswered follow-up threads. Cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request with an attachment. Show the request appearing on a board and moving through columns labeled New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_outcome_followup",
+        "headline": "Stop chasing missing client details",
+        "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request visible on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+        "visual": "25-second vertical video. Open with a vague client email reading, “I’ll send the rest soon.” Show a Formflow request with a required field missing, then an automatic reminder being sent. Cut to the client completing the answer through a secure link, followed by a clean status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.” End on “14-day trial • $29/month after trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "outcome",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_outcome_followup",
+          "headline": "Stop chasing missing client details",
+          "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request visible on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+          "visual": "25-second vertical video. Open with a vague client email reading, “I’ll send the rest soon.” Show a Formflow request with a required field missing, then an automatic reminder being sent. Cut to the client completing the answer through a secure link, followed by a clean status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.” End on “14-day trial • $29/month after trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_count_templates",
+        "headline": "One intake link for briefs, onboarding, and document collection",
+        "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required.",
+        "visual": "20-second fast-paced vertical product video. Show five template cards: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and “Start your 14-day trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "count",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_count_templates",
+          "headline": "One intake link for briefs, onboarding, and document collection",
+          "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required.",
+          "visual": "20-second fast-paced vertical product video. Show five template cards: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and “Start your 14-day trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      }
+    ],
+    "campaigns": [
+      {
+        "id": "pageviews_broad",
+        "objective": "pageviews",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "leads_broad",
+        "objective": "leads",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_broad_outcome",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 53.33,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      },
+      {
+        "id": "sales_biztools_demo",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 53.33,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_niche_outcome",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 53.34,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      }
+    ],
+    "receipt": {
+      "rows": [
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 40.0,
+          "ctr": 4.8,
+          "visits": 35.0,
+          "load_rate": 87.5,
+          "signups": 6.0,
+          "cpl": 1.1116666666666666,
+          "demos": 5.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 41.0,
+          "ctr": 4.92,
+          "visits": 39.0,
+          "load_rate": 95.1219512195122,
+          "signups": 4.0,
+          "cpl": 1.6675,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 19.0,
+          "ctr": 2.28,
+          "visits": 15.0,
+          "load_rate": 78.94736842105263,
+          "signups": 1.0,
+          "cpl": 6.67,
+          "demos": 0.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 29.0,
+          "ctr": 3.4799999999999995,
+          "visits": 29.0,
+          "load_rate": 100.0,
+          "signups": 3.0,
+          "cpl": 2.223333333333333,
+          "demos": 2.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 30.0,
+          "ctr": 3.5999999999999996,
+          "visits": 27.0,
+          "load_rate": 90.0,
+          "signups": 6.0,
+          "cpl": 1.1116666666666666,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 15.0,
+          "ctr": 1.7999999999999998,
+          "visits": 15.0,
+          "load_rate": 100.0,
+          "signups": 0.0,
+          "cpl": null,
+          "demos": 0.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_broad_outcome",
+          "spend": 53.33,
+          "impressions": 6666,
+          "clicks": 190.0,
+          "ctr": 2.8501781361335086,
+          "visits": 183.0,
+          "load_rate": 96.3157894736842,
+          "signups": 25.0,
+          "cpl": 2.1332,
+          "demos": 9.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_biztools_demo",
+          "spend": 53.33,
+          "impressions": 3809,
+          "clicks": 190.0,
+          "ctr": 4.98781173823364,
+          "visits": 182.0,
+          "load_rate": 95.78947368421052,
+          "signups": 23.0,
+          "cpl": 2.318695652173913,
+          "demos": 10.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_niche_outcome",
+          "spend": 53.34,
+          "impressions": 4445,
+          "clicks": 135.0,
+          "ctr": 3.0371203599550056,
+          "visits": 130.0,
+          "load_rate": 96.29629629629629,
+          "signups": 20.0,
+          "cpl": 2.6670000000000003,
+          "demos": 4.0,
+          "purchases": 2.0,
+          "trust": "trust"
+        }
+      ],
+      "funnel": {
+        "visits": 655.0,
+        "signups": 88.0,
+        "demos": 32.0,
+        "purchases": 2.0
+      },
+      "spend": 200.02,
+      "revenue": 58.0,
+      "roas": 0.28997100289971
+    }
+  },
+  {
+    "iteration": 7,
+    "policy_version": 6,
+    "policy": "Parent: v5.\n\nGOAL: maximize settled purchase ROAS for Formflow; purchases are the goal event.\n\nPortfolio principle: Sales preferences and sales eligibility are separate for every exact creative-by-audience sales cross. Settled receipts currently prefer follow-up outcome in broad and interest_niche and workflow demo in interest_biztools, but a lower-performing workflow-demo or follow-up-outcome cross remains funded until its own fixed $199.95 demotion floor is reached. Templates/capacity alone is sales-ineligible because its family has accumulated about $213.33 in sales funding above its recorded demotion floor. Story remains unavailable and untested until a verified named-customer fact exists.\n\nCreative: Create exactly three video ads. `ad_demo_workflow` is a video headed “Turn every client intake email into one clear workflow”; show a cluttered inbox, a Formflow template, a conditional question, a branded link, a submitted request, and a New/Waiting on Client/Ready/Complete board; use CTA “Start Free Trial”; end with “14-day trial • $29/month after trial.” `ad_outcome_followup` is a video headed “Stop chasing missing client details”; show a vague email, a missing-field reminder, secure-link completion, and a status board; use CTA “Start Free Trial.” `ad_count_templates` is a video headed “One intake link for briefs, onboarding, and document collection”; show five template cards becoming a branded link and “Unlimited forms • 500 active client records • 2 team members”; use CTA “Start Free Trial.” Templates/capacity may run only in pageviews and leads campaigns.\n\nCampaigns: Run exactly eight fixed campaigns. `pageviews_broad`: objective pageviews, audience broad, budget $40.00, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`]. `leads_broad`: objective leads, audience broad, budget $40.00, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`]. `sales_broad_outcome`: objective sales, audience broad, budget $75.00, ad_ids [`ad_outcome_followup`]. `sales_broad_demo`: objective sales, audience broad, budget $45.00, ad_ids [`ad_demo_workflow`]. `sales_biztools_demo`: objective sales, audience interest_biztools, budget $75.00, ad_ids [`ad_demo_workflow`]. `sales_biztools_outcome`: objective sales, audience interest_biztools, budget $45.00, ad_ids [`ad_outcome_followup`]. `sales_niche_outcome`: objective sales, audience interest_niche, budget $75.00, ad_ids [`ad_outcome_followup`]. `sales_niche_demo`: objective sales, audience interest_niche, budget $45.00, ad_ids [`ad_demo_workflow`].\n\nEvidence and decisions: Every exact sales cell retains the readable floor and demotion floor recorded when that question opened; the known opening floors are $66.65 and $199.95, calculated from 3 purchases per $199.95. Exact-cell spend accumulates across batches and floors never change. A cell below its readable floor is UNKNOWN. Price a readable cell only with settled purchases and settled purchase ROAS from its exact sales objective, audience, and ad. Never pool audiences or use non-sales outcomes to price sales creative. A readable silent cell may be parked UNPRICED and may not consume further consecutive batches. Never relaunch a measurably failed configuration. Reduced funding, exclusion, neutralization, and omission all count as demotion; therefore no non-template creative-by-audience sales cross may lose funding before its own $199.95 floor. Maintain coverage records, fund any owed unpriced incumbent-best cross before refinement, and do not diagnose destination, offer, or market while an incumbent-best sales cross remains unpriced.",
+    "design_thesis": "Use direct sales campaigns to preserve each audience-specific incumbent and its lower-funded counterpart while both remain below their exact $199.95 demotion floors. Allocate the constrained sales layer in the policy’s 75:45 preferred-to-incumbent ratio, retain broad pageview and lead coverage, and keep templates/capacity out of sales after its family-level demotion. Purchase decisions remain based only on matched settled sales receipts.",
+    "ads": [
+      {
+        "id": "ad_demo_workflow",
+        "headline": "Turn every client intake email into one clear workflow",
+        "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. Formflow lets you choose a template, add conditional questions, publish a branded intake link, and turn each response into an organized client record. Track every request from New to Waiting on Client, Ready, and Complete. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+        "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachments, and unanswered follow-up threads. Cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request with an attachment. Show the request appearing on a board and moving through columns labeled New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "benefit",
+        "named_story": false,
+        "demo": true,
+        "actual": {
+          "id": "ad_demo_workflow",
+          "headline": "Turn every client intake email into one clear workflow",
+          "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. Formflow lets you choose a template, add conditional questions, publish a branded intake link, and turn each response into an organized client record. Track every request from New to Waiting on Client, Ready, and Complete. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+          "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachments, and unanswered follow-up threads. Cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request with an attachment. Show the request appearing on a board and moving through columns labeled New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_outcome_followup",
+        "headline": "Stop chasing missing client details",
+        "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request visible on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+        "visual": "25-second vertical video. Open with a vague client email reading, “I’ll send the rest soon.” Show a Formflow request with a required field missing, then an automatic reminder being sent. Cut to the client completing the answer through a secure link, followed by a clean status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.” End on “14-day trial • $29/month after trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "outcome",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_outcome_followup",
+          "headline": "Stop chasing missing client details",
+          "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request visible on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+          "visual": "25-second vertical video. Open with a vague client email reading, “I’ll send the rest soon.” Show a Formflow request with a required field missing, then an automatic reminder being sent. Cut to the client completing the answer through a secure link, followed by a clean status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.” End on “14-day trial • $29/month after trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_count_templates",
+        "headline": "One intake link for briefs, onboarding, and document collection",
+        "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required.",
+        "visual": "20-second fast-paced vertical product video. Show five template cards: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and “Start your 14-day trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "count",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_count_templates",
+          "headline": "One intake link for briefs, onboarding, and document collection",
+          "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required.",
+          "visual": "20-second fast-paced vertical product video. Show five template cards: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and “Start your 14-day trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      }
+    ],
+    "campaigns": [
+      {
+        "id": "pageviews_broad",
+        "objective": "pageviews",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "leads_broad",
+        "objective": "leads",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_broad_outcome",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 33.33,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      },
+      {
+        "id": "sales_broad_demo",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_biztools_demo",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 33.33,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_biztools_outcome",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      },
+      {
+        "id": "sales_niche_outcome",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 33.34,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      },
+      {
+        "id": "sales_niche_demo",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      }
+    ],
+    "receipt": {
+      "rows": [
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 33.0,
+          "ctr": 3.9599999999999995,
+          "visits": 30.0,
+          "load_rate": 90.9090909090909,
+          "signups": 2.0,
+          "cpl": 3.335,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 32.0,
+          "ctr": 3.84,
+          "visits": 31.0,
+          "load_rate": 96.875,
+          "signups": 5.0,
+          "cpl": 1.334,
+          "demos": 1.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 26.0,
+          "ctr": 3.1199999999999997,
+          "visits": 25.0,
+          "load_rate": 96.15384615384616,
+          "signups": 2.0,
+          "cpl": 3.335,
+          "demos": 0.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 23.0,
+          "ctr": 2.76,
+          "visits": 22.0,
+          "load_rate": 95.65217391304348,
+          "signups": 1.0,
+          "cpl": 6.67,
+          "demos": 0.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 31.0,
+          "ctr": 3.7199999999999998,
+          "visits": 30.0,
+          "load_rate": 96.7741935483871,
+          "signups": 2.0,
+          "cpl": 3.335,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 29.0,
+          "ctr": 3.4799999999999995,
+          "visits": 28.0,
+          "load_rate": 96.55172413793103,
+          "signups": 4.0,
+          "cpl": 1.6675,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_broad_outcome",
+          "spend": 33.33,
+          "impressions": 4166,
+          "clicks": 125.0,
+          "ctr": 3.0003000300030003,
+          "visits": 116.0,
+          "load_rate": 92.80000000000001,
+          "signups": 11.0,
+          "cpl": 3.03,
+          "demos": 5.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_broad_demo",
+          "spend": 20.0,
+          "impressions": 2500,
+          "clicks": 60.0,
+          "ctr": 2.4,
+          "visits": 53.0,
+          "load_rate": 88.33333333333333,
+          "signups": 7.0,
+          "cpl": 2.857142857142857,
+          "demos": 4.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_biztools_demo",
+          "spend": 33.33,
+          "impressions": 2380,
+          "clicks": 58.0,
+          "ctr": 2.436243624362436,
+          "visits": 55.0,
+          "load_rate": 94.82758620689656,
+          "signups": 6.0,
+          "cpl": 5.555,
+          "demos": 3.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_biztools_outcome",
+          "spend": 20.0,
+          "impressions": 1428,
+          "clicks": 36.0,
+          "ctr": 2.5199999999999996,
+          "visits": 35.0,
+          "load_rate": 97.22222222222221,
+          "signups": 0.0,
+          "cpl": null,
+          "demos": 0.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_niche_outcome",
+          "spend": 33.34,
+          "impressions": 2778,
+          "clicks": 57.0,
+          "ctr": 2.051589682063587,
+          "visits": 55.0,
+          "load_rate": 96.49122807017544,
+          "signups": 11.0,
+          "cpl": 3.030909090909091,
+          "demos": 4.0,
+          "purchases": 2.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_niche_demo",
+          "spend": 20.0,
+          "impressions": 1666,
+          "clicks": 59.0,
+          "ctr": 3.54,
+          "visits": 52.0,
+          "load_rate": 88.13559322033898,
+          "signups": 4.0,
+          "cpl": 5.0,
+          "demos": 2.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        }
+      ],
+      "funnel": {
+        "visits": 532.0,
+        "signups": 55.0,
+        "demos": 22.0,
+        "purchases": 6.0
+      },
+      "spend": 200.02,
+      "revenue": 174.0,
+      "roas": 0.86991300869913
+    }
+  },
+  {
+    "iteration": 8,
+    "policy_version": 7,
+    "policy": "Parent: v6.\n\nGOAL: maximize settled purchase ROAS for Formflow; purchases are the goal event.\n\nPortfolio principle: Sales preferences are provisional signals, not final eligibility decisions, while every non-template creative-by-audience counterpart remains below its fixed $199.95 demotion floor. Current directional leans are follow-up outcome in broad and interest_niche and workflow demo in interest_biztools. Templates/capacity is sales-ineligible because its family has accumulated about $213.33 in sales funding above its recorded $199.95 demotion floor. Story is unavailable and untested until a verified named-customer fact exists.\n\nCreative: Create exactly three video ads. `ad_demo_workflow` is a video headed “Turn every client intake email into one clear workflow”; show a cluttered inbox, a Formflow template, a conditional question, a branded link, a submitted request, and a New/Waiting on Client/Ready/Complete board; use CTA “Start Free Trial”; end with “14-day trial • $29/month after trial.” `ad_outcome_followup` is a video headed “Stop chasing missing client details”; show a vague email, a missing-field reminder, secure-link completion, and a status board; use CTA “Start Free Trial”; end with “14-day trial • $29/month after trial.” `ad_count_templates` is a video headed “One intake link for briefs, onboarding, and document collection”; show five template cards becoming a branded link and “Unlimited forms • 500 active client records • 2 team members”; use CTA “Start Free Trial.” Templates/capacity may run only in pageviews and leads campaigns.\n\nCampaign portfolio: Run exactly eight fixed campaigns. Preserve broad objective coverage with `pageviews_broad`: objective pageviews, audience broad, budget $40.00, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`], and `leads_broad`: objective leads, audience broad, budget $40.00, ad_ids [`ad_demo_workflow`,`ad_outcome_followup`,`ad_count_templates`]. Run the evidence-completion sales layer as fixed, single-ad cells: `sales_broad_outcome`: objective sales, audience broad, budget $75.00, ad_ids [`ad_outcome_followup`]; `sales_broad_demo`: objective sales, audience broad, budget $60.00, ad_ids [`ad_demo_workflow`]; `sales_biztools_demo`: objective sales, audience interest_biztools, budget $75.00, ad_ids [`ad_demo_workflow`]; `sales_biztools_outcome`: objective sales, audience interest_biztools, budget $60.00, ad_ids [`ad_outcome_followup`]; `sales_niche_outcome`: objective sales, audience interest_niche, budget $75.00, ad_ids [`ad_outcome_followup`]; `sales_niche_demo`: objective sales, audience interest_niche, budget $60.00, ad_ids [`ad_demo_workflow`].\n\nEvidence and decisions: Every exact sales cell retains the readable floor and demotion floor recorded when that question opened; known opening floors are $66.65 and $199.95, calculated from 3 purchases per $199.95. Exact-cell spend accumulates across batches and floors never change. A cell below its readable floor is UNKNOWN. Price a readable cell only with settled purchases and settled purchase ROAS from its exact sales objective, audience, and ad. Never pool audiences or use non-sales outcomes to price sales creative. A readable silent cell may be parked UNPRICED and may not consume further consecutive batches. Never relaunch a measurably failed configuration. Reduced funding, exclusion, neutralization, and omission count as demotion; no non-template creative-by-audience sales cross may lose funding before its own $199.95 floor. Maintain coverage records, fund any owed unpriced incumbent-best cross before refinement, and do not diagnose destination, offer, or market while an incumbent-best sales cross remains unpriced.",
+    "design_thesis": "Use fixed matched sales cells to retain all non-template workflow-demo and follow-up-outcome audience crosses while maintaining the directional preference for follow-up outcome in broad and niche, and workflow demo in business-tools interest. Templates/capacity remains limited to broad pageview and lead coverage because it is sales-ineligible. Sales evaluation remains confined to settled purchases and ROAS within each exact audience-ad sales cell; the eight-campaign portfolio totals exactly $200.00.",
+    "ads": [
+      {
+        "id": "ad_demo_workflow",
+        "headline": "Turn every client intake email into one clear workflow",
+        "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. Formflow lets you choose a template, add conditional questions, publish a branded intake link, and turn each response into an organized client record. Track requests from New to Waiting on Client, Ready, and Complete. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+        "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachments, and unanswered follow-up threads. Cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request with an attachment. Show the request appearing on a board and moving through columns labeled New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "benefit",
+        "named_story": false,
+        "demo": true,
+        "actual": {
+          "id": "ad_demo_workflow",
+          "headline": "Turn every client intake email into one clear workflow",
+          "message": "Client requests should not live across inbox threads, attachments, and follow-up emails. Formflow lets you choose a template, add conditional questions, publish a branded intake link, and turn each response into an organized client record. Track requests from New to Waiting on Client, Ready, and Complete. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+          "visual": "30-second vertical screen-recording video. Open on a cluttered inbox with client emails, attachments, and unanswered follow-up threads. Cut to Formflow: select an intake template, add a conditional question, publish a branded link, and submit a sample request with an attachment. Show the request appearing on a board and moving through columns labeled New, Waiting on Client, Ready, and Complete. End card: “14-day trial • $29/month after trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_outcome_followup",
+        "headline": "Stop chasing missing client details",
+        "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request visible on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+        "visual": "25-second vertical video. Open with a vague client email reading, “I’ll send the rest soon.” Show a Formflow request with a required field missing, then an automatic reminder being sent. Cut to the client completing the answer through a secure link, followed by a clean status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.” End on “14-day trial • $29/month after trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "outcome",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_outcome_followup",
+          "headline": "Stop chasing missing client details",
+          "message": "A half-finished client request should not become another chain of reminder emails. Formflow collects project details and attachments in one structured request, automatically reminds clients about missing answers, and keeps every request visible on a live status board. Clients complete a secure link without creating an account. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+          "visual": "25-second vertical video. Open with a vague client email reading, “I’ll send the rest soon.” Show a Formflow request with a required field missing, then an automatic reminder being sent. Cut to the client completing the answer through a secure link, followed by a clean status board labeled New, Waiting on Client, Ready, and Complete. On-screen captions: “Collect details.” “Follow up automatically.” “Know what’s next.” End on “14-day trial • $29/month after trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      },
+      {
+        "id": "ad_count_templates",
+        "headline": "One intake link for briefs, onboarding, and document collection",
+        "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+        "visual": "20-second fast-paced vertical product video. Show five template cards: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and “Start your 14-day trial.”",
+        "call_to_action": "Start Free Trial",
+        "proof": "count",
+        "named_story": false,
+        "demo": false,
+        "actual": {
+          "id": "ad_count_templates",
+          "headline": "One intake link for briefs, onboarding, and document collection",
+          "message": "Build a reusable intake process instead of starting over for every client. Formflow includes templates for project briefs, discovery calls, onboarding, document collection, and change requests. Share one branded link clients can complete without an account. Your plan includes unlimited forms, 500 active client records, and two team members. Start your 14-day trial today. $29/month after the trial; card required. Cancel anytime from account settings.",
+          "visual": "20-second fast-paced vertical product video. Show five template cards: “Project brief,” “Discovery call,” “Onboarding,” “Document collection,” and “Change request.” Animate the cards collapsing into one branded intake-link card. Follow with a plan card reading: “Unlimited forms • 500 active client records • 2 team members.” Close on the Formflow logo and “Start your 14-day trial.”",
+          "call_to_action": "Start Free Trial"
+        }
+      }
+    ],
+    "campaigns": [
+      {
+        "id": "pageviews_broad",
+        "objective": "pageviews",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "leads_broad",
+        "objective": "leads",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow",
+          "ad_outcome_followup",
+          "ad_count_templates"
+        ]
+      },
+      {
+        "id": "sales_broad_outcome",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 33.33,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      },
+      {
+        "id": "sales_broad_demo",
+        "objective": "sales",
+        "audience": "broad",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_biztools_demo",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 33.33,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      },
+      {
+        "id": "sales_biztools_outcome",
+        "objective": "sales",
+        "audience": "interest_biztools",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      },
+      {
+        "id": "sales_niche_outcome",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 33.34,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_outcome_followup"
+        ]
+      },
+      {
+        "id": "sales_niche_demo",
+        "objective": "sales",
+        "audience": "interest_niche",
+        "budget": 20.0,
+        "mode": "fixed",
+        "ad_ids": [
+          "ad_demo_workflow"
+        ]
+      }
+    ],
+    "receipt": {
+      "rows": [
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 29.0,
+          "ctr": 3.4799999999999995,
+          "visits": 27.0,
+          "load_rate": 93.10344827586206,
+          "signups": 4.0,
+          "cpl": 1.6675,
+          "demos": 2.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 20.0,
+          "ctr": 2.4,
+          "visits": 19.0,
+          "load_rate": 95.0,
+          "signups": 1.0,
+          "cpl": 6.67,
+          "demos": 0.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "pageviews_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 54.0,
+          "ctr": 6.4799999999999995,
+          "visits": 52.0,
+          "load_rate": 96.29629629629629,
+          "signups": 6.0,
+          "cpl": 1.1116666666666666,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 22.0,
+          "ctr": 2.64,
+          "visits": 18.0,
+          "load_rate": 81.81818181818183,
+          "signups": 1.0,
+          "cpl": 6.67,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 26.0,
+          "ctr": 3.1199999999999997,
+          "visits": 25.0,
+          "load_rate": 96.15384615384616,
+          "signups": 1.0,
+          "cpl": 6.67,
+          "demos": 0.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_count_templates",
+          "cell": "leads_broad",
+          "spend": 6.67,
+          "impressions": 833,
+          "clicks": 41.0,
+          "ctr": 4.92,
+          "visits": 35.0,
+          "load_rate": 85.36585365853658,
+          "signups": 3.0,
+          "cpl": 2.223333333333333,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_broad_outcome",
+          "spend": 33.33,
+          "impressions": 4166,
+          "clicks": 104.0,
+          "ctr": 2.4962496249624966,
+          "visits": 91.0,
+          "load_rate": 87.5,
+          "signups": 9.0,
+          "cpl": 3.703333333333333,
+          "demos": 3.0,
+          "purchases": 2.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_broad_demo",
+          "spend": 20.0,
+          "impressions": 2500,
+          "clicks": 52.0,
+          "ctr": 2.08,
+          "visits": 49.0,
+          "load_rate": 94.23076923076923,
+          "signups": 13.0,
+          "cpl": 1.5384615384615385,
+          "demos": 5.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_biztools_demo",
+          "spend": 33.33,
+          "impressions": 2380,
+          "clicks": 65.0,
+          "ctr": 2.7302730273027302,
+          "visits": 57.0,
+          "load_rate": 87.6923076923077,
+          "signups": 7.0,
+          "cpl": 4.761428571428572,
+          "demos": 1.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_biztools_outcome",
+          "spend": 20.0,
+          "impressions": 1428,
+          "clicks": 51.0,
+          "ctr": 3.5699999999999994,
+          "visits": 49.0,
+          "load_rate": 96.07843137254902,
+          "signups": 7.0,
+          "cpl": 2.857142857142857,
+          "demos": 4.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_outcome_followup",
+          "cell": "sales_niche_outcome",
+          "spend": 33.34,
+          "impressions": 2778,
+          "clicks": 105.0,
+          "ctr": 3.7792441511697654,
+          "visits": 100.0,
+          "load_rate": 95.23809523809523,
+          "signups": 15.0,
+          "cpl": 2.222666666666667,
+          "demos": 6.0,
+          "purchases": 1.0,
+          "trust": "trust"
+        },
+        {
+          "ad": "ad_demo_workflow",
+          "cell": "sales_niche_demo",
+          "spend": 20.0,
+          "impressions": 1666,
+          "clicks": 60.0,
+          "ctr": 3.5999999999999996,
+          "visits": 57.0,
+          "load_rate": 95.0,
+          "signups": 5.0,
+          "cpl": 4.0,
+          "demos": 3.0,
+          "purchases": 0.0,
+          "trust": "trust"
+        }
+      ],
+      "funnel": {
+        "visits": 579.0,
+        "signups": 72.0,
+        "demos": 27.0,
+        "purchases": 4.0
+      },
+      "spend": 200.02,
+      "revenue": 116.0,
+      "roas": 0.57994200579942
+    }
+  }
+]

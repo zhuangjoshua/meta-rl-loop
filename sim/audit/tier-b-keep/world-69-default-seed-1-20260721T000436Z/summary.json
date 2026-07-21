@@ -1,0 +1,93 @@
+{
+  "schema": "takyon.tier-b-experiment.v2",
+  "world": 69,
+  "run_seed": 1,
+  "iterations": 8,
+  "budget_per_iteration": 200.0,
+  "goal": "maximize settled purchase ROAS",
+  "schedule_name": "default",
+  "schedule": {
+    "tau0": 1.0,
+    "decay": 0.92,
+    "floor": 0.05,
+    "width": 0.18,
+    "rungs": 6,
+    "pair_scale": 1.0,
+    "pattern_scale": 1.0,
+    "design_scale": 1.0
+  },
+  "loop": {
+    "spend": 1599.97,
+    "revenue": 1218.0,
+    "mean_roas": 0.7612799167182005,
+    "aggregate_roas": 0.7612642737051319,
+    "roas_by_iteration": [
+      0.4351087771942986,
+      0.434956504349565,
+      1.3051305130513051,
+      0.8700870087008701,
+      1.3051305130513051,
+      0.28997100289971,
+      0.86991300869913,
+      0.57994200579942
+    ],
+    "final_policy_version": 8
+  },
+  "frozen_baseline": {
+    "spend": 1599.6,
+    "revenue": 870.0,
+    "mean_roas": 0.5438859714928732,
+    "aggregate_roas": 0.5438859714928732,
+    "roas_by_iteration": [
+      0.4351087771942986,
+      0.725181295323831,
+      0.4351087771942986,
+      0.5801450362590648,
+      0.2900725181295324,
+      0.8702175543885972,
+      0.4351087771942986,
+      0.5801450362590648
+    ]
+  },
+  "held_out_expected": {
+    "initial_roas": 0.48754243939976544,
+    "final_roas": 0.5985108523113148,
+    "change": 0.11096841291154941,
+    "ratio": 1.2276076992357166
+  },
+  "selected_rungs": [
+    5,
+    5,
+    6,
+    5,
+    4,
+    4,
+    3,
+    3
+  ],
+  "judge": {
+    "provider": "openai",
+    "model": "gpt-5.6-luna",
+    "identity": "6a250aae017de06e",
+    "stats": {
+      "calls": 17,
+      "cache_hits": 370,
+      "input_tokens": 97883,
+      "output_tokens": 23775,
+      "elapsed_seconds": 157.53422987519298
+    }
+  },
+  "agent": {
+    "provider": "openai",
+    "model": "gpt-5.6-terra",
+    "identity": "aa40afc8f7ef8228",
+    "stats": {
+      "calls": 16,
+      "cache_hits": 1,
+      "input_tokens": 363302,
+      "output_tokens": 82897,
+      "elapsed_seconds": 646.3548097908497
+    }
+  },
+  "output_dir": "/Users/joshuazhuang/Documents/fourmanifold/meta-rl-loop/sim/runs/tier-b/world-69-default-seed-1-20260721T000436Z"
+}

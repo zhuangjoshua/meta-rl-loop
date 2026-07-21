@@ -181,13 +181,19 @@ def main(argv: list[str] | None = None) -> int:
         return completed
 
     summaries: list[dict[str, Any]] = []
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel_worlds) as executor:
-            futures = {executor.submit(run_world, world): world for world in args.worlds}
-            for future in concurrent.futures.as_completed(futures):
+    failures: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel_worlds) as executor:
+        futures = {executor.submit(run_world, world): world for world in args.worlds}
+        for future in concurrent.futures.as_completed(futures):
+            world = futures[future]
+            try:
                 summaries.extend(future.result())
-    except (OSError, json.JSONDecodeError, SweepError) as exc:
-        parser.exit(2, f"tier-b sweep failed: {exc}\n")
+            except (OSError, json.JSONDecodeError, SweepError) as exc:
+                message = f"world {world}: {exc}"
+                failures.append(message)
+                print(f"tier-b sweep: {message} (continuing)", file=sys.stderr)
+    if not summaries:
+        parser.exit(2, "tier-b sweep failed: every world failed\n" + "\n".join(failures) + "\n")
 
     result = {
         "schema": "takyon.tier-b-sweep.v1",
@@ -196,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         "replicates": args.replicates,
         "iterations": args.iterations,
         "aggregate": _aggregate(summaries),
+        "failures": failures,
         "runs": summaries,
     }
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")

@@ -1,0 +1,86 @@
+{
+ "control_total": 2030,
+ "patched_total": 2320,
+ "oracle_attainable_total": 4661,
+ "per_world": {
+  "26": {
+   "control": 145,
+   "patched": 58,
+   "diff": -87,
+   "oracle_usd_per_buy": 167,
+   "attainable": 278
+  },
+  "27": {
+   "control": 232,
+   "patched": 348,
+   "diff": 116,
+   "oracle_usd_per_buy": 112,
+   "attainable": 414
+  },
+  "28": {
+   "control": 319,
+   "patched": 406,
+   "diff": 87,
+   "oracle_usd_per_buy": 92,
+   "attainable": 504
+  },
+  "29": {
+   "control": 754,
+   "patched": 725,
+   "diff": -29,
+   "oracle_usd_per_buy": 45,
+   "attainable": 1031
+  },
+  "30": {
+   "control": 29,
+   "patched": 174,
+   "diff": 145,
+   "oracle_usd_per_buy": 277,
+   "attainable": 168
+  },
+  "31": {
+   "control": 87,
+   "patched": 58,
+   "diff": -29,
+   "oracle_usd_per_buy": 133,
+   "attainable": 349
+  },
+  "32": {
+   "control": 145,
+   "patched": 58,
+   "diff": -87,
+   "oracle_usd_per_buy": 104,
+   "attainable": 446
+  },
+  "33": {
+   "control": 87,
+   "patched": 29,
+   "diff": -58,
+   "oracle_usd_per_buy": 184,
+   "attainable": 252
+  },
+  "34": {
+   "control": 0,
+   "patched": 58,
+   "diff": 58,
+   "oracle_usd_per_buy": 143,
+   "attainable": 324
+  },
+  "35": {
+   "control": 116,
+   "patched": 87,
+   "diff": -29,
+   "oracle_usd_per_buy": 173,
+   "attainable": 268
+  },
+  "50": {
+   "control": 116,
+   "patched": 319,
+   "diff": 203,
+   "oracle_usd_per_buy": 74,
+   "attainable": 627
+  }
+ },
+ "pairs_won_by_patched": 5,
+ "pairs_won_by_control": 6
+}

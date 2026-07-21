@@ -159,20 +159,6 @@ axis is to make the policy declare one — an unenumerated choice space is
 itself a policy defect, because nothing can ever report that whole families
 went untested.
 
-Menu before grid (the Tier B story lesson). Coverage obligations are ranked
-by altitude: every value of a DECLARED vocabulary (each copy angle family,
-each creative format) must receive one funded test at the cheapest viable
-dose before any cell-level obligation (an existing ad crossed with audiences
-or objectives) may consume the experiment slot. A value that has never been
-authored has no cell anywhere, so a cell ledger can never demand it — absence
-is invisible to a checklist of existing things, and only the vocabulary sweep
-can see it. This is a floor on breadth, not a mandate for exhaustiveness:
-taste each declared value once, then let verdict rules decide selectively
-which cells ever deserve deeper testing. (Audited failure: across ten worlds
-and 240 authored ads, the story angle — the declared family the highest-intent
-buyers preferred in at least three of those worlds — was never written once,
-while cell-level bookkeeping consumed every experiment slot.)
-
 Coverage counts COMBINATIONS, not only values (the world-15 lesson). A value
 tested only alongside losing values of other axes has never been tested where
 it matters: whenever a value becomes an axis's incumbent best, its crosses
@@ -207,53 +193,6 @@ target. Below that floor the honest verdict is UNKNOWN, and an UNKNOWN value
 keeps its funded slot. (Audited failure: the
 prior floor was evaded in eleven of twenty worlds by exactly this rewording —
 the axis was never "demoted," it just quietly stopped being made.)
-
-**Creative is policy (the Tier B frozen-copy lesson).** The words of the ads
-are part of the policy's rewritable surface, not fixed inputs: a creative
-lean is normally expressed as a REVISED OR NEW EXECUTION of the favored
-direction, not only as budget moved between existing ads. Run this as
-champion/challenger so evidence survives iteration: the incumbent-best
-execution keeps running UNCHANGED — accumulating its ledger and staying
-eligible for replication — while fresh variants test alongside it in their
-own slots. Never rewrite the champion and its challenger in the same batch;
-a variant that beats the champion on settled per-dollar goal events under
-the replication rule becomes the new champion. (Audited failure: across
-eleven worlds the ad copy stayed byte-identical from first batch to last —
-agents reasoned about creative for entire runs while never revising a single
-sentence of it — and the one world that authored a new execution was the
-strongest run of its cohort.)
-
-**Replication before doctrine (the world-61 lesson; restores the world-2
-rule).** A single spectacular result — however large, and however readable
-its cell — may set a LEAN (a modest preference, ordinary funding), never
-DOCTRINE. No configuration may absorb a major budget share, be named an
-engine, or displace an incumbent default until it has produced goal events
-in at least TWO independent batches at comparable per-dollar rates. This
-binds the budget share, not the wording: concentrating funds on a
-once-confirmed cell IS crowning it, whatever the thesis calls it. The
-confirmation test is cheap — re-fund the hot configuration at ordinary test
-size next batch; scale only if it produces again. In a rare-event market a
-single streak is far more often luck than truth, and repetition is the only
-luck-filter available from receipts alone. (Audited failure: a cell whose
-true rate was ~half a purchase per batch returned eleven on one draw, was
-crowned doctrine the same iteration, and absorbed half of every later
-batch — the run's +$812 was variance, and the final policy's held-out gain
-was nearly zero.)
-
-**Verdicts, not design (the Tier B world-64 lesson).** Floors, ledgers, and
-coverage obligations govern VERDICTS — what may be believed, promoted,
-demoted, or retired — never batch design. Every batch is designed to
-maximize the goal under current beliefs, whatever the ledger's state;
-readability spend rides along inside goal-seeking batches and is never a
-batch's purpose. A thesis must contain at least one creative, audience, or
-objective decision. A thesis whose content is only ledger reconciliation,
-floor accounting, or dose equalization is not a thesis, and no rung of it
-may be written or adopted — park the bookkeeping in the standing items and
-diagnose the strongest advertising direction the evidence supports instead.
-(Audited failure: an agent spent all eight iterations on floor arithmetic —
-its final thesis corrected its own spreadsheet — made zero advertising
-decisions, and its policy regressed while its own frozen iteration-1 design
-out-earned it by 77%.)
 
 ## Stage 2 — Render the thesis at K magnitudes
 
