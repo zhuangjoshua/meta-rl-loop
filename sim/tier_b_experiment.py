@@ -203,6 +203,49 @@ def _evidence_for_agent(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+_SEED_SPEC_FENCE = re.compile(r"```json\s*\n(.*?)```", re.DOTALL)
+
+
+def _seed_batch_spec(
+    seed_policy: str,
+    *,
+    landing_page: str,
+    platform: Mapping[str, Any],
+    budget: float,
+) -> dict[str, Any] | None:
+    """Extract the fixed batch-1 spec embedded in the seed policy, if present.
+
+    When the seed policy carries a fenced ```json block with "ads" and
+    "campaigns", iteration 1 executes that spec verbatim instead of asking the
+    design agent to reproduce it — batch-1 repeatability by construction.
+    Returns None when the seed policy has no embedded spec (legacy seeds)."""
+    match = _SEED_SPEC_FENCE.search(seed_policy)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise ExperimentError(f"seed batch-1 spec block is not valid JSON: {exc}") from exc
+    if not isinstance(payload, Mapping) or "ads" not in payload or "campaigns" not in payload:
+        raise ExperimentError("seed batch-1 spec block must contain 'ads' and 'campaigns'")
+    campaigns = payload["campaigns"]
+    if not isinstance(campaigns, list) or not campaigns:
+        raise ExperimentError("seed batch-1 spec campaigns must be a non-empty list")
+    total = sum(float(c.get("budget") or 0.0) for c in campaigns if isinstance(c, Mapping))
+    if abs(total - budget) > 0.5:
+        raise ExperimentError(
+            f"seed batch-1 spec campaign budgets total {total:.2f}, expected {budget:.2f}"
+        )
+    spec = {
+        "iteration": 1,
+        "policy": "v0",
+        "landing_page": landing_page,
+        "ads": [dict(ad) for ad in payload["ads"]],
+        "campaigns": [dict(c) for c in campaigns],
+    }
+    return validate_spec(spec, platform)
+
+
 def _design_prompt(
     *, iteration: int, policy_version: int, policy: str, goal: str,
     landing_page: str, platform: Mapping[str, Any], budget: float,
@@ -481,29 +524,40 @@ def run_experiment(
     output_dir.mkdir(parents=True, exist_ok=False)
 
     for iteration in range(1, iterations + 1):
-        design_thesis, spec = _complete_validated(
-            agent,
-            prompt=_design_prompt(
-                iteration=iteration,
-                policy_version=policy_version,
-                policy=current_policy,
-                goal=goal,
-                landing_page=landing_page,
-                platform=platform,
-                budget=budget,
-                history=history,
-            ),
-            schema=_design_schema(),
-            cache_namespace="tier-b-design",
-            validate=lambda payload: _normalize_design(
-                payload,
-                iteration=iteration,
-                policy_version=policy_version,
-                landing_page=landing_page,
-                platform=platform,
-                budget=budget,
-            ),
+        seed_spec = (
+            _seed_batch_spec(
+                seed_policy, landing_page=landing_page, platform=platform, budget=budget
+            )
+            if iteration == 1
+            else None
         )
+        if seed_spec is not None:
+            design_thesis = "Fixed batch-1 slate executed verbatim from the seed policy."
+            spec = seed_spec
+        else:
+            design_thesis, spec = _complete_validated(
+                agent,
+                prompt=_design_prompt(
+                    iteration=iteration,
+                    policy_version=policy_version,
+                    policy=current_policy,
+                    goal=goal,
+                    landing_page=landing_page,
+                    platform=platform,
+                    budget=budget,
+                    history=history,
+                ),
+                schema=_design_schema(),
+                cache_namespace="tier-b-design",
+                validate=lambda payload: _normalize_design(
+                    payload,
+                    iteration=iteration,
+                    policy_version=policy_version,
+                    landing_page=landing_page,
+                    platform=platform,
+                    budget=budget,
+                ),
+            )
         if first_spec is None:
             first_spec = spec
         result = simulate(
