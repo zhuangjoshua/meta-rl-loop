@@ -1,0 +1,615 @@
+{
+ "schema": "takyon.hidden-market.v2",
+ "world": 71,
+ "seed": 70378,
+ "landing_style": "benefit",
+ "price_usd": 29,
+ "offer": "card_required_trial",
+ "archetypes": [
+  {
+   "name": "peer_proof",
+   "weight": 0.0471,
+   "persona": {
+    "decision_style": "Looks for a relatable peer who had the same problem and can describe the before/after in concrete terms.",
+    "trust_signals": [
+     "named customer",
+     "specific workflow",
+     "credible limitation or tradeoff"
+    ],
+    "rejection_triggers": [
+     "anonymous testimonial",
+     "generic superlative",
+     "results without context"
+    ]
+   },
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.276,
+     "outcome": 0.451,
+     "count": 0.387,
+     "story": 1.41
+    },
+    "demo_gate": 0.422,
+    "trial_gate": 0.872,
+    "base": 0.97,
+    "mismatch_bounce": 0.443,
+    "clickiness": 0.485,
+    "buyiness": 0.835
+   },
+   "subs": [
+    {
+     "name": "peer_proof_s1",
+     "frac": 0.343,
+     "delta_base": 0.09,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.15,
+      "interest_niche": 0.66
+     },
+     "decision_context": "actively comparing two alternatives after a painful recent workflow failure"
+    },
+    {
+     "name": "peer_proof_s2",
+     "frac": 0.229,
+     "delta_base": -0.1,
+     "reach": {
+      "broad": 0.97,
+      "interest_biztools": 0.31,
+      "interest_niche": 0.63
+     },
+     "decision_context": "evaluating alone during a short break and unwilling to research for long"
+    },
+    {
+     "name": "peer_proof_s3",
+     "frac": 0.428,
+     "delta_base": -0.05,
+     "reach": {
+      "broad": 0.57,
+      "interest_biztools": 0.17,
+      "interest_niche": 0.69
+     },
+     "decision_context": "returning after seeing similar claims several times without acting"
+    }
+   ]
+  },
+  {
+   "name": "skeptic",
+   "weight": 0.2093,
+   "persona": {
+    "decision_style": "Assumes marketing claims are exaggerated and wants to inspect the mechanism before believing the outcome.",
+    "trust_signals": [
+     "visible product demonstration",
+     "precise mechanism",
+     "falsifiable claim"
+    ],
+    "rejection_triggers": [
+     "unsupported promise",
+     "vague transformation",
+     "manufactured urgency"
+    ]
+   },
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.093,
+     "outcome": 0.648,
+     "count": 0.167,
+     "story": 0.887
+    },
+    "demo_gate": 0.168,
+    "trial_gate": 0.973,
+    "base": 0.474,
+    "mismatch_bounce": 0.697,
+    "clickiness": 0.343,
+    "buyiness": 0.822
+   },
+   "subs": [
+    {
+     "name": "skeptic_s1",
+     "frac": 0.329,
+     "delta_base": 0.13,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.53,
+      "interest_niche": 0.42
+     },
+     "decision_context": "under deadline pressure and willing to switch only if setup looks immediate"
+    },
+    {
+     "name": "skeptic_s2",
+     "frac": 0.671,
+     "delta_base": 0.03,
+     "reach": {
+      "broad": 0.98,
+      "interest_biztools": 0.41,
+      "interest_niche": 0.22
+     },
+     "decision_context": "collecting evidence for a recommendation to a small team"
+    }
+   ]
+  },
+  {
+   "name": "herd",
+   "weight": 0.0242,
+   "persona": {
+    "decision_style": "Uses broad adoption and category momentum as evidence that a choice is safe.",
+    "trust_signals": [
+     "credible adoption count",
+     "recognizable community",
+     "clear category norm"
+    ],
+    "rejection_triggers": [
+     "isolated anecdote",
+     "uncited number",
+     "fringe positioning"
+    ]
+   },
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.31,
+     "outcome": 0.43,
+     "count": 1.6,
+     "story": 0.742
+    },
+    "demo_gate": 0.715,
+    "trial_gate": 0.721,
+    "base": 0.802,
+    "mismatch_bounce": 0.256,
+    "clickiness": 0.678,
+    "buyiness": 0.624
+   },
+   "subs": [
+    {
+     "name": "herd_s1",
+     "frac": 0.325,
+     "delta_base": -0.0,
+     "reach": {
+      "broad": 0.78,
+      "interest_biztools": 0.41,
+      "interest_niche": 0.59
+     },
+     "decision_context": "returning after seeing similar claims several times without acting"
+    },
+    {
+     "name": "herd_s2",
+     "frac": 0.471,
+     "delta_base": -0.1,
+     "reach": {
+      "broad": 0.47,
+      "interest_biztools": 0.82,
+      "interest_niche": 0.95
+     },
+     "decision_context": "evaluating alone during a short break and unwilling to research for long"
+    },
+    {
+     "name": "herd_s3",
+     "frac": 0.205,
+     "delta_base": 0.12,
+     "reach": {
+      "broad": 0.57,
+      "interest_biztools": 0.46,
+      "interest_niche": 0.59
+     },
+     "decision_context": "under deadline pressure and willing to switch only if setup looks immediate"
+    }
+   ]
+  },
+  {
+   "name": "bargain",
+   "weight": 0.1196,
+   "persona": {
+    "decision_style": "Compares the immediate cost with a concrete near-term saving and avoids uncertain commitments.",
+    "trust_signals": [
+     "specific savings",
+     "transparent price",
+     "easy exit"
+    ],
+    "rejection_triggers": [
+     "hidden commitment",
+     "premium framing",
+     "unclear time to value"
+    ]
+   },
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.61,
+     "outcome": 0.721,
+     "count": 0.472,
+     "story": 0.55
+    },
+    "demo_gate": 0.73,
+    "trial_gate": 0.184,
+    "base": 0.633,
+    "mismatch_bounce": 0.268,
+    "clickiness": 0.97,
+    "buyiness": 0.288
+   },
+   "subs": [
+    {
+     "name": "bargain_s1",
+     "frac": 0.605,
+     "delta_base": -0.13,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.07,
+      "interest_niche": 0.41
+     },
+     "decision_context": "returning after seeing similar claims several times without acting"
+    },
+    {
+     "name": "bargain_s2",
+     "frac": 0.395,
+     "delta_base": -0.09,
+     "reach": {
+      "broad": 0.73,
+      "interest_biztools": 0.33,
+      "interest_niche": 0.65
+     },
+     "decision_context": "collecting evidence for a recommendation to a small team"
+    }
+   ]
+  },
+  {
+   "name": "novelty",
+   "weight": 0.0265,
+   "persona": {
+    "decision_style": "Explores new tools quickly when the experience looks distinctive and immediately useful.",
+    "trust_signals": [
+     "fresh mechanism",
+     "fast visual payoff",
+     "clear first action"
+    ],
+    "rejection_triggers": [
+     "conventional corporate copy",
+     "long setup",
+     "feature inventory"
+    ]
+   },
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.708,
+     "outcome": 0.601,
+     "count": 0.388,
+     "story": 0.85
+    },
+    "demo_gate": 1.033,
+    "trial_gate": 0.75,
+    "base": 1.334,
+    "mismatch_bounce": 0.169,
+    "clickiness": 1.48,
+    "buyiness": 0.256
+   },
+   "subs": [
+    {
+     "name": "novelty_s1",
+     "frac": 0.118,
+     "delta_base": -0.17,
+     "reach": {
+      "broad": 0.52,
+      "interest_biztools": 0.38,
+      "interest_niche": 0.09
+     },
+     "decision_context": "actively comparing two alternatives after a painful recent workflow failure"
+    },
+    {
+     "name": "novelty_s2",
+     "frac": 0.882,
+     "delta_base": -0.02,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.83,
+      "interest_niche": 0.2
+     },
+     "decision_context": "returning after seeing similar claims several times without acting"
+    }
+   ]
+  },
+  {
+   "name": "authority",
+   "weight": 0.0259,
+   "persona": {
+    "decision_style": "Defers to credible expertise, standards, and evidence that the method is professionally accepted.",
+    "trust_signals": [
+     "relevant expert",
+     "methodology",
+     "verifiable credentials"
+    ],
+    "rejection_triggers": [
+     "casual unsupported advice",
+     "irrelevant celebrity",
+     "anti-expert framing"
+    ]
+   },
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.17,
+     "outcome": 0.499,
+     "count": 0.862,
+     "story": 0.773
+    },
+    "demo_gate": 0.564,
+    "trial_gate": 0.782,
+    "base": 0.665,
+    "mismatch_bounce": 0.33,
+    "clickiness": 0.489,
+    "buyiness": 0.518
+   },
+   "subs": [
+    {
+     "name": "authority_s1",
+     "frac": 0.676,
+     "delta_base": 0.11,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.21,
+      "interest_niche": 0.63
+     },
+     "decision_context": "under deadline pressure and willing to switch only if setup looks immediate"
+    },
+    {
+     "name": "authority_s2",
+     "frac": 0.324,
+     "delta_base": 0.16,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.98,
+      "interest_niche": 0.46
+     },
+     "decision_context": "curious but not yet convinced the problem deserves a paid tool"
+    }
+   ]
+  },
+  {
+   "name": "committee",
+   "weight": 0.0225,
+   "persona": {
+    "decision_style": "Needs a choice that can be explained to coworkers and defended against operational and financial objections.",
+    "trust_signals": [
+     "shared workflow",
+     "risk controls",
+     "clear implementation path"
+    ],
+    "rejection_triggers": [
+     "single-user framing",
+     "missing security or process detail",
+     "impulse CTA"
+    ]
+   },
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.22,
+     "outcome": 0.763,
+     "count": 0.844,
+     "story": 0.72
+    },
+    "demo_gate": 0.282,
+    "trial_gate": 1.114,
+    "base": 0.429,
+    "mismatch_bounce": 0.545,
+    "clickiness": 0.252,
+    "buyiness": 0.462
+   },
+   "subs": [
+    {
+     "name": "committee_s1",
+     "frac": 0.121,
+     "delta_base": -0.13,
+     "reach": {
+      "broad": 0.48,
+      "interest_biztools": 0.86,
+      "interest_niche": 0.96
+     },
+     "decision_context": "evaluating alone during a short break and unwilling to research for long"
+    },
+    {
+     "name": "committee_s2",
+     "frac": 0.154,
+     "delta_base": 0.2,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.35,
+      "interest_niche": 0.68
+     },
+     "decision_context": "evaluating alone during a short break and unwilling to research for long"
+    },
+    {
+     "name": "committee_s3",
+     "frac": 0.725,
+     "delta_base": -0.06,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.8,
+      "interest_niche": 0.81
+     },
+     "decision_context": "under deadline pressure and willing to switch only if setup looks immediate"
+    }
+   ]
+  },
+  {
+   "name": "scroller",
+   "weight": 0.0976,
+   "persona": {
+    "decision_style": "Offers very little attention and responds only when the first moment is concrete, legible, and personally relevant.",
+    "trust_signals": [
+     "immediate visual clarity",
+     "one simple benefit",
+     "low-friction next step"
+    ],
+    "rejection_triggers": [
+     "slow opening",
+     "dense explanation",
+     "multiple competing claims"
+    ]
+   },
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.493,
+     "outcome": 0.517,
+     "count": 0.415,
+     "story": 0.422
+    },
+    "demo_gate": 0.784,
+    "trial_gate": 0.483,
+    "base": 0.427,
+    "mismatch_bounce": 0.262,
+    "clickiness": 0.867,
+    "buyiness": 0.074
+   },
+   "subs": [
+    {
+     "name": "scroller_s1",
+     "frac": 0.199,
+     "delta_base": -0.18,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.71,
+      "interest_niche": 0.69
+     },
+     "decision_context": "returning after seeing similar claims several times without acting"
+    },
+    {
+     "name": "scroller_s2",
+     "frac": 0.334,
+     "delta_base": 0.01,
+     "reach": {
+      "broad": 0.4,
+      "interest_biztools": 0.28,
+      "interest_niche": 0.9
+     },
+     "decision_context": "under deadline pressure and willing to switch only if setup looks immediate"
+    },
+    {
+     "name": "scroller_s3",
+     "frac": 0.467,
+     "delta_base": 0.01,
+     "reach": {
+      "broad": 0.86,
+      "interest_biztools": 0.93,
+      "interest_niche": 0.97
+     },
+     "decision_context": "returning after seeing similar claims several times without acting"
+    }
+   ]
+  },
+  {
+   "name": "pragmatist",
+   "weight": 0.0222,
+   "persona": {
+    "decision_style": "Wants a dependable improvement to an existing workflow and judges the product by operational fit.",
+    "trust_signals": [
+     "specific outcome",
+     "real workflow",
+     "implementation detail"
+    ],
+    "rejection_triggers": [
+     "aspirational lifestyle copy",
+     "unclear integration",
+     "novelty without utility"
+    ]
+   },
+   "dims": {
+    "proof_pref": {
+     "benefit": 0.258,
+     "outcome": 0.975,
+     "count": 0.412,
+     "story": 0.817
+    },
+    "demo_gate": 0.637,
+    "trial_gate": 0.798,
+    "base": 0.82,
+    "mismatch_bounce": 0.228,
+    "clickiness": 0.488,
+    "buyiness": 0.867
+   },
+   "subs": [
+    {
+     "name": "pragmatist_s1",
+     "frac": 0.592,
+     "delta_base": 0.18,
+     "reach": {
+      "broad": 0.8,
+      "interest_biztools": 0.47,
+      "interest_niche": 0.28
+     },
+     "decision_context": "collecting evidence for a recommendation to a small team"
+    },
+    {
+     "name": "pragmatist_s2",
+     "frac": 0.408,
+     "delta_base": 0.13,
+     "reach": {
+      "broad": 0.9,
+      "interest_biztools": 0.88,
+      "interest_niche": 0.16
+     },
+     "decision_context": "curious but not yet convinced the problem deserves a paid tool"
+    }
+   ]
+  },
+  {
+   "name": "impulse",
+   "weight": 0.4051,
+   "persona": {
+    "decision_style": "Acts on an immediately vivid benefit when the next step feels easy and the downside feels bounded.",
+    "trust_signals": [
+     "fast payoff",
+     "simple CTA",
+     "low perceived risk"
+    ],
+    "rejection_triggers": [
+     "delayed value",
+     "complex comparison",
+     "high-friction signup"
+    ]
+   },
+   "dims": {
+    "proof_pref": {
+     "benefit": 1.442,
+     "outcome": 0.65,
+     "count": 0.566,
+     "story": 0.6
+    },
+    "demo_gate": 1.092,
+    "trial_gate": 0.587,
+    "base": 1.213,
+    "mismatch_bounce": 0.098,
+    "clickiness": 1.229,
+    "buyiness": 0.419
+   },
+   "subs": [
+    {
+     "name": "impulse_s1",
+     "frac": 0.418,
+     "delta_base": -0.04,
+     "reach": {
+      "broad": 0.79,
+      "interest_biztools": 0.54,
+      "interest_niche": 0.09
+     },
+     "decision_context": "returning after seeing similar claims several times without acting"
+    },
+    {
+     "name": "impulse_s2",
+     "frac": 0.215,
+     "delta_base": -0.2,
+     "reach": {
+      "broad": 0.44,
+      "interest_biztools": 0.22,
+      "interest_niche": 0.27
+     },
+     "decision_context": "actively comparing two alternatives after a painful recent workflow failure"
+    },
+    {
+     "name": "impulse_s3",
+     "frac": 0.366,
+     "delta_base": 0.12,
+     "reach": {
+      "broad": 0.76,
+      "interest_biztools": 0.44,
+      "interest_niche": 0.58
+     },
+     "decision_context": "evaluating alone during a short break and unwilling to research for long"
+    }
+   ]
+  }
+ ]
+}

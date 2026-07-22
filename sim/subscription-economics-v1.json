@@ -1,0 +1,48 @@
+{
+  "schema": "takyon.subscription-economics.v1",
+  "description": "Illustrative retention scenarios for a $29 monthly subscription after the first settled payment. These are not Formflow measurements or industry benchmarks. Replace them with observed paid-cohort revenue and retention before treating subscription ROAS as factual.",
+  "monthly_price_usd": 29,
+  "reporting_horizons_months": [1, 3, 6, 12],
+  "operating_anchor": {
+    "primary_revenue_horizon_months": 6,
+    "gross_margin_assumption": 0.85,
+    "assumption_only": true,
+    "payback_scale": [
+      {"maximum_months": 3, "grade": "exceptional"},
+      {"maximum_months": 6, "grade": "strong"},
+      {"maximum_months": 12, "grade": "healthy"},
+      {"maximum_months": 18, "grade": "marginal"},
+      {"maximum_months": 120, "grade": "weak"}
+    ],
+    "interpretation": "Contribution payback month is the first month cumulative expected subscription gross profit covers acquisition spend. Grades are an internal operating scale, not an industry benchmark."
+  },
+  "scenarios": [
+    {
+      "id": "high_churn_20pct",
+      "label": "Illustrative 20% monthly subscriber churn",
+      "monthly_subscriber_churn": 0.20,
+      "assumption_only": true
+    },
+    {
+      "id": "reference_10pct",
+      "label": "Illustrative 10% monthly subscriber churn",
+      "monthly_subscriber_churn": 0.10,
+      "assumption_only": true
+    },
+    {
+      "id": "low_churn_5pct",
+      "label": "Illustrative 5% monthly subscriber churn",
+      "monthly_subscriber_churn": 0.05,
+      "assumption_only": true
+    }
+  ],
+  "excluded_until_measured": [
+    "refunds",
+    "failed recurring payments",
+    "discounts",
+    "upgrades and downgrades",
+    "gross margin",
+    "reactivations",
+    "revenue attribution outside the selected ad cohort"
+  ]
+}

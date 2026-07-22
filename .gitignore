@@ -10,6 +10,7 @@
 .DS_Store
 sim/cache/
 sim/runs/
+sim/generated-populations/
 sim/__pycache__/
 **/.DS_Store
 .vscode/
@@ -95,5 +96,6 @@ site-exports/
 AUTH0.md
 lfd/
 changes.md
+!CHANGES.md
 /you
 secrets/.env

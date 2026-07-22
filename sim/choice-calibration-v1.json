@@ -1,0 +1,49 @@
+{
+  "schema": "takyon.persistent-choice-calibration.v1",
+  "description": "Explicit cold-paid-social utility assumptions for persistent people. These are calibration inputs, not conversion ceilings. Conditional probabilities emerge from a logistic random-utility model and repeated exposure; replace the assumptions with observed stage data when available.",
+  "stage_intercepts": {
+    "noticed": -0.65,
+    "stopped_scrolling": -1.15,
+    "meaningful_views": -0.8,
+    "clicks": -3.75,
+    "landing_visits": 1.65,
+    "signups": -5.2,
+    "activations": -1.45,
+    "purchases": -2.7
+  },
+  "product_state_values": {
+    "current_need": {"none": -5.0, "occasional": -1.4, "recurring": 0.45, "acute": 1.15},
+    "product_fit": {"none": -5.0, "weak": -1.6, "partial": -0.35, "strong": 0.85},
+    "authority": {"none": -5.0, "influence": -2.2, "shared": -0.75, "direct": 0.55},
+    "budget": {"unavailable": -5.0, "constrained": -1.15, "available": 0.4},
+    "switching_cost": {"prohibitive": -3.2, "high": -1.35, "moderate": -0.35, "low": 0.35},
+    "implementation_capacity": {"blocked": -3.2, "constrained": -0.9, "available": 0.4},
+    "product_experience": {"negative": -2.5, "limited": -0.8, "useful": 0.45, "strong": 1.0}
+  },
+  "ad_signal_values": {
+    "attention": {"ignored": -2.2, "weak": -0.75, "engaging": 0.45, "compelling": 1.0},
+    "comprehension": {"unclear": -1.7, "partial": -0.35, "clear": 0.55},
+    "relevance": {"none": -2.8, "weak": -0.9, "credible": 0.25, "direct": 0.9},
+    "credibility": {"distrusted": -2.0, "doubtful": -0.65, "credible": 0.3, "demonstrated": 0.85},
+    "expectation_match": {"misleading": -2.2, "misaligned": -0.7, "aligned": 0.55},
+    "trial_motivation": {"repelled": -1.8, "none": -0.25, "consider": 0.45, "strong": 0.95},
+    "microprofile_reaction": {"rejected": -1.3, "neutral": 0.0, "helped": 0.45}
+  },
+  "stage_weights": {
+    "noticed": {"attention": 1.0, "microprofile_reaction": 0.8},
+    "stopped_scrolling": {"attention": 0.65, "comprehension": 0.45, "relevance": 0.55, "microprofile_reaction": 0.5},
+    "meaningful_views": {"attention": 0.35, "comprehension": 0.65, "relevance": 0.45, "credibility": 0.25, "microprofile_reaction": 0.35},
+    "clicks": {"relevance": 0.9, "credibility": 0.5, "comprehension": 0.35, "trial_motivation": 0.3, "current_need": 0.25, "product_fit": 0.2},
+    "landing_visits": {"expectation_match": 0.25, "credibility": 0.15},
+    "signups": {"current_need": 0.65, "product_fit": 0.65, "authority": 0.35, "budget": 0.3, "switching_cost": 0.35, "implementation_capacity": 0.35, "relevance": 0.3, "credibility": 0.45, "expectation_match": 0.35, "trial_motivation": 0.75},
+    "activations": {"current_need": 0.3, "product_fit": 0.75, "implementation_capacity": 0.7, "product_experience": 0.65, "expectation_match": 0.45, "credibility": 0.15},
+    "purchases": {"current_need": 0.5, "product_fit": 0.65, "authority": 0.9, "budget": 0.75, "switching_cost": 0.55, "implementation_capacity": 0.25, "product_experience": 1.0, "credibility": 0.25, "expectation_match": 0.5, "trial_motivation": 0.15}
+  },
+  "frequency": {
+    "recognition_gain_per_log_repeat": 0.22,
+    "trust_gain_per_log_repeat": 0.1,
+    "fatigue_after_frequency": 3.0,
+    "fatigue_cost_per_extra_impression": 0.16
+  },
+  "interpretation": "The LLM selects qualitative causal states and ad signals. This file maps them into utilities. No stage has a configured maximum rate; probabilities approach zero or one only through the combined person, product, ad, offer and exposure utilities."
+}

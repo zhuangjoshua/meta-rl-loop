@@ -133,3 +133,81 @@ The limiting resources are provider token/rate budgets and policy-agent context 
 not simulator CPU. Eight iterations fit comfortably because evidence remains small; for
 longer runs the current full-fidelity evidence prompt should be paired with a model whose
 context window can hold every retained policy, ad, setting, and receipt.
+
+## Hierarchical population-market v3
+
+The harness is additive; the original Tier-B loop remains runnable. It replaces one rate
+judgment per persona/ad with ten parent-population semantic evaluations. Each parent call
+sees its inherited child situations, deterministic delivery, the full ad timeline and the
+page. Executable persistent-person choice code produces the ordered funnel. Only aggregate
+receipts are public.
+
+Run the full-information three-ad policy oracle with lower-cost consumer models:
+
+```bash
+python3 sim/full_info_policy_v2.py 71 \
+  --landing-page sim/formflow-landing-page.md \
+  --designer-model gpt-5.6-sol \
+  --judge-model gpt-5.6-luna \
+  --population-model sim/population-model-v3.json \
+  --human-variation-model sim/human-variation-v4.json \
+  --choice-calibration sim/choice-calibration-v1.json \
+  --subscription-economics sim/subscription-economics-v1.json \
+  --generations 3 --candidate-count 4 --periods 8
+```
+
+One generation evaluates all candidate policies in exactly ten population calls, rather
+than ten calls per candidate. Consumer reasons and child identities are written only to
+the hidden audit artifact.
+
+The v3 model makes role, workflow, current solution, need, authority, and market
+eligibility primary. It includes explicit nonbuyers and treats impulsiveness or
+skepticism as cross-cutting behavior rather than delivery segments. Its population
+and targeting numbers are simulator assumptions and must not be described as measured
+Meta distributions.
+
+The judge returns qualitative product-person states and ad-perception signals, never
+counts or probabilities. The executable choice model holds need, fit, authority, budget,
+switching cost, implementation capacity and product experience fixed outside the ad.
+Ads affect perception and expectation matching. Persistent delivery pools deduplicate
+purchases across ads and periods. No conversion ceiling or fixed ad-lift bound is applied;
+all numerical utility assumptions are versioned in `choice-calibration-v1.json` and copied
+into the hidden audit.
+
+Subscription reporting separates first-payment ROAS from realized/modelled cohort
+revenue. The bundled economics file provides explicit churn scenarios only; replace
+them with the product's observed paid-cohort retention before treating month-6,
+month-12, or lifetime ROAS as factual. Trials are not revenue, and the old no-churn
+six-month multiplier is no longer emitted.
+
+For a readable operating scale, use contribution CAC payback rather than raw
+first-payment ROAS. The bundled illustrative grades are: at most 3 months
+`exceptional`, 6 `strong`, 12 `healthy`, 18 `marginal`, and longer `weak`. Both
+the margin assumption and grade boundaries are configurable business policy, not
+external benchmarks.
+
+## Adaptive product-relevant populations
+
+`sim/population_generator.py` now generates the hidden hierarchy from a public business
+specification before any ad exists, audits it for buyer-only bias and invented product facts,
+validates hard coverage and eligibility invariants, and freezes the result for the experiment.
+Generic human attention variation remains separate in `sim/human-variation-core-v1.json`.
+Every generated child has a frozen statistical mixture of decision strata; the ad judge cannot
+choose or improve need, fit, authority, budget, switching cost, implementation capacity, or likely
+product experience. Multi-world generation varies that hidden market across seeds while holding
+the business and public platform fixed.
+
+Generate the bundled Formflow example with:
+
+```bash
+python3 sim/population_generator.py \
+  --business-spec sim/business-spec-formflow.json \
+  --platform sim/world-71/platform.json \
+  --seed 1 --run-name formflow-seed-1
+```
+
+Add `--world-count 5 --world-id-start 101` to create an indexed set of five independently
+generated and audited hidden worlds.
+
+The complete input contract, run-log artifact index, validation rules, and downstream harness
+commands are in [ADAPTIVE-POPULATIONS.md](ADAPTIVE-POPULATIONS.md).

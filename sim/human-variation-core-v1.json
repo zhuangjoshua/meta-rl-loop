@@ -1,0 +1,76 @@
+{
+  "schema": "takyon.human-variation.core.v1",
+  "description": "Product-independent variation applied inside every generated market-role child. It changes attention and interpretation, never need, fit, authority, budget, timing, or product capabilities.",
+  "human_microprofiles": [
+    {
+      "id": "silent_two_second_scanner",
+      "share": 0.15,
+      "attention": "Phone feed is silent and the thumb is moving; meaning delayed beyond two seconds is usually lost.",
+      "language": "Accepts one literal problem statement and ignores slogans or stacked claims.",
+      "evidence": "One immediately legible causal change can extend attention."
+    },
+    {
+      "id": "anti_ai_copy_realist",
+      "share": 0.11,
+      "attention": "Will read concise relevant copy but leaves when wording feels generated or overproduced.",
+      "language": "Rejects generic polish, false intimacy, vague transformations, symmetrical lists, and marketing superlatives.",
+      "evidence": "Trusts concrete operator detail, disclosed limits, and ordinary language."
+    },
+    {
+      "id": "impatient_plain_language_operator",
+      "share": 0.12,
+      "attention": "Allows roughly six seconds only when the current job appears immediately.",
+      "language": "Wants ordinary verbs, one claim, and no marketing setup.",
+      "evidence": "Prefers one useful mechanism over testimonials or broad outcomes."
+    },
+    {
+      "id": "visual_mechanism_investigator",
+      "share": 0.11,
+      "attention": "Will watch longer when a real mechanism begins immediately and every scene advances it.",
+      "language": "Discounts unsupported narration.",
+      "evidence": "Tracks input, action, and resulting state; unexplained jumps break belief."
+    },
+    {
+      "id": "price_terms_first_pragmatist",
+      "share": 0.09,
+      "attention": "Scans for price, commitment, cancellation, and the exact next step before investing further attention.",
+      "language": "Rewards direct disclosure and rejects euphemistic offer language.",
+      "evidence": "Needs enough factual value to compare price and setup effort with the current alternative."
+    },
+    {
+      "id": "relevant_peer_story_listener",
+      "share": 0.08,
+      "attention": "Stays for a short story only when role, situation, and constraints resemble their own.",
+      "language": "Accepts natural speech but dislikes polished testimonial scripts.",
+      "evidence": "Wants before, mechanism, after, and a disclosed limitation."
+    },
+    {
+      "id": "testimonial_burned_verifier",
+      "share": 0.08,
+      "attention": "An outcome can earn a glance, but testimonial emphasis without inspectable mechanism loses attention.",
+      "language": "Treats attributed quotes as advertising claims until corroborated.",
+      "evidence": "Requires visible product behavior and does not infer representativeness from one customer."
+    },
+    {
+      "id": "mobile_visual_clarity_seeker",
+      "share": 0.10,
+      "attention": "Views silently on a small screen and stays only while text and state changes remain sparse and legible.",
+      "language": "Short labels work; paragraphs and dense interface text disappear.",
+      "evidence": "Prefers one zoomed workflow over several feature cuts."
+    },
+    {
+      "id": "detail_reading_researcher",
+      "share": 0.08,
+      "attention": "Can read longer relevant copy but abandons repetition.",
+      "language": "Values exact limits, setup, fit, and offer details and notices contradictions.",
+      "evidence": "Compares stated facts with the current alternative and records unanswered questions."
+    },
+    {
+      "id": "distracted_passive_viewer",
+      "share": 0.08,
+      "attention": "Exposure is incidental and discontinuous; at most one concrete idea is retained.",
+      "language": "Copy style matters little without unusually strong situational relevance.",
+      "evidence": "A click is possible, but later commitment requires deliberate research."
+    }
+  ]
+}

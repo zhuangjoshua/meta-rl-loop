@@ -1,0 +1,144 @@
+{
+  "schema": "takyon.human-variation.v4",
+  "description": "Cross-cutting human variation applied inside every concrete market-role child. Shares are explicit simulator assumptions. A profile changes how a person attends and interprets an ad; it never creates product need, authority, budget or fit.",
+  "human_microprofiles": [
+    {
+      "id": "silent_two_second_scanner",
+      "share": 0.14,
+      "attention": "Phone feed is silent and thumb is already moving. Usually grants under two seconds; rejects small UI, setup, narration-dependent meaning and delayed product identity even when the full ad is under ten seconds.",
+      "language": "Accepts one literal problem statement. Ignores slogans and stacked claims.",
+      "evidence": "A single immediately legible state change can extend attention; explanations cannot."
+    },
+    {
+      "id": "anti_ai_copy_realist",
+      "share": 0.10,
+      "attention": "Will read concise relevant copy but leaves when wording feels generated or overproduced.",
+      "language": "Strongly rejects generic polish, symmetrical three-part phrasing, repeated em-dash cadence, false intimacy, vague transformations, excessive headline fragments, and words such as seamless, unlock, revolutionize or game-changing. Prefers irregular, concrete human detail and admits tradeoffs.",
+      "evidence": "Trust rises when the ad sounds like an operator describing a specific event rather than a model assembling persuasion patterns."
+    },
+    {
+      "id": "impatient_plain_language_operator",
+      "share": 0.12,
+      "attention": "Tolerates roughly six seconds unless the exact current job is visible immediately; even a ten-second ad can feel long.",
+      "language": "Wants ordinary verbs, one claim and no marketing setup.",
+      "evidence": "Prefers the product doing one useful thing over testimonials or broad outcomes."
+    },
+    {
+      "id": "visual_mechanism_investigator",
+      "share": 0.10,
+      "attention": "Will watch fifteen to twenty-five seconds when a real mechanism begins immediately and each scene causally advances it.",
+      "language": "Copy is secondary; unsupported narration is discounted.",
+      "evidence": "Tracks input, product action, client action and resulting record state; unexplained jumps or decorative mockups break belief."
+    },
+    {
+      "id": "price_terms_first_pragmatist",
+      "share": 0.08,
+      "attention": "Scans quickly for price, card requirement, cancellation and the exact next step before investing further attention.",
+      "language": "Rewards direct disclosure and dislikes euphemisms such as free when a card and paid conversion are required.",
+      "evidence": "Needs enough factual value to compare $29 plus setup effort with the current method."
+    },
+    {
+      "id": "relevant_peer_story_listener",
+      "share": 0.08,
+      "attention": "Will stay for a short story only when role, team size and workflow resemble their own; generic founders and lifestyle scenes are skipped.",
+      "language": "Accepts natural quoted speech but dislikes polished testimonial scripts.",
+      "evidence": "Wants before, mechanism, after and a limitation that establishes transferability."
+    },
+    {
+      "id": "testimonial_burned_verifier",
+      "share": 0.08,
+      "attention": "An outcome headline can earn a glance, but testimonial emphasis without inspectable mechanism causes immediate skepticism.",
+      "language": "Treats attributed quotes as advertising claims until corroborated.",
+      "evidence": "Requires visible product behavior and does not infer representativeness from one named customer."
+    },
+    {
+      "id": "mobile_visual_clarity_seeker",
+      "share": 0.10,
+      "attention": "Views on a small screen, often silent. Can tolerate ten to fifteen seconds if text and state changes remain large, sparse and understandable without audio.",
+      "language": "Short labels are useful; paragraphs and dense interface text are invisible.",
+      "evidence": "Prefers a zoomed single workflow over several feature cuts."
+    },
+    {
+      "id": "detail_reading_researcher",
+      "share": 0.06,
+      "attention": "Pauses voluntarily and can read longer copy when already category-aware, but does not watch repetitive scenes.",
+      "language": "Values exact limits, setup, fit and offer details; detects contradictions between ad and page.",
+      "evidence": "Compares product facts with current tools and records unresolved questions."
+    },
+    {
+      "id": "time_starved_task_seeker",
+      "share": 0.06,
+      "attention": "Has a relevant job but is interrupted. Allows one problem, one mechanism and one next step; abandons extra proof even when persuaded.",
+      "language": "Favors compressed operational language, not slogans or stories.",
+      "evidence": "May save or revisit rather than purchase during the first exposure."
+    },
+    {
+      "id": "technical_systems_evaluator",
+      "share": 0.04,
+      "attention": "Will inspect a longer demonstration but skips emotional hooks and visual metaphors.",
+      "language": "Wants precise object, action, state, limit and integration language.",
+      "evidence": "Rejects invented automation, security implications, integrations or reliability claims not present in product facts."
+    },
+    {
+      "id": "distracted_passive_viewer",
+      "share": 0.04,
+      "attention": "Feed exposure is incidental and discontinuous. Retains at most one concrete idea and usually abandons before terms.",
+      "language": "Neither polished nor plain copy matters without unusually strong situational relevance.",
+      "evidence": "A click is possible; activation and purchase remain rare without later deliberate research."
+    }
+  ],
+  "role_factual_preferences": {
+    "out_of_market_general_adults": {
+      "factual_job": "None. Product facts may be understandable but do not become relevant.",
+      "hard_rule": "No product feature converts lack of category need or authority into a purchase."
+    },
+    "adjacent_small_business_without_fit": {
+      "valued_if_relevant": ["simple branded link", "no client account", "transparent $29 price"],
+      "frequent_mismatch": ["workflow assumes project briefs", "status stages do not match transactional or reservation work"],
+      "hard_rule": "A feature list cannot substitute for an actual recurring client-information job."
+    },
+    "low_volume_solo_service_providers": {
+      "valued": ["templates", "import existing questionnaire", "cancel anytime", "no client account"],
+      "decisive_facts": ["actual intake frequency", "setup time", "whether $29 recurs during quiet months"],
+      "common_rejection": "Manual email or a free form remains cheaper at low volume."
+    },
+    "active_independent_consultants": {
+      "valued": ["conditional questions", "attachments stay with request", "automatic missing-answer reminder", "Waiting on Client to Ready status", "import existing questionnaire", "password-free client link"],
+      "preference_variation": ["Some prioritize fewer follow-ups", "some prioritize a polished client experience", "some prioritize document completeness", "some require compatibility with an established process"],
+      "missing_or_unproven": ["calendar integrations", "CRM integrations", "advanced security documentation", "custom automation beyond stated reminders"],
+      "hard_rule": "Do not infer an unstated integration or claim that every consultant needs all features."
+    },
+    "micro_agencies": {
+      "valued": ["shared status visibility", "owner assignment", "internal notes", "branded intake", "files with record", "two included team members"],
+      "preference_variation": ["Owners value economics and client experience", "coordinators value status and reminders", "practitioners value complete briefs", "teams above two seats notice the plan limit"],
+      "hard_questions": ["What additional seats cost is absent", "migration and integration are unproven", "client compliance varies"],
+      "hard_rule": "Two included users may be inadequate for a six-person agency and must not be framed as full-team coverage."
+    },
+    "bookkeeping_accounting_practices": {
+      "valued": ["document collection", "automatic reminders", "organized records", "password-free client access", "import questionnaire"],
+      "preference_variation": ["Solo bookkeepers value recurring reminders", "practices value shared ownership", "seasonal tax work values burst capacity"],
+      "hard_questions": ["Security and compliance details are not supplied", "tax-portal replacement is not established", "attachment limits are unstated"],
+      "hard_rule": "The word secure link does not prove regulatory suitability."
+    },
+    "other_professional_service_teams": {
+      "valued": ["conditional intake", "files", "status ownership", "client updates"],
+      "preference_variation": ["Recruiters care about system duplication", "legal teams care about controls", "design practices care about briefs and files", "training teams care about CRM fit"],
+      "hard_rule": "Evaluate each profession's workflow separately; generic professional-service relevance is insufficient."
+    },
+    "existing_workflow_tool_users": {
+      "valued": ["integrated reminder plus status workflow", "import existing questionnaire", "organized client record"],
+      "decisive_facts": ["migration burden", "lost integrations", "incremental value over forms, CRM or custom databases"],
+      "hard_rule": "Recognition of useful features does not imply willingness to replace a functioning incumbent."
+    },
+    "internal_champions_without_authority": {
+      "valued": ["demonstrable reduction in chasing", "shareable workflow proof", "clear price and setup"],
+      "decisive_facts": ["who approves", "who supplies the card", "who owns rollout", "security review"],
+      "hard_rule": "Strong product preference may create an internal recommendation but must remain zero direct purchases."
+    },
+    "procurement_controlled_service_teams": {
+      "valued": ["workflow fit", "ownership", "transparent price", "client access model"],
+      "required_but_absent_for_many": ["security documentation", "data processing terms", "administrative controls", "approved vendor path", "multi-role agreement"],
+      "hard_rule": "A product demo cannot clear an absent institutional requirement."
+    }
+  }
+}

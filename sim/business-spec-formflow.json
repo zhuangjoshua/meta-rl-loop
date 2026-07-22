@@ -1,0 +1,45 @@
+{
+  "schema": "takyon.business-spec.v1",
+  "business_name": "Formflow",
+  "category": "client-intake workflow SaaS for independent consultants and small service teams",
+  "product_summary": "A reusable client-intake form, follow-up, record, and status workflow that clients can use without creating an account.",
+  "product_facts": {
+    "capabilities": [
+      "Reusable forms built from templates or from scratch",
+      "Conditional questions",
+      "Responses organized as client records",
+      "Attachments kept with the request",
+      "Automatic reminders for missing answers",
+      "New, Waiting on Client, Ready, and Complete statuses",
+      "Owner assignment, internal notes, and client updates",
+      "Password-free client link",
+      "Import of an existing questionnaire",
+      "Branded intake links and website embedding",
+      "Unlimited forms, 500 active client records, two team members, and email support"
+    ],
+    "limitations": [
+      "No integrations are stated",
+      "No security certifications or regulatory compliance claims are stated",
+      "No custom automation beyond stated missing-answer reminders is stated",
+      "Pricing for more than two team members is not stated",
+      "Attachment limits and migration services are not stated"
+    ],
+    "activation_event": "The account publishes or uses a real intake flow.",
+    "purchase_event": "The first settled $29 payment after the card-required trial."
+  },
+  "offer": {
+    "pricing": "$29 per month",
+    "trial": "14 days; a card is required and the account converts to paid unless cancelled",
+    "cancellation": "Cancel from account settings at any time"
+  },
+  "market_context": [
+    "The advertised traffic is cold Meta feed traffic, not a list of existing leads.",
+    "Potential alternatives include email, generic forms, documents, spreadsheets, CRMs, portals, and established workflow tools.",
+    "The product is most plausible when incomplete client information creates a recurring operational cost."
+  ],
+  "excluded_claims": [
+    "Do not treat landing-page testimonials as representative market evidence.",
+    "Do not infer integrations, compliance, guaranteed time savings, guaranteed revenue, or universal workflow fit.",
+    "Do not infer that every professional service business has a current need, budget, authority, or willingness to switch."
+  ]
+}
