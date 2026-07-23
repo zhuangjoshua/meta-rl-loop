@@ -69,6 +69,7 @@ class LLMConfig:
     max_output_tokens: int = 12000
     temperature: float = 0.2
     codex_bin: str = ""
+    reasoning_effort: str = ""
 
     def __post_init__(self) -> None:
         if self.provider not in {"codex", "openai"}:
@@ -77,13 +78,20 @@ class LLMConfig:
             raise ValueError("timeout_seconds must be positive")
         if self.max_output_tokens < 256:
             raise ValueError("max_output_tokens must be at least 256")
+        if self.reasoning_effort not in {"", "minimal", "low", "medium", "high", "xhigh"}:
+            raise ValueError("reasoning_effort must be minimal, low, medium, high, or xhigh")
 
     @property
     def identity(self) -> str:
         base_host = urllib.parse.urlparse(self.base_url).netloc if self.base_url else ""
-        raw = _canonical_json(
-            {"provider": self.provider, "model": self.model or "default", "base_host": base_host}
-        )
+        identity_fields = {
+            "provider": self.provider, "model": self.model or "default", "base_host": base_host,
+        }
+        # Reasoning effort changes model behavior, so it must partition the
+        # response cache; omitted when unset to keep existing cache keys valid.
+        if self.reasoning_effort:
+            identity_fields["reasoning_effort"] = self.reasoning_effort
+        raw = _canonical_json(identity_fields)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -180,6 +188,8 @@ class StructuredLLM:
             ]
             if self.config.model:
                 command.extend(["--model", self.config.model])
+            if self.config.reasoning_effort:
+                command.extend(["-c", f"model_reasoning_effort={self.config.reasoning_effort}"])
             command.append("-")
             environment = os.environ.copy()
             environment["NO_COLOR"] = "1"
@@ -236,6 +246,8 @@ class StructuredLLM:
                 "json_schema": {"name": "tier_b_response", "strict": True, "schema": schema},
             },
         }
+        if self.config.reasoning_effort:
+            body["reasoning_effort"] = self.config.reasoning_effort
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"

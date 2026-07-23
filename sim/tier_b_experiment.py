@@ -577,6 +577,7 @@ def run_experiment(
     schedule_name: str, judge: StructuredLLM, agent: StructuredLLM,
     cache_dir: Path, output_dir: Path, judge_batch_pairs: int,
     judge_concurrency: int, market_backend: Any | None = None,
+    gradient_agent: StructuredLLM | None = None,
 ) -> dict[str, Any]:
     if iterations < 1 or budget <= 0:
         raise ExperimentError("iterations and budget must be positive")
@@ -664,7 +665,7 @@ def run_experiment(
         }
         history.append(record)
         gradient = _complete_validated(
-            agent,
+            gradient_agent or agent,
             prompt=_gradient_prompt(
                 operator=operator,
                 goal=goal,
@@ -806,6 +807,12 @@ def run_experiment(
             "identity": agent.config.identity,
             "stats": agent.stats.record(),
         },
+        "gradient_agent": {
+            "provider": (gradient_agent or agent).config.provider,
+            "model": (gradient_agent or agent).config.model or "default",
+            "identity": (gradient_agent or agent).config.identity,
+            "stats": (gradient_agent or agent).stats.record(),
+        },
         "output_dir": str(output_dir),
     }
     _write_json(output_dir / "summary.json", summary)
@@ -823,9 +830,10 @@ def _config(prefix: str, args: argparse.Namespace) -> LLMConfig:
         base_url=getattr(args, f"{prefix}_base_url"),
         api_key_env=getattr(args, f"{prefix}_api_key_env"),
         timeout_seconds=args.timeout,
-        max_output_tokens=24000 if prefix == "agent" else 12000,
+        max_output_tokens=12000 if prefix == "judge" else 24000,
         temperature=0.2,
         codex_bin=args.codex_bin,
+        reasoning_effort=getattr(args, f"{prefix}_reasoning_effort"),
     )
 
 
@@ -834,6 +842,11 @@ def _add_llm_args(parser: argparse.ArgumentParser, prefix: str) -> None:
     parser.add_argument(f"--{prefix}-model", default="")
     parser.add_argument(f"--{prefix}-base-url", default="")
     parser.add_argument(f"--{prefix}-api-key-env", default=f"TIER_B_{prefix.upper()}_API_KEY")
+    parser.add_argument(
+        f"--{prefix}-reasoning-effort",
+        choices=("minimal", "low", "medium", "high", "xhigh"),
+        default="",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -889,6 +902,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--codex-bin", default="")
     _add_llm_args(parser, "judge")
     _add_llm_args(parser, "agent")
+    # Optional separate model for the semantic-gradient step; defaults to the agent model.
+    _add_llm_args(parser, "gradient")
     args = parser.parse_args(argv)
     try:
         landing_page = args.landing_page.read_text(encoding="utf-8").strip()
@@ -921,6 +936,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         judge = StructuredLLM(judge_config, response_cache_dir=response_cache)
         agent = StructuredLLM(agent_config, response_cache_dir=response_cache)
+        gradient_agent = None
+        if args.gradient_model:
+            gradient_agent = StructuredLLM(
+                _config("gradient", args), response_cache_dir=response_cache
+            )
         market_backend = None
         if args.market == "v2":
             if not args.population_model:
@@ -956,6 +976,7 @@ def main(argv: list[str] | None = None) -> int:
             judge_batch_pairs=args.judge_batch_pairs,
             judge_concurrency=args.judge_concurrency,
             market_backend=market_backend,
+            gradient_agent=gradient_agent,
         )
     except (
         OSError,
