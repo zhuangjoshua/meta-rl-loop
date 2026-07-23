@@ -174,3 +174,32 @@ def test_normalize_design_default_still_uses_legacy_validator():
     # The legacy validator marks each ad with its judge-visible "actual" text.
     assert all("actual" in ad for ad in spec["ads"])
     assert all("timeline_synthesized" not in ad for ad in spec["ads"])
+
+
+def test_purge_invalid_judge_cache_removes_only_violations(tmp_path):
+    from sim.market_v2_adapter import _purge_invalid_judge_cache
+    from sim.population_market_v2 import MODEL_VERSION
+    import json as _json
+
+    allowed = {"profile_a", "profile_b"}
+    good = {"ad_assessments": [
+        {"helped_microprofiles": ["profile_a"], "rejected_microprofiles": ["profile_b"]},
+    ]}
+    overlapping = {"ad_assessments": [
+        {"helped_microprofiles": ["profile_a"], "rejected_microprofiles": ["profile_a"]},
+    ]}
+    unknown = {"ad_assessments": [
+        {"helped_microprofiles": ["mystery"], "rejected_microprofiles": []},
+    ]}
+    unrelated = {"something_else": True}
+    (tmp_path / f"{MODEL_VERSION}-p1-aaa.json").write_text(_json.dumps(good))
+    (tmp_path / f"{MODEL_VERSION}-p2-bbb.json").write_text(_json.dumps(overlapping))
+    (tmp_path / f"{MODEL_VERSION}-p3-ccc.json").write_text(_json.dumps(unknown))
+    (tmp_path / "other-namespace-ddd.json").write_text(_json.dumps(overlapping))
+    (tmp_path / f"{MODEL_VERSION}-p4-eee.json").write_text(_json.dumps(unrelated))
+
+    removed = _purge_invalid_judge_cache(tmp_path, allowed)
+    assert sorted(removed) == [f"{MODEL_VERSION}-p2-bbb.json", f"{MODEL_VERSION}-p3-ccc.json"]
+    assert (tmp_path / f"{MODEL_VERSION}-p1-aaa.json").exists()
+    assert (tmp_path / "other-namespace-ddd.json").exists()
+    assert (tmp_path / f"{MODEL_VERSION}-p4-eee.json").exists()

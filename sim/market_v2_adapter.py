@@ -18,14 +18,17 @@ delivery period, and one iteration's spend is budget x periods.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
 try:  # package import in tests; direct import when run as `python sim/...py`
     from .population_market_v2 import (
         CHOICE_CALIBRATION_PATH,
+        MODEL_VERSION,
         PopulationMarketError,
         evaluate_policies,
+        load_variation_model,
         sampled_replay,
         validate_policy,
     )
@@ -33,8 +36,10 @@ try:  # package import in tests; direct import when run as `python sim/...py`
 except ImportError:  # pragma: no cover - direct-script path
     from population_market_v2 import (
         CHOICE_CALIBRATION_PATH,
+        MODEL_VERSION,
         PopulationMarketError,
         evaluate_policies,
+        load_variation_model,
         sampled_replay,
         validate_policy,
     )
@@ -46,6 +51,51 @@ SYNTHESIZED_TIMELINE_SECONDS = 15.0
 
 class MarketV2AdapterError(RuntimeError):
     pass
+
+
+JUDGE_RETRY_ATTEMPTS = 3
+
+
+def _microprofile_rows_invalid(payload: Any, allowed_ids: set[str]) -> bool:
+    """Mirror of the engine's fail-closed microprofile rule, applied to a raw
+    cached judge payload: helped/rejected must be duplicate-free, disjoint,
+    and drawn from the known profile ids."""
+    if not isinstance(payload, Mapping):
+        return False
+    rows = payload.get("ad_assessments")
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        helped = [str(value) for value in row.get("helped_microprofiles") or []]
+        rejected = [str(value) for value in row.get("rejected_microprofiles") or []]
+        if (
+            len(helped) != len(set(helped)) or len(rejected) != len(set(rejected))
+            or not set(helped + rejected) <= allowed_ids or set(helped) & set(rejected)
+        ):
+            return True
+    return False
+
+
+def _purge_invalid_judge_cache(cache_dir: Path, allowed_ids: set[str]) -> list[str]:
+    """Delete cached judge responses that provably violate the engine's
+    microprofile rule so a retry resamples them instead of replaying the same
+    rejected payload. Only provably-invalid entries are removed; valid cached
+    judgments are untouched."""
+    removed: list[str] = []
+    for path in sorted(cache_dir.glob(f"{MODEL_VERSION}-*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        payload = data.get("value") if isinstance(data, Mapping) else None
+        if payload is None:
+            payload = data
+        if _microprofile_rows_invalid(payload, allowed_ids):
+            path.unlink()
+            removed.append(path.name)
+    return removed
 
 
 def _ensure_timeline(ad: dict[str, Any]) -> dict[str, Any]:
@@ -128,6 +178,12 @@ class MarketV2Backend:
         self.choice_calibration_path = (
             Path(choice_calibration_path) if choice_calibration_path else CHOICE_CALIBRATION_PATH
         )
+        variation = load_variation_model(self.variation_path)
+        self._allowed_profile_ids = (
+            {str(profile["id"]) for profile in variation["human_microprofiles"]}
+            if variation
+            else {"general_human"}
+        )
 
     @property
     def design_instructions(self) -> str:
@@ -162,21 +218,37 @@ class MarketV2Backend:
     def simulate(
         self, *, seed: int, raw_spec: Mapping[str, Any], expected: bool = False
     ) -> dict[str, Any]:
-        try:
-            result = evaluate_policies(
-                world_number=self.world_number,
-                raw_policies=[_policy_from_spec(raw_spec)],
-                judge=self.judge,
-                periods=self.periods,
-                concurrency=self.concurrency,
-                expected_budget=self.budget,
-                model_path=self.model_path,
-                variation_path=self.variation_path,
-                economics_path=self.economics_path,
-                choice_calibration_path=self.choice_calibration_path,
-            )[0]
-        except PopulationMarketError as exc:
-            raise MarketV2AdapterError(f"population-market v2 evaluation failed: {exc}") from exc
+        result = None
+        for attempt in range(1, JUDGE_RETRY_ATTEMPTS + 1):
+            try:
+                result = evaluate_policies(
+                    world_number=self.world_number,
+                    raw_policies=[_policy_from_spec(raw_spec)],
+                    judge=self.judge,
+                    periods=self.periods,
+                    concurrency=self.concurrency,
+                    expected_budget=self.budget,
+                    model_path=self.model_path,
+                    variation_path=self.variation_path,
+                    economics_path=self.economics_path,
+                    choice_calibration_path=self.choice_calibration_path,
+                )[0]
+                break
+            except PopulationMarketError as exc:
+                # A semantically invalid judge response is cached before the
+                # engine validates it, so a bare retry would replay the same
+                # rejected payload forever. Purge provably-invalid cached
+                # judgments and resample; anything else fails immediately.
+                cache_dir = getattr(self.judge, "response_cache_dir", None)
+                removed = (
+                    _purge_invalid_judge_cache(Path(cache_dir), self._allowed_profile_ids)
+                    if cache_dir is not None
+                    else []
+                )
+                if not removed or attempt == JUDGE_RETRY_ATTEMPTS:
+                    raise MarketV2AdapterError(
+                        f"population-market v2 evaluation failed: {exc}"
+                    ) from exc
         if expected:
             receipt = {
                 "schema": "takyon.population-market-receipt.v3-expected",
