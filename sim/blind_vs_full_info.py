@@ -247,7 +247,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--judge-model", default="gpt-5.6-luna")
     parser.add_argument("--judge-concurrency", type=int, default=5)
     parser.add_argument("--sample-replays", type=int, default=200)
-    parser.add_argument("--population-model", type=Path, default=MODEL_PATH)
+    parser.add_argument(
+        "--population-model",
+        type=Path,
+        required=True,
+        help=(
+            "Frozen population-model.json to run against. Required so a run can "
+            "never silently fall back to the hand-written default; pass "
+            f"{MODEL_PATH} explicitly to use the static v3 model."
+        ),
+    )
     parser.add_argument("--human-variation-model", type=Path, default=SIM_ROOT / "human-variation-v4.json")
     parser.add_argument("--choice-calibration", type=Path, default=CHOICE_CALIBRATION_PATH)
     parser.add_argument("--subscription-economics", type=Path, default=SIM_ROOT / "subscription-economics-v1.json")

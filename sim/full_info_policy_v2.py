@@ -376,7 +376,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache-dir", type=Path, default=SIM_ROOT / "cache" / "population-v3-choice")
     parser.add_argument("--output-root", type=Path, default=SIM_ROOT / "runs" / "population-v3-choice")
     parser.add_argument("--codex-bin", default="")
-    parser.add_argument("--population-model", type=Path, default=MODEL_PATH)
+    parser.add_argument(
+        "--population-model",
+        type=Path,
+        required=True,
+        help=(
+            "Frozen population-model.json to run against. Required so a run can "
+            "never silently fall back to the hand-written default; pass "
+            f"{MODEL_PATH} explicitly to use the static v3 model."
+        ),
+    )
     parser.add_argument("--human-variation-model", type=Path)
     parser.add_argument("--subscription-economics", type=Path)
     parser.add_argument("--choice-calibration", type=Path, default=CHOICE_CALIBRATION_PATH)
