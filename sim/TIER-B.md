@@ -72,6 +72,36 @@ python3.12 sim/tier_b_experiment.py 26 \
 The runner refuses missing full landing-page text, placeholder ads, malformed rates,
 incomplete structured output, unsupported campaigns, or provider failure.
 
+## Market backends
+
+`--market legacy` (default) runs receipts through the original hidden-persona market,
+unchanged. `--market v2` runs the identical loop against population-market v2 with a
+frozen generated world:
+
+```bash
+python3.12 sim/tier_b_experiment.py 71 \
+  --landing-page sim/formflow-landing-page.md \
+  --market v2 \
+  --population-model sim/generated-populations/RUN_NAME/population-model.json \
+  --judge-model PINNED_MODEL --agent-model PINNED_MODEL
+```
+
+`--population-model` is required in v2 — there is no default world. v2 semantics that
+differ from legacy and are reported, not hidden:
+
+- Campaign budgets are per delivery period; one iteration's spend is
+  `budget x --market-periods` (default 8).
+- Receipt `revenue`/`roas` are first-settled-payment values (`revenue_definition:
+  "first_payment"` on every receipt).
+- Designed ads must carry a `duration_seconds` and continuous `scenes` timeline; the
+  design schema and prompt require them. A seed-policy embedded batch-1 spec without
+  timelines gets a deterministic single-scene static-ad timeline synthesized from its
+  visual and headline, marked `timeline_synthesized: true` in the archived spec.
+- Audiences reset every iteration (`periods_independent: true`): there is no
+  cross-iteration frequency, fatigue, or purchase memory yet. Cumulative loop totals
+  therefore overcount what a persistent audience would yield; compare iterations, not
+  their sum, until persistent market state lands.
+
 ## Schedule experiments
 
 `noise_schedule.py` exposes six presets and exact per-iteration rung probabilities:

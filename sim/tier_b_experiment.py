@@ -25,10 +25,12 @@ from typing import Any, Callable, Mapping
 
 try:  # package import in tests; direct import when run as `python sim/...py`
     from .llm_client import LLMConfig, LLMError, StructuredLLM
+    from .market_v2_adapter import MarketV2AdapterError, MarketV2Backend
     from .noise_schedule import PRESETS, NoiseSchedule
     from .tier_b_market import SIM_ROOT, TierBError, _load_world, simulate, validate_spec
 except ImportError:  # pragma: no cover - direct-script path
     from llm_client import LLMConfig, LLMError, StructuredLLM
+    from market_v2_adapter import MarketV2AdapterError, MarketV2Backend
     from noise_schedule import PRESETS, NoiseSchedule
     from tier_b_market import SIM_ROOT, TierBError, _load_world, simulate, validate_spec
 
@@ -41,7 +43,84 @@ class ExperimentError(RuntimeError):
     pass
 
 
-def _design_schema() -> dict[str, Any]:
+class LegacyMarketBackend:
+    """The loop's default market: the original Tier-B hidden-persona engine,
+    wrapped behind the same three operations the v2 backend exposes so the
+    loop body is market-agnostic. Behavior is byte-identical to the direct
+    calls it replaces."""
+
+    name = "legacy"
+    design_instructions = ""
+
+    def __init__(
+        self, *, world_number: int, judge: StructuredLLM, cache_dir: Path,
+        batch_pairs: int, concurrency: int,
+    ) -> None:
+        self.world_number = world_number
+        self.judge = judge
+        self.cache_dir = cache_dir
+        self.batch_pairs = batch_pairs
+        self.concurrency = concurrency
+
+    def validate(self, spec: Mapping[str, Any], platform: Mapping[str, Any]) -> dict[str, Any]:
+        return validate_spec(spec, platform)
+
+    def simulate(
+        self, *, seed: int, raw_spec: Mapping[str, Any], expected: bool = False
+    ) -> dict[str, Any]:
+        return simulate(
+            world_number=self.world_number,
+            seed=seed,
+            raw_spec=raw_spec,
+            judge=self.judge,
+            cache_dir=self.cache_dir / "tier-b",
+            batch_pairs=self.batch_pairs,
+            concurrency=self.concurrency,
+            expected=expected,
+        )
+
+
+def _design_schema(*, include_timeline: bool = False) -> dict[str, Any]:
+    ad_properties: dict[str, Any] = {
+        "id": {"type": "string"},
+        "headline": {"type": "string"},
+        "message": {"type": "string"},
+        "visual": {"type": "string"},
+        "call_to_action": {"type": "string"},
+        "proof_tag": {
+            "type": "string",
+            "enum": ["benefit", "outcome", "count", "story"],
+        },
+        "named_story": {"type": "boolean"},
+        "demo": {"type": "boolean"},
+    }
+    ad_required = [
+        "id",
+        "headline",
+        "message",
+        "visual",
+        "call_to_action",
+        "proof_tag",
+        "named_story",
+        "demo",
+    ]
+    if include_timeline:
+        ad_properties["duration_seconds"] = {"type": "number"}
+        ad_properties["scenes"] = {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "start_second": {"type": "number"},
+                    "end_second": {"type": "number"},
+                    "content": {"type": "string"},
+                },
+                "required": ["start_second", "end_second", "content"],
+            },
+        }
+        ad_required += ["duration_seconds", "scenes"]
     return {
         "type": "object",
         "additionalProperties": False,
@@ -54,29 +133,8 @@ def _design_schema() -> dict[str, Any]:
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "properties": {
-                        "id": {"type": "string"},
-                        "headline": {"type": "string"},
-                        "message": {"type": "string"},
-                        "visual": {"type": "string"},
-                        "call_to_action": {"type": "string"},
-                        "proof_tag": {
-                            "type": "string",
-                            "enum": ["benefit", "outcome", "count", "story"],
-                        },
-                        "named_story": {"type": "boolean"},
-                        "demo": {"type": "boolean"},
-                    },
-                    "required": [
-                        "id",
-                        "headline",
-                        "message",
-                        "visual",
-                        "call_to_action",
-                        "proof_tag",
-                        "named_story",
-                        "demo",
-                    ],
+                    "properties": ad_properties,
+                    "required": ad_required,
                 },
             },
             "campaigns": {
@@ -212,6 +270,7 @@ def _seed_batch_spec(
     landing_page: str,
     platform: Mapping[str, Any],
     budget: float,
+    validate: Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]] = validate_spec,
 ) -> dict[str, Any] | None:
     """Extract the fixed batch-1 spec embedded in the seed policy, if present.
 
@@ -243,14 +302,15 @@ def _seed_batch_spec(
         "ads": [dict(ad) for ad in payload["ads"]],
         "campaigns": [dict(c) for c in campaigns],
     }
-    return validate_spec(spec, platform)
+    return validate(spec, platform)
 
 
 def _design_prompt(
     *, iteration: int, policy_version: int, policy: str, goal: str,
     landing_page: str, platform: Mapping[str, Any], budget: float,
-    history: list[dict[str, Any]],
+    history: list[dict[str, Any]], extra_instructions: str = "",
 ) -> str:
+    extra_block = f"\n{extra_instructions.strip()}\n" if extra_instructions.strip() else ""
     return f"""You are the advertising experiment designer inside a hidden-market adaptation test.
 
 You do not know the hidden personas. Infer them only from prior aggregate receipts. Design the next batch under the current policy. Return three genuinely different, publication-ready ads with exact headline, complete primary message, CTA, and a concrete visual/video description. The hidden judge evaluates the actual words and visual description; metadata labels have no effect.
@@ -258,6 +318,7 @@ You do not know the hidden personas. Infer them only from prior aggregate receip
 Use only information supplied inside this prompt. Do not use tools, inspect local files, or seek hidden world, judge, cache, generator, seed, or oracle data.
 
 Use the current policy faithfully. Preserve exploration coverage when evidence is thin. Do not optimize signup proxies over settled purchases. Compare prior results only within matched objective/audience cells. Campaign budgets must sum to exactly {budget:.2f}. Every campaign must list the IDs of its eligible ads under ad_ids, and every returned ad must be eligible in at least one campaign. Fixed campaigns use one audience and an empty audiences array. Auto campaigns use an empty audience string and at least two audiences. Available audiences and CPMs are in the platform JSON.
+{extra_block}
 
 GOAL: {goal}
 ITERATION: {iteration}
@@ -284,6 +345,7 @@ POLICY VERSION: v{policy_version}
 def _normalize_design(
     payload: Any, *, iteration: int, policy_version: int, landing_page: str,
     platform: Mapping[str, Any], budget: float,
+    validate: Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]] = validate_spec,
 ) -> tuple[str, dict[str, Any]]:
     if not isinstance(payload, Mapping):
         raise ExperimentError("design agent returned a non-object")
@@ -297,19 +359,23 @@ def _normalize_design(
     for index, ad in enumerate(ads):
         if not isinstance(ad, Mapping):
             raise ExperimentError("design agent returned an invalid ad")
-        normalized_ads.append(
-            {
-                "id": str(ad.get("id") or f"it{iteration}-ad{index + 1}"),
-                "headline": str(ad.get("headline") or "").strip(),
-                "message": str(ad.get("message") or "").strip(),
-                "visual": str(ad.get("visual") or "").strip(),
-                "call_to_action": str(ad.get("call_to_action") or "LEARN_MORE").strip(),
-                # Tags are recorded for coverage analysis but hidden from the Tier-B judge.
-                "proof": str(ad.get("proof_tag") or "benefit"),
-                "named_story": bool(ad.get("named_story")),
-                "demo": bool(ad.get("demo")),
-            }
-        )
+        normalized = {
+            "id": str(ad.get("id") or f"it{iteration}-ad{index + 1}"),
+            "headline": str(ad.get("headline") or "").strip(),
+            "message": str(ad.get("message") or "").strip(),
+            "visual": str(ad.get("visual") or "").strip(),
+            "call_to_action": str(ad.get("call_to_action") or "LEARN_MORE").strip(),
+            # Tags are recorded for coverage analysis but hidden from the Tier-B judge.
+            "proof": str(ad.get("proof_tag") or "benefit"),
+            "named_story": bool(ad.get("named_story")),
+            "demo": bool(ad.get("demo")),
+        }
+        # Scene timelines pass through untouched; the market backend validates them.
+        if ad.get("duration_seconds") is not None:
+            normalized["duration_seconds"] = ad["duration_seconds"]
+        if ad.get("scenes"):
+            normalized["scenes"] = ad["scenes"]
+        normalized_ads.append(normalized)
     ad_ids = [ad["id"] for ad in normalized_ads]
     if len(set(ad_ids)) != len(ad_ids):
         raise ExperimentError("design agent returned duplicate ad ids")
@@ -366,7 +432,7 @@ def _normalize_design(
         "ads": normalized_ads,
         "campaigns": normalized_campaigns,
     }
-    return str(payload.get("design_thesis") or "").strip(), validate_spec(spec, platform)
+    return str(payload.get("design_thesis") or "").strip(), validate(spec, platform)
 
 
 def _complete_validated(
@@ -510,10 +576,31 @@ def run_experiment(
     goal: str, landing_page: str, seed_policy: str, schedule: NoiseSchedule,
     schedule_name: str, judge: StructuredLLM, agent: StructuredLLM,
     cache_dir: Path, output_dir: Path, judge_batch_pairs: int,
-    judge_concurrency: int,
+    judge_concurrency: int, market_backend: Any | None = None,
 ) -> dict[str, Any]:
     if iterations < 1 or budget <= 0:
         raise ExperimentError("iterations and budget must be positive")
+    if market_backend is None:
+        market_backend = LegacyMarketBackend(
+            world_number=world_number,
+            judge=judge,
+            cache_dir=cache_dir,
+            batch_pairs=judge_batch_pairs,
+            concurrency=judge_concurrency,
+        )
+
+    def _checked_validate(
+        spec: Mapping[str, Any], validation_platform: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        # Adapter validation errors become ExperimentError so the design retry
+        # loop can feed the exact rejection back to the agent; legacy TierBError
+        # behavior is unchanged.
+        try:
+            return market_backend.validate(spec, validation_platform)
+        except MarketV2AdapterError as exc:
+            raise ExperimentError(str(exc)) from exc
+
+    design_schema = _design_schema(include_timeline=market_backend.name == "v2")
     _, platform = _load_world(world_number)
     operator = SEMANTIC_GRADIENT_PATH.read_text(encoding="utf-8")
     history: list[dict[str, Any]] = []
@@ -526,7 +613,8 @@ def run_experiment(
     for iteration in range(1, iterations + 1):
         seed_spec = (
             _seed_batch_spec(
-                seed_policy, landing_page=landing_page, platform=platform, budget=budget
+                seed_policy, landing_page=landing_page, platform=platform, budget=budget,
+                validate=_checked_validate,
             )
             if iteration == 1
             else None
@@ -546,8 +634,9 @@ def run_experiment(
                     platform=platform,
                     budget=budget,
                     history=history,
+                    extra_instructions=market_backend.design_instructions,
                 ),
-                schema=_design_schema(),
+                schema=design_schema,
                 cache_namespace="tier-b-design",
                 validate=lambda payload: _normalize_design(
                     payload,
@@ -556,18 +645,14 @@ def run_experiment(
                     landing_page=landing_page,
                     platform=platform,
                     budget=budget,
+                    validate=_checked_validate,
                 ),
             )
         if first_spec is None:
             first_spec = spec
-        result = simulate(
-            world_number=world_number,
+        result = market_backend.simulate(
             seed=world_number * 100_000 + run_seed * 100 + iteration,
             raw_spec=spec,
-            judge=judge,
-            cache_dir=cache_dir / "tier-b",
-            batch_pairs=judge_batch_pairs,
-            concurrency=judge_concurrency,
         )
         record = {
             "iteration": iteration,
@@ -633,9 +718,10 @@ def run_experiment(
             platform=platform,
             budget=budget,
             history=history,
+            extra_instructions=market_backend.design_instructions,
         )
         + "\nThis is a held-out final evaluation design. Do not revise the policy.",
-        schema=_design_schema(),
+        schema=design_schema,
         cache_namespace="tier-b-final-design",
         validate=lambda payload: _normalize_design(
             payload,
@@ -644,45 +730,32 @@ def run_experiment(
             landing_page=landing_page,
             platform=platform,
             budget=budget,
+            validate=_checked_validate,
         ),
     )
-    initial_expected = simulate(
-        world_number=world_number,
+    initial_expected = market_backend.simulate(
         seed=world_number * 100_000 + run_seed * 100 + 90,
         raw_spec=first_spec,
-        judge=judge,
-        cache_dir=cache_dir / "tier-b",
-        batch_pairs=judge_batch_pairs,
-        concurrency=judge_concurrency,
         expected=True,
     )
-    final_expected = simulate(
-        world_number=world_number,
+    final_expected = market_backend.simulate(
         seed=world_number * 100_000 + run_seed * 100 + 90,
         raw_spec=final_spec,
-        judge=judge,
-        cache_dir=cache_dir / "tier-b",
-        batch_pairs=judge_batch_pairs,
-        concurrency=judge_concurrency,
         expected=True,
     )
     baseline_results = []
     for iteration in range(1, iterations + 1):
         baseline_spec = {**first_spec, "iteration": iteration, "policy": "frozen-v0"}
         baseline_results.append(
-            simulate(
-                world_number=world_number,
+            market_backend.simulate(
                 seed=world_number * 100_000 + run_seed * 100 + iteration,
                 raw_spec=baseline_spec,
-                judge=judge,
-                cache_dir=cache_dir / "tier-b",
-                batch_pairs=judge_batch_pairs,
-                concurrency=judge_concurrency,
             )
         )
     summary = {
         "schema": "takyon.tier-b-experiment.v2",
         "world": world_number,
+        "market": market_backend.name,
         "run_seed": run_seed,
         "iterations": iterations,
         "budget_per_iteration": budget,
@@ -782,6 +855,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--design-scale", type=float)
     parser.add_argument("--judge-batch-pairs", type=int, default=10)
     parser.add_argument("--judge-concurrency", type=int, default=3)
+    parser.add_argument(
+        "--market",
+        choices=("legacy", "v2"),
+        default="legacy",
+        help=(
+            "Market engine for receipts. legacy: original Tier-B hidden-persona "
+            "market. v2: population-market v2 with a frozen generated world "
+            "(requires --population-model; audiences reset every iteration — "
+            "no cross-iteration frequency, fatigue, or purchase memory)."
+        ),
+    )
+    parser.add_argument(
+        "--population-model",
+        type=Path,
+        help=(
+            "Frozen population-model.json for --market v2. Required in v2 so a "
+            "run can never silently fall back to a default world."
+        ),
+    )
+    parser.add_argument("--human-variation-model", type=Path)
+    parser.add_argument("--subscription-economics", type=Path)
+    parser.add_argument("--choice-calibration", type=Path)
+    parser.add_argument(
+        "--market-periods",
+        type=int,
+        default=8,
+        help="v2 delivery periods per iteration; campaign budgets are per period.",
+    )
     parser.add_argument("--cache-dir", type=Path, default=SIM_ROOT / "cache")
     parser.add_argument("--output-root", type=Path, default=SIM_ROOT / "runs" / "tier-b")
     parser.add_argument("--timeout", type=int, default=900)
@@ -820,6 +921,24 @@ def main(argv: list[str] | None = None) -> int:
             )
         judge = StructuredLLM(judge_config, response_cache_dir=response_cache)
         agent = StructuredLLM(agent_config, response_cache_dir=response_cache)
+        market_backend = None
+        if args.market == "v2":
+            if not args.population_model:
+                raise ExperimentError(
+                    "--market v2 requires an explicit --population-model; pass "
+                    "sim/population-model-v3.json to use the static v3 model"
+                )
+            market_backend = MarketV2Backend(
+                world_number=args.world,
+                judge=judge,
+                budget=args.budget,
+                periods=args.market_periods,
+                concurrency=args.judge_concurrency,
+                model_path=args.population_model,
+                variation_path=args.human_variation_model,
+                economics_path=args.subscription_economics,
+                choice_calibration_path=args.choice_calibration,
+            )
         summary = run_experiment(
             world_number=args.world,
             run_seed=args.run_seed,
@@ -836,12 +955,14 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=output_dir,
             judge_batch_pairs=args.judge_batch_pairs,
             judge_concurrency=args.judge_concurrency,
+            market_backend=market_backend,
         )
     except (
         OSError,
         json.JSONDecodeError,
         LLMError,
         TierBError,
+        MarketV2AdapterError,
         ExperimentError,
         ValueError,
     ) as exc:

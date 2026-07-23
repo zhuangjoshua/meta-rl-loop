@@ -27,6 +27,24 @@ Status: the hierarchical population-market v2 and its full-information policy
 oracle are implemented alongside the original Tier-B harness. The older sections
 below remain the audit backlog for features not yet migrated.
 
+## Semantic-gradient loop on population-market v2
+
+- Added `sim/market_v2_adapter.py`: the Tier-B loop's market seam for
+  population-market v2. Pure translation — loop specs become v2 policies,
+  receipts come from the engine's own `sampled_replay`/expected results in the
+  legacy `rows/funnel/spend/revenue/roas` shape. The engine itself is untouched.
+- `sim/tier_b_experiment.py` gained `--market {legacy,v2}` (default legacy,
+  byte-identical behavior) with `--population-model` required in v2, plus
+  `--human-variation-model`, `--subscription-economics`, `--choice-calibration`,
+  and `--market-periods`. The v2 design schema and prompt require ad scene
+  timelines; adapter validation errors feed the design retry loop.
+- v2 receipts carry `periods_independent: true` and `revenue_definition:
+  "first_payment"`; audiences still reset each iteration (persistent
+  cross-iteration market state remains backlog section 2).
+- Added `sim/test_market_v2_adapter.py` (8 tests): adapter output equals a
+  direct engine call, receipts stay hidden-field-free, timelines synthesize
+  only when absent, wrong budgets fail closed, legacy default path unchanged.
+
 ## Live verification record
 
 - 2026-07-22: first verified live end-to-end generation,
