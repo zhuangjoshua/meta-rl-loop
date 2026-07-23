@@ -887,7 +887,16 @@ def main(argv: list[str] | None = None) -> int:
             "run can never silently fall back to a default world."
         ),
     )
-    parser.add_argument("--human-variation-model", type=Path)
+    parser.add_argument(
+        "--human-variation-model",
+        type=Path,
+        default=SIM_ROOT / "human-variation-core-v1.json",
+        help=(
+            "Human attention/interpretation mixture for --market v2. Defaults to the "
+            "canonical tracked model; running without one degrades the market to a "
+            "single placeholder profile."
+        ),
+    )
     parser.add_argument("--subscription-economics", type=Path)
     parser.add_argument("--choice-calibration", type=Path)
     parser.add_argument(
