@@ -125,15 +125,15 @@ below remain the audit backlog for features not yet migrated.
 
 ## 1. Replace the degenerate fixed-action oracle
 
-- Rename the current result `fixed_action_oracle`; it searches individual
-  creative/objective/audience cells and is not a policy benchmark.
-- Remove the hard-coded `$199.98 / $0.01 / $0.01` allocation.
-- Add a `full_info_policy` benchmark that produces a complete policy through
-  the same policy-to-three-ads materializer used by the hidden-information
-  learner.
+RESOLVED: `sim/tier_b_full_info.py` (the legacy oracle with the hard-coded
+`$199.98 / $0.01 / $0.01` allocation) is deleted. `sim/full_info_policy_v2.py`
+is the full-information policy benchmark; it produces complete three-ad
+policies on the adaptive market. Still open from this section:
+
 - Evaluate policies across multiple worlds and multiple periods, not one
   stationary world and one cached judge surface.
-- Report the single-cell oracle separately as a diagnostic ceiling.
+- Report a single-cell diagnostic ceiling separately if one is ever needed;
+  no such oracle exists any longer.
 
 ## 2. Prevent single-cell collapse
 

@@ -67,6 +67,13 @@ The output is `sim/generated-populations/formflow-seed-1/`. Reusing the same fin
 `population-model.json` freezes the market. Regenerating with another seed creates a different
 synthetic market; it is not another replay of the same world.
 
+The seed is a label, not a sampling seed. It enters the architect and auditor prompts as text and
+namespaces the response cache; it is never passed to the model as an RNG seed. Rerunning with the
+same seed reproduces a world only because the cached model responses replay. With a cleared or
+absent cache, the same seed can legitimately produce a different world. The unit of
+reproducibility is therefore the frozen `population-model.json` and its archived run directory,
+not the seed number.
+
 To generate a changing set of hidden worlds from the same business:
 
 ```bash

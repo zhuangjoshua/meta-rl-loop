@@ -698,7 +698,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--business-spec", type=Path, required=True)
     parser.add_argument("--platform", type=Path, default=DEFAULT_PLATFORM_PATH)
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help=(
+            "World label and response-cache namespace, not an RNG seed. Reruns replay "
+            "cached model responses; without the cache the same seed can produce a "
+            "different world. Archive the frozen population-model.json to reproduce."
+        ),
+    )
     parser.add_argument("--provider", choices=("codex", "openai"), default="codex")
     parser.add_argument("--model", default="gpt-5.6-sol")
     parser.add_argument("--auditor-model", default="")
