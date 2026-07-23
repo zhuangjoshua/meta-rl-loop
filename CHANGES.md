@@ -27,6 +27,36 @@ Status: the hierarchical population-market v2 and its full-information policy
 oracle are implemented alongside the original Tier-B harness. The older sections
 below remain the audit backlog for features not yet migrated.
 
+## Live verification record
+
+- 2026-07-22: first verified live end-to-end generation,
+  `sim/generated-populations/formflow-live-seed1-2026-07-22/` (gitignored; archive the run
+  directory to preserve it). Architect 149s and auditor 158s live `gpt-5.6-sol` calls via the
+  codex provider; 10 parents with every market relationship exactly once, 20 children, 43
+  decision strata, parent shares sum to 1.0; audit verdict `repaired` with 4 substantive issues
+  fixed; frozen model reloads through the market loader.
+- Two failed live attempts the same day are preserved beside it as
+  `...-failed-attempt-1/-2`. Attempt 1: architect draft duplicated
+  `secondary_direct_buyer` and omitted `core_direct_buyer`; the auditor, never shown the
+  validation error, repaired it into a different coverage violation. Attempt 2: with error
+  feedback and a bounded repair pass, the auditor still produced three duplicated and three
+  missing relationships. Root cause closed by moving relationship coverage into the output
+  schema (populations keyed by relationship, all ten required), after which generation
+  succeeded with no repair pass.
+- An earlier live failure attributed to a six-minute `gpt-5.6-sol` stall is more plausibly the
+  broken local `@openai/codex` install found on this machine (missing mac-ARM vendor binary;
+  the CLI died with spawn ENOENT). Reinstalling the package fixed it.
+- Earlier claims of a completed live v4 generation predate this record and have no committed
+  artifacts; treat them as unverified.
+- Still live-unproven: multi-world batch generation (`--world-count`) and the OpenAI-compatible
+  provider path. All 26 tests pass with stub LLM clients (16 added on this branch alongside the
+  10 pre-existing Tier-B tests).
+- Corrections to the 2026-07-22 co-founder brief: it lists 7 of the 10 microprofiles in
+  `sim/human-variation-core-v1.json`; frequency/fatigue terms apply only to the attention
+  stages plus trust terms on click and signup, not to every funnel stage; purchase
+  deduplication applies to purchases only, and audience pools persist within one evaluation
+  call, not across separate policy batches.
+
 ## Implemented population-market v2
 
 - Added `sim/population-model-v2.json`: ten parent populations with frozen
