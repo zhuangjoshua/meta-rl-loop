@@ -221,24 +221,29 @@ def _population_schema(platform: Mapping[str, Any]) -> dict[str, Any]:
         "properties": {
             "id": {"type": "string"},
             "label": {"type": "string"},
-            "market_relationship": {"type": "string", "enum": list(RELATIONSHIPS)},
             "share": {"type": "number"},
             "parent_constitution": {"type": "string"},
             "delivery": delivery,
             "children": {"type": "array", "minItems": 2, "maxItems": 5, "items": child},
         },
         "required": [
-            "id", "label", "market_relationship", "share", "parent_constitution",
+            "id", "label", "share", "parent_constitution",
             "delivery", "children",
         ],
     }
+    # Populations are keyed by market relationship, all ten required and no
+    # extras allowed, so schema conformance itself guarantees exactly-once
+    # relationship coverage; a model structurally cannot duplicate or omit one.
     return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "generation_thesis": {"type": "string"},
             "populations": {
-                "type": "array", "minItems": 10, "maxItems": 10, "items": parent,
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {relationship: parent for relationship in RELATIONSHIPS},
+                "required": list(RELATIONSHIPS),
             },
         },
         "required": ["generation_thesis", "populations"],
@@ -280,11 +285,11 @@ def _architect_prompt(
 The only business input is supplied below. Do not inspect or anticipate any ad. Generate a
 market once; it will be frozen before an advertising learner runs. Seed label: {seed}.
 
-Create exactly ten mutually exclusive parent populations, one for each required
-market_relationship enum. Instantiate every relationship with roles and situations relevant to
-this business and category. Structural relationships are reusable; the people, jobs,
-alternatives, needs, evidence requirements and objections must be specific to the supplied
-business.
+Create exactly ten mutually exclusive parent populations. The populations output object is
+keyed by market relationship; fill every one of its ten required keys with that relationship's
+parent population. Instantiate every relationship with roles and situations relevant to this
+business and category. Structural relationships are reusable; the people, jobs, alternatives,
+needs, evidence requirements and objections must be specific to the supplied business.
 
 Human realism requirements:
 - The market is not a list of people predisposed to buy. Include true nonbuyers, adjacent people,
@@ -339,9 +344,9 @@ def _auditor_prompt(
 You see the business, public platform and draft market only. You never see ads. Seed label:
 {seed}. Return a complete revised_generation even when the draft passes.
 {failure_block}
-Your revised_generation must contain exactly ten populations, one per market relationship,
-each relationship used exactly once: {", ".join(RELATIONSHIPS)}. When you merge, split,
-replace, or relabel populations, recount relationship coverage before answering.
+Your revised_generation populations object is keyed by market relationship; fill every one of
+its ten required keys with that relationship's revised parent population. When you merge,
+split, replace, or relabel populations, keep each parent under the correct relationship key.
 
 Reject or repair:
 - populations that are mostly positive descriptions of prospective customers;
@@ -370,6 +375,41 @@ easier to buy; make each person coherent.
 {json.dumps(draft, indent=2, ensure_ascii=False)}
 </draft_market_json>
 """
+
+
+def _generation_from_keyed(generation: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert the LLM-facing relationship-keyed populations object into the
+    internal list form carrying market_relationship. List-form input (tests,
+    archived drafts) passes through unchanged."""
+    populations = generation.get("populations")
+    if not isinstance(populations, Mapping):
+        return dict(generation)
+    ordered = []
+    for relationship in RELATIONSHIPS:
+        parent = populations.get(relationship)
+        if isinstance(parent, Mapping):
+            ordered.append({**parent, "market_relationship": relationship})
+    converted = dict(generation)
+    converted["populations"] = ordered
+    return converted
+
+
+def _keyed_from_generation(generation: Mapping[str, Any]) -> dict[str, Any]:
+    """Inverse of _generation_from_keyed, for embedding drafts in prompts using
+    the same shape the output schema demands."""
+    populations = generation.get("populations")
+    if not isinstance(populations, Sequence):
+        return dict(generation)
+    keyed: dict[str, Any] = {}
+    for parent in populations:
+        relationship = parent.get("market_relationship")
+        if isinstance(relationship, str):
+            keyed[relationship] = {
+                key: value for key, value in parent.items() if key != "market_relationship"
+            }
+    converted = dict(generation)
+    converted["populations"] = keyed
+    return converted
 
 
 def _valid_id(value: str) -> bool:
@@ -574,6 +614,7 @@ def generate_population(
         raise
     log.event("architect_completed", elapsed_seconds=time.monotonic() - started)
     _write_json(output_dir / "draft-generation.json", draft)
+    draft = _generation_from_keyed(draft)
     try:
         draft_model, draft_normalization, draft_report = normalize_and_validate_generation(
             draft, business=business, platform=platform, seed=seed,
@@ -601,7 +642,7 @@ def generate_population(
         business=business,
         platform=platform,
         seed=seed,
-        draft=draft_for_audit,
+        draft=_keyed_from_generation(draft_for_audit),
         validation_error=None if draft_report.get("valid") else draft_report.get("error"),
     )
     _write_text(output_dir / "auditor-prompt.txt", audit_prompt)
@@ -624,6 +665,7 @@ def generate_population(
             error="auditor omitted revised_generation",
         )
         raise PopulationGeneratorError("auditor omitted revised_generation")
+    revised = _generation_from_keyed(revised)
     try:
         final_model, final_normalization, final_report = normalize_and_validate_generation(
             revised, business=business, platform=platform, seed=seed,
@@ -638,7 +680,7 @@ def generate_population(
             business=business,
             platform=platform,
             seed=seed,
-            draft=revised,
+            draft=_keyed_from_generation(revised),
             validation_error=str(exc),
         )
         _write_text(output_dir / "auditor-repair-prompt.txt", repair_prompt)
@@ -664,6 +706,7 @@ def generate_population(
                 error="auditor repair omitted revised_generation",
             )
             raise PopulationGeneratorError("auditor repair omitted revised_generation")
+        revised = _generation_from_keyed(revised)
         try:
             final_model, final_normalization, final_report = normalize_and_validate_generation(
                 revised, business=business, platform=platform, seed=seed,
