@@ -324,13 +324,24 @@ Human realism requirements:
 
 def _auditor_prompt(
     *, business: Mapping[str, Any], platform: Mapping[str, Any], seed: int,
-    draft: Mapping[str, Any],
+    draft: Mapping[str, Any], validation_error: str | None = None,
 ) -> str:
     platform_view = _generation_platform_view(platform)
+    failure_block = ""
+    if validation_error:
+        failure_block = (
+            "\nThe draft market FAILED deterministic validation with this exact error:\n"
+            f"{validation_error}\n"
+            "Your revised_generation must fix this error without introducing another.\n"
+        )
     return f"""Audit and, when needed, repair this generated hidden advertising market.
 
 You see the business, public platform and draft market only. You never see ads. Seed label:
 {seed}. Return a complete revised_generation even when the draft passes.
+{failure_block}
+Your revised_generation must contain exactly ten populations, one per market relationship,
+each relationship used exactly once: {", ".join(RELATIONSHIPS)}. When you merge, split,
+replace, or relabel populations, recount relationship coverage before answering.
 
 Reject or repair:
 - populations that are mostly positive descriptions of prospective customers;
@@ -591,6 +602,7 @@ def generate_population(
         platform=platform,
         seed=seed,
         draft=draft_for_audit,
+        validation_error=None if draft_report.get("valid") else draft_report.get("error"),
     )
     _write_text(output_dir / "auditor-prompt.txt", audit_prompt)
     started = time.monotonic()
@@ -616,6 +628,52 @@ def generate_population(
         final_model, final_normalization, final_report = normalize_and_validate_generation(
             revised, business=business, platform=platform, seed=seed,
         )
+    except PopulationGeneratorError as exc:
+        # One bounded repair pass: re-audit the failed revision with the exact error.
+        log.event(
+            "final_validation_failed_repairing",
+            error_type=type(exc).__name__, error=str(exc),
+        )
+        repair_prompt = _auditor_prompt(
+            business=business,
+            platform=platform,
+            seed=seed,
+            draft=revised,
+            validation_error=str(exc),
+        )
+        _write_text(output_dir / "auditor-repair-prompt.txt", repair_prompt)
+        started = time.monotonic()
+        try:
+            audit = auditor.complete(
+                prompt=repair_prompt,
+                schema=_audit_schema(platform),
+                cache_namespace=f"adaptive-population-auditor-v1-seed-{seed}-repair-1",
+            )
+        except Exception as repair_exc:
+            log.event(
+                "run_failed", stage="auditor_repair",
+                error_type=type(repair_exc).__name__, error=str(repair_exc),
+            )
+            raise
+        log.event("auditor_repair_completed", elapsed_seconds=time.monotonic() - started)
+        _write_json(output_dir / "audit.json", audit)
+        revised = audit.get("revised_generation")
+        if not isinstance(revised, Mapping):
+            log.event(
+                "run_failed", stage="auditor_repair_output", error_type="PopulationGeneratorError",
+                error="auditor repair omitted revised_generation",
+            )
+            raise PopulationGeneratorError("auditor repair omitted revised_generation")
+        try:
+            final_model, final_normalization, final_report = normalize_and_validate_generation(
+                revised, business=business, platform=platform, seed=seed,
+            )
+        except Exception as final_exc:
+            log.event(
+                "run_failed", stage="final_validation",
+                error_type=type(final_exc).__name__, error=str(final_exc),
+            )
+            raise
     except Exception as exc:
         log.event("run_failed", stage="final_validation", error_type=type(exc).__name__, error=str(exc))
         raise
