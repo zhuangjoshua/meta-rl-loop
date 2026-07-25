@@ -3,14 +3,195 @@
 GOAL this policy serves: maximize settled ROAS (revenue / spend) for a $29/mo
 product ("Formflow"); purchases are the goal event.
 
-## Creative
-Run three video ads per batch. Declared angle families: benefit, outcome,
-count (adoption numbers), story (named customer). A demo variant (screen-
-recording of the product working) is an available production option.
+This policy is organized as three ownership sections — Media Buying, Ad Copy,
+Video Creative — plus shared Judgment. Each section states what it Owns and
+what state it Reads; a decision belongs to exactly one section.
 
-Starting slate — these three ads are the batch-1 incumbents. They are
-starting incumbents ONLY: replaceable through the standard
-champion/challenger process, no protected status.
+Blocks marked `[PROD-ONLY — DORMANT IN SIM]` are outside the simulator's
+action interface. Do not execute them, do not count their axes in coverage or
+experimentation, and do not rewrite them; they ride along frozen so this same
+policy can operate real Meta later without translation.
+
+## 1. Media Buying
+
+Owns: campaign objective, budget mode and split, audience posture, campaign
+count, which ads are eligible in which campaign (`ad_ids`), and the next
+buying action after evidence arrives.
+
+Reads: the goal, landing page, platform audiences and CPMs, prior receipts,
+and the current creative slate. Never hidden-market data.
+
+### Campaign slate
+
+The executable surface is: objectives `clicks`, `pageviews`, `leads`, `sales`;
+audiences `broad`, `interest_biztools`, `interest_niche`; modes `fixed` (one
+audience) and `auto` (platform allocates across at least two audiences);
+budgets summing to exactly $200 per batch, every ad funded somewhere.
+
+Initial slate (this is the batch-1 portfolio, and the default until evidence
+says otherwise):
+
+1. `pageviews_broad` — cheap qualified attention from the widest pool.
+2. `leads_broad` — tests whether optimizing for signups finds different people
+   than optimizing for attention.
+3. `sales_broad` — tests whether purchase optimization works at all on broad.
+4. `sales_biztools` — purchase optimization on the business-tools interest.
+5. `sales_niche` — purchase optimization on niche professional communities.
+
+`auto` mode is a declared budget-allocation family with no seat in the initial
+slate; the coverage plan owes it a funded taste once a fixed-audience
+incumbent exists to compare it against.
+
+Buying rules: keep destination, offer, and observation window aligned across
+the slate unless one of them is the explicit test axis; each challenger
+changes one axis only; a campaign profile that cannot be expressed in the
+executable surface is blocked, not approximated.
+
+[PROD-ONLY — DORMANT IN SIM]
+Execution boundary: MCP lane for account discovery, campaigns, ad sets,
+creatives, ads, previews, insights, activation, pause, updates; Graph lane for
+/advideos, image upload, custom conversions, dataset/pixel edges, event
+submission. Production slate shapes: traffic-link-clicks-abo, traffic-lpv-abo,
+leads-website-abo (requires a real measurable lead event),
+sales-website-abo (requires a verified sales event; value optimization only
+with a trustworthy value signal), matched-primary-cbo (CBO with at least two
+non-duplicate ad sets, mirrored in the matched ABO family; blocked until a
+defensible second audience exists). Global settings: Advantage+ placements;
+lowest cost without cap; default billing event; one consistent attribution
+setting; create paused unless live intent; encode type/objective/goal/budget
+mode/audience in object names; approved exclusions only. Measurement gate:
+traffic may run without a pixel (traffic metrics only); leads/sales/value
+require a working pixel or dataset and exact promoted-object references,
+otherwise block with the exact missing requirement; video requires uploaded,
+processing-complete assets; unqueryable objects block with the provider
+reason. Evaluation fallbacks when no business target exists: Link CTR good
+> 1.5%, CPC good < $2, CPM good < $15, CVR good > 1.5%, 7-day frequency good
+1.0-2.5, CPA good <= target, ROAS good >= 2.0; learning-phase spend concerns
+are `wait`, frequency > 3.0 with CTR decline is fatigue, Meta-versus-server
+attribution gaps are measurement problems first. Verdict to action: good ->
+scale gradually; watch -> wait or narrow one hypothesis; bad CTR/CPC after
+learning -> refresh creative; bad CPA/ROAS after learning -> pause; learning
+-> wait; attribution_gap -> fix measurement before structure.
+[END PROD-ONLY]
+
+## 2. Ad Copy
+
+Owns: headline, primary message, CTA, destination match, claims posture, and
+copy variants.
+
+Reads: verified product and offer truth from the landing page, prior copy
+artifacts and their receipts, and the creative route. Unsupported proof,
+results, testimonials, and numbers remain unavailable — every claim must be
+supported by the landing page.
+
+Declared copy-angle vocabulary (the coverage sweep works through these; an
+angle never funded is unknown, not bad):
+
+1. `direct-benefit-copy` — the clearest truthful statement of the offer, main
+   benefit, and next step. Use when one strong payoff is easy to understand.
+2. `problem-copy` — a specific pain or friction-led opening that pivots
+   quickly to the product as the way out. Sharp and recognizable, never
+   melodramatic.
+3. `proof-copy` — proof-first framing inside approved evidence: concrete
+   number, artifact, quote, or visible result, translated into what it means
+   for the buyer.
+4. `mechanism-copy` — how-it-works framing: the key difference, a short easy
+   sequence, tied to a useful result; legible, never documentation.
+5. `offer-copy` — the low-risk entry made obvious early: trial terms, easy
+   first action, truthful friction-removal; no fake urgency or scarcity.
+
+Copy rules for every treatment: the first line does the work — lead with the
+viewer's pain or payoff; one main idea per ad; concrete artifacts and numbers
+over adjectives; show the product doing the thing rather than claiming it;
+headline, message, and CTA read as one unit; state the low-commitment CTA;
+angles must be materially different, never synonym-only variants; if a seeded
+angle is unsupportable by the landing page, replace only that angle with the
+strongest truthful alternative and record why.
+
+## 3. Video Creative
+
+Owns: video concepts, opening hooks, scene sequences, demonstrations, pacing,
+overlays, CTA presentation, and format variants. In the sim an ad's video is
+its written scene timeline (duration and second-by-second scene content);
+consumers respond only to content plausibly seen before abandoning, so the
+first seconds must earn attention truthfully.
+
+Reads: approved copy, offer, proof, and prior creative observations. Separate
+observed performance from explanations inferred after the fact.
+
+Declared video-format vocabulary (same coverage discipline as copy angles):
+
+1. `ugc-video` — creator/customer-style: opens on a human moment or strong
+   first line, native to feed, product early, captions carry the story.
+2. `demo-video` — product on screen in the first shot; input -> action ->
+   result; the transformed state visually obvious.
+3. `founder-video` — an operator talking directly: strong point of view,
+   proof or product cutaways, what is different, clear invitation.
+4. `social-proof-video` — strongest quote or before/after first, anchored in
+   a real person or artifact, each shot adding confidence; shows what
+   improved.
+5. `explainer-video` — problem first, short visual logic chain, one concept
+   per beat, closes on value and next step.
+
+Format rules: the seed set must not be only one format; keep copy, offer,
+destination, and every non-tested dimension fixed when format is the test
+axis; one clear opening, one main body idea, a simple close; keep scenes
+moving — never make the viewer wait for the product, the proof, or the point;
+show the claim whenever possible instead of stating it.
+
+[PROD-ONLY — DORMANT IN SIM]
+Rendering and review: render approved specifications through the Render Video
+skill; review actual rendered output for technical integrity, script and
+claim match, CTA and disclosure match, and rights before launch; require a
+finished video artifact and thumbnail before Meta handoff; supply reviewed
+artifacts and variant metadata to the Operate Meta Ads MCP API skill.
+[END PROD-ONLY]
+
+## Coverage plan (control-first, three seats per batch)
+
+The production launch matrix (five copy angles on one control video, then
+four remaining formats on one control copy) cannot run in parallel here: the
+simulator executes exactly three ads per batch. Run the same matrix as a
+sequence. Batch 1 is the fixed anchor slate below, which already covers:
+direct-benefit-copy + demo-video (`ad_demo_workflow`), problem-copy +
+explainer-video (`ad_outcome_followup`), and proof-copy + social-proof-video
+(`ad_story_maya`; the old seed's `count` family — supported adoption
+numbers — is folded into proof-copy, not dropped). The anchor ads each vary
+both axes at once (a known batch-1 confound, accepted to keep the control
+slate identical across epochs); single-axis discipline begins at batch 2.
+From batch 2 onward, hold the incumbent-best execution unchanged as one seat
+and use the remaining seats to work through unpriced vocabulary values,
+starting with the pivot cell direct-benefit-copy + ugc-video (which is both
+sweeps' shared reference AND the owed taste of the mandatory ugc format),
+then the remaining owed copy angles on the control format (mechanism-copy,
+offer-copy), then the remaining owed format on the control copy
+(founder-video) — before refining among already-priced values. New copy or
+video enters as a challenger; the incumbent's exact text is never rewritten
+in the same batch as its challenger.
+
+## Judgment
+
+Judge only settled results. An ad or cell with no measurement is unknown, not
+bad. Never repeat an approach that measurably failed. Unreadable cells
+(starved or short-window) are evidence of nothing. Do not infer that a
+creative element caused performance unless the comparison isolated it; write
+a new challenger only when the last comparison was interpretable; give every
+challenger a fair delivery window before verdict. Keep the better value on a
+tested axis and replace only the weak axis. Treat landing-page mismatch and
+unsupported claims as validity failures, not experiments.
+
+## Process
+
+After each batch, the semantic gradient reads all receipts and revises this
+policy; a noise schedule picks the revision dose. Every batch's full receipts
+accumulate as evidence.
+
+## Starting slate — batch-1 incumbents
+
+These three ads are the batch-1 incumbents. They are starting incumbents
+ONLY: replaceable through the standard process, no protected status. They are
+byte-identical to the prior seed's slate so every epoch shares one control
+instrument.
 
 1. ad_demo_workflow (angle: benefit, demo: true).
    Headline: "Turn every client intake email into one clear workflow."
@@ -49,13 +230,6 @@ champion/challenger process, no protected status.
    of her intake link collecting a brief -> the reminder firing -> the
    status board -> closing quote card.
    CTA: Start your 14-day trial.
-
-Challenger copy rules: new copy enters as challenger variants and must
-lead with the viewer's pain in line one; show the product doing the thing
-rather than claiming it; carry one idea per ad; use concrete artifacts and
-numbers over adjectives; state the low-commitment CTA. Every claim must be
-supported by the landing page. Count remains a declared family with no
-seat — the coverage sweep owes it a funded taste in an early batch.
 
 ### Batch-1 spec (executable — the runner loads this block verbatim; keep
 ### it byte-consistent with the prose slate above)
@@ -103,19 +277,3 @@ seat — the coverage sweep owes it a funded taste in an early batch.
   ]
 }
 ```
-
-## Campaigns
-Standard cold-start portfolio per batch, $200 total: a pageviews campaign
-(broad), a leads campaign (broad), sales campaigns, and optionally an
-auto-budget sales campaign (platform allocates between audiences).
-Audiences available: broad, interest_biztools, interest_niche.
-
-## Judgment
-Judge only settled results. An ad/cell with no measurement is unknown, not
-bad. Never repeat an approach that measurably failed. Unreadable cells
-(starved/short-window) are evidence of nothing.
-
-## Process
-After each batch, the semantic gradient reads all receipts and revises this
-policy; a noise schedule picks the revision dose. Every batch's full receipts
-accumulate as evidence.

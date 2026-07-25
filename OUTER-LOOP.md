@@ -41,7 +41,7 @@ information, then write ONE large, justified update — the next version
 (v2, v3, …) — printing the update and its causal justification.
 
 **Before running any version: snapshot its exact text to
-`sim/audit/gradient-vN.md` and record its SHA-256 in `progress.md`.** A
+`sim/audit/gradient-e3-vN.md` (epoch-prefixed) and record its SHA-256 in `progress.md`.** A
 version that was never snapshotted must not be run.
 
 Run the next inner loop (fresh world) with the new version.
@@ -59,9 +59,9 @@ higher, the new version becomes the current best. Record BOTH numbers per
 version in `progress.md` — the ratio (selection metric) and the absolute
 held-out final ROAS (the objective's > 3 condition is judged on the absolute
 number, not the ratio). Reverted versions stay in the time-series as evidence.
-Current ledger under this metric: v1 = 1.671 (1.176 → 1.965), v2 = 3.275
-(1.312 → 4.298, current best), v3 = 3.003 (0.212 → 0.636, reverted —
-narrowly, on a very hard world).
+(Historical example of the metric, epoch 1: v1 = 1.671, v2 = 3.275, v3 =
+3.003 — closed history; see the Version bootstrap below for the live epoch's
+state.)
 
 Diagnose the BIG reason the gradient isn't producing meaningful updates — not
 surface tweaks. If context grows long without a gradient update, make one now.
@@ -78,7 +78,7 @@ pathology is discovered mid-loop. If something outside the semantic gradient
 appears broken, record it in `learnings.md` and work around it; if
 unrecoverable (rerun with the existing cache-purge tool, or regenerate the
 world), stop and ask. The only other writes are non-behavioral records —
-`progress.md`, `learnings.md`, and `sim/audit/gradient-vN.md` snapshots
+`progress.md`, `learnings.md`, and `sim/audit/gradient-e3-vN.md` snapshots
 (append-only records) — plus artifacts that runs and world generations produce
 on their own. This file (`OUTER-LOOP.md`) is operator-owned: the loop reads
 it and never edits it.
@@ -94,13 +94,12 @@ otherwise `learnings.md` is the sole log.
 
 ## Known context
 
-Gradient v1 baseline: 1.02 held-out (0.87 mean) on
-`formflow-live-seed1-2026-07-22`; v1 learned the market's #1 creative proof
-element blind but never touched targeting/budget allocation. Overnight
-2026-07-23: v2 (Purchase-Intent Concentration) scored 4.2982 held-out on
-`formflow-outer-6` and is current best; v3 reverted (0.64 on `formflow-outer-10`);
-v4 (Orthogonal Reach Triage) is authored but untested — world generation for
-it repeatedly failed on architect/auditor timeouts. Engine caveats that shape
+Closed-epoch history (context only, never selection input): epoch 1's v1
+learned the market's #1 creative proof element blind but never touched
+targeting/budget in 8 iterations; its v2 (Purchase-Intent Concentration,
+forced allocation decisions) was the first version to clear ROAS 3
+(4.2982 on `formflow-outer-6`). Epoch 2 (old seed, paused 2026-07-23) reached
+its own v3; its versions are archived in `sim/audit/epoch2/`. Engine caveats that shape
 diagnosis: audiences reset each iteration (no fatigue/depletion), the judge
 invalid-response purge lives in the adapter, and ROAS is first-month-payment
 only. All work stays local — no GitHub pushes, especially not
@@ -138,23 +137,33 @@ Hash a gradient version (first 12 hex characters are what `progress.md` records)
 shasum -a 256 ad-creative-stack/semantic-gradient.md
 ```
 
-Version bootstrap (operator reset, 2026-07-23): the loop restarts from v1.
-The working-tree file IS v1 (`1eb5bb38a139`, identical to the committed file;
-recoverable anytime with `git restore`). Overnight versions v2 and v3 have no
-surviving text (v2's 4.2982 run and v3's revert happened in a lost session;
-their scores remain in `progress.md` as history of a closed epoch). v4
-(`56c107e49de3`, never tested) is preserved at `sim/audit/gradient-v4.md` as
-reference material — its ideas may inform future versions, but it holds no
-selection status. The restart epoch begins by running v1 itself on a fresh world: that run's
-improvement ratio becomes v1's score and the epoch's opening bar (prior-epoch
-scores, including v1's old 1.671, are history and are never used for
-selection). The first new version authored after v1's post-mortem is judged
-against that fresh bar. The next world seed is 14 (seeds 1-13 are used or
-excluded per `progress.md`).
+Version bootstrap (EPOCH 3, new seed policy — operator reset, 2026-07-23
+afternoon): this epoch runs on the NEW seed policy — the merged
+production-shaped policy (three ownership sections, dormant PROD-ONLY blocks,
+sequenced coverage plan) now installed at `sim/seed-policy.md`
+(`4eb908330147`). The prior seed is kept for revert at
+`sim/seed-policy-original.md` (also in git history). Both seeds carry a
+byte-identical batch-1 anchor slate, so start scores remain comparable across
+the seed change; the policy prose from batch 2 onward differs, which is why
+the seed swap is an epoch boundary.
+
+The gradient restarts from v1 (`1eb5bb38a139`, the committed file — snapshot
+`sim/audit/gradient-v1.md`, the shared root of all epochs). Prior epochs are
+closed history in `progress.md`; their gradient texts are archived at
+`sim/audit/epoch1/` (the overnight epoch) and `sim/audit/epoch2/` (the paused
+epoch). THIS epoch snapshots its versions as `sim/audit/gradient-e3-vN.md`
+(numbered from e3-v2, since v1 is the shared root; a naming note at the end
+of `progress.md` maps this epoch's early ledger labels v5-v8 onto
+e3-v2..e3-v5). Epoch 3 begins by running v1 on a fresh
+world; that run's improvement ratio becomes v1's score and the epoch's
+opening bar; no prior-epoch score is ever used for selection. World seed 19
+was generated during the pause and may serve as this epoch's first world if
+its generation completed and validated; otherwise continue from seed 20
+(seeds 1-19 are used or excluded per `progress.md`).
 
 Where things live: the editable gradient is
 `ad-creative-stack/semantic-gradient.md`; version snapshots in
-`sim/audit/gradient-vN.md`. Results: newest dir under `sim/runs/tier-b/` —
+`sim/audit/gradient-e3-vN.md` for this epoch. Results: newest dir under `sim/runs/tier-b/` —
 `summary.json` (`held_out_expected.final_roas` is the score;
 `loop.roas_by_iteration` the trajectory), `lineage.json` (theses/rungs),
 `evidence.json` (ads + receipts). Hidden info (post-mortem only): the world's
